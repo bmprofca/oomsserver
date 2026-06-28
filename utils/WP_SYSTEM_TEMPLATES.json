@@ -1,0 +1,124 @@
+[
+    {
+        "type": "payment reminder",
+        "template_name": "payment_reminder",
+        "template": {
+            "name": "payment_reminder",
+            "category": "UTILITY",
+            "language": "en",
+            "components": [
+                {
+                    "type": "HEADER",
+                    "format": "IMAGE",
+                    "example": {
+                        "header_handle": [
+                            "{BASE_DOMAIN}/media/wp_system/payment-reminder-1.jpg"
+                        ]
+                    }
+                },
+                {
+                    "type": "BODY",
+                    "text": "Dear *{{1}}*,\n\nKindly clear your due of *Rs. {{2}}* to  *{{3}}* as soon as possible.\n\nThanks and Regards\nTeam *{{4}}* your Compliance Partner",
+                    "example": {
+                        "body_text": [
+                            [
+                                "{{name}}",
+                                "{{balance}}",
+                                "{{branch_name}}",
+                                "{{branch_name}}"
+                            ]
+                        ]
+                    }
+                }
+            ]
+        },
+        "example": [
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {
+                    "header_handle": [
+                        "{BASE_DOMAIN}/media/wp_system/payment-reminder-1.jpg"
+                    ]
+                }
+            },
+            {
+                "type": "BODY",
+                "text": "Dear *{{1}}*,\n\nKindly clear your due of *Rs. {{2}}* to  *{{3}}* as soon as possible.\n\nThanks and Regards\nTeam *{{4}}* your Compliance Partner",
+                "example": {
+                    "body_text": [
+                        [
+                            "John Doe",
+                            "10000",
+                            "OneSaaS",
+                            "OneSaaS"
+                        ]
+                    ]
+                }
+            }
+        ]
+    },
+    {
+        "type": "task create",
+        "template_name": "task_create",
+        "template": {
+            "name": "task_create",
+            "category": "UTILITY",
+            "language": "en",
+            "components": [
+                {
+                    "type": "HEADER",
+                    "format": "IMAGE",
+                    "example": {
+                        "header_handle": [
+                            "{BASE_DOMAIN}/media/wp_system/task-create-1.png"
+                        ]
+                    }
+                },
+                {
+                    "type": "BODY",
+                    "text": "Dear *{{1}}*,\n\nYour task for *{{2}}* with estimated cost of *Rs. {{3}}* Created Successfully, Created by *{{4}}* due date *{{5}}*.\n\nThanks and Regards \nTeam *{{6}}* \n*Your Compliance Partner*\n",
+                    "example": {
+                        "body_text": [
+                            [
+                                "{{name}}",
+                                "{{service_name}}",
+                                "{{fees}}",
+                                "{{created_by}}",
+                                "{{due_date}}",
+                                "{{branch_name}}"
+                            ]
+                        ]
+                    }
+                }
+            ]
+        },
+        "example": [
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {
+                    "header_handle": [
+                        "{BASE_DOMAIN}/media/wp_system/task-create-1.png"
+                    ]
+                }
+            },
+            {
+                "type": "BODY",
+                "text": "Dear *{{1}}*,\n\nYour task for *{{2}}* with estimated cost of *Rs. {{3}}* Created Successfully, Created by *{{4}}* due date *{{5}}*.\n\nThanks and Regards \nTeam *{{6}}* \n*Your Compliance Partner*\n",
+                "example": {
+                    "body_text": [
+                        [
+                            "John Doe",
+                            "GST Registration",
+                            "3000",
+                            "John Doe",
+                            "21-12-2026",
+                            "OneSaaS"
+                        ]
+                    ]
+                }
+            }
+        ]
+    }
+]
