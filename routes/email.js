@@ -556,9 +556,6 @@ async function processDueBroadcasts() {
         const seconds = String(now.getSeconds()).padStart(2, '0');
         const currentIST = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
         
-        // Always log the check (even when no broadcasts)
-        console.log("🔍 Checking for due broadcasts at (IST):", currentIST);
-        
         // Get scheduled broadcasts that are due
         const [rows] = await pool.query(
             `SELECT branch_id, broadcast_id, scheduled_at, broadcast_name, daily_limit
@@ -572,8 +569,6 @@ async function processDueBroadcasts() {
         );
         
         if (rows.length === 0) {
-            // Always log when no broadcasts found
-            console.log(`📭 No due broadcasts found at ${currentIST}`);
             return;
         }
         
@@ -2231,16 +2226,8 @@ let schedulerInterval = null;
  * Start the automatic scheduler that processes due broadcasts every minute
  */
 function startBroadcastScheduler() {
-    console.log("=".repeat(50));
-    console.log("📧 EMAIL BROADCAST SCHEDULER STARTED");
-    console.log(`   Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
-    console.log(`   Current time: ${new Date().toLocaleString()}`);
-    console.log("   Checking for due broadcasts every 60 seconds");
-    console.log("=".repeat(50));
-    
     // Run immediately on startup (after 5 seconds to ensure DB connection)
     setTimeout(async () => {
-        console.log("🔍 Running initial broadcast check...");
         try {
             await processDueBroadcasts();
         } catch (err) {
@@ -2256,8 +2243,6 @@ function startBroadcastScheduler() {
     // In startBroadcastScheduler function, replace the setInterval with:
 schedulerInterval = setInterval(async () => {
     try {
-        const now = new Date();
-        console.log(`⏰ Scheduler tick at: ${now.toLocaleString()}`);
         await processDueBroadcasts();
     } catch (error) {
         console.error("Broadcast scheduler error:", error);
@@ -2269,7 +2254,6 @@ startBroadcastScheduler();
 
 // Handle graceful shutdown
 process.on('SIGTERM', () => {
-    console.log('Received SIGTERM, stopping broadcast scheduler...');
     if (schedulerInterval) {
         clearInterval(schedulerInterval);
     }
@@ -2277,7 +2261,6 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
-    console.log('Received SIGINT, stopping broadcast scheduler...');
     if (schedulerInterval) {
         clearInterval(schedulerInterval);
     }

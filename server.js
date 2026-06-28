@@ -77,7 +77,9 @@ const WsIo = setupSocketIO(server);
 
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    const accessUrl = process.env.BASE_DOMAIN || `http://localhost:${PORT}`;
+    console.log("OOMS API started");
+    console.log(`Access: ${accessUrl}`);
     generateDatabaseContext();
     startEmailBroadcastCron();
     startSmsBroadcastCron();

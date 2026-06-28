@@ -7,8 +7,6 @@ import fs from "fs";
  */
 export async function generateDatabaseContext() {
     try {
-        console.log('📊 Generating database context...');
-
         // Get database name from connection
         const [dbInfo] = await pool.query('SELECT DATABASE() as db_name');
         const databaseName = dbInfo[0].db_name;
@@ -141,9 +139,6 @@ export async function generateDatabaseContext() {
         // Save to file
         const outputPath = './database-context.json';
         fs.writeFileSync(outputPath, JSON.stringify(context, null, 2), 'utf8');
-
-        console.log(`✅ Database context saved to ${outputPath}`);
-        console.log(`   - ${Object.keys(context.tables).length} tables analyzed`);
 
         return { success: true, path: outputPath, tableCount: Object.keys(context.tables).length };
     } catch (error) {

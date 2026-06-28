@@ -267,9 +267,6 @@ function isMatchingWeekdayOfMonth(year, month, day, scheduleConfig) {
  * Process all groups that are scheduled to run at current time
  */
 async function processScheduledGroups() {
-    const now = new Date();
-    console.log(`[Scheduler] Running at ${now.toLocaleString()}`);
-    
     try {
         // Get all active groups
         const [groups] = await pool.query(
@@ -278,15 +275,11 @@ async function processScheduledGroups() {
              WHERE is_active = 1`
         );
         
-        console.log(`[Scheduler] Found ${groups.length} active groups`);
-        
         for (const group of groups) {
             const scheduleConfig = parseJSON(group.schedule_config, {});
             
             // Check if this group should run now
             if (shouldRunNow(group.schedule_type, scheduleConfig)) {
-                console.log(`[Scheduler] Processing group: ${group.group_id} (${group.schedule_type})`);
-                
                 // Process in background without waiting
                 processAutopayGroup(group.group_id, group.branch_id).catch(err => {
                     console.error(`[Scheduler] Error processing group ${group.group_id}:`, err);
@@ -1000,11 +993,8 @@ router.get("/stats", auth, validateBranch, async (req, res) => {
  */
 function initScheduler() {
     if (schedulerInitialized) {
-        console.log("[Scheduler] Already initialized, skipping...");
         return;
     }
-    
-    console.log("[Scheduler] Initializing autopay scheduler...");
     
     // Run every minute to check for schedules
     cron.schedule('* * * * *', async () => {
@@ -1012,11 +1002,9 @@ function initScheduler() {
     });
     
     schedulerInitialized = true;
-    console.log("[Scheduler] Autopay scheduler started successfully!");
     
     // Run once on startup to catch any missed schedules
     setTimeout(async () => {
-        console.log("[Scheduler] Running initial check on startup...");
         await processScheduledGroups();
     }, 5000);
 }

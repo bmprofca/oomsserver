@@ -1,7 +1,7 @@
 import "dotenv/config";
 
 const APP_NAME = process.env.APP_NAME || "OOMS";
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "https://api.ooms.in";
+const BASE_DOMAIN = process.env.BASE_DOMAIN || "https://server.ooms.in";
 const GOOGLE_CLIENT_ID =
     process.env.GOOGLE_CLIENT_ID ||
     "706030491156-5rq848qm4eih47h29675u6pdv11m8kvq.apps.googleusercontent.com";
