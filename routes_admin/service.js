@@ -1,7 +1,6 @@
 import express from "express";
 import pool from "../db.js";
 import { authAdmin } from "../middleware/authAdmin.js";
-import { RANDOM_STRING } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -33,27 +32,77 @@ function parseFields(value) {
     }
 }
 
+function normalizeComplianceFields(fields, serviceType) {
+    if (serviceType !== "compliance" || fields == null) {
+        return null;
+    }
+
+    let parsed = fields;
+    if (typeof fields === "string") {
+        try {
+            parsed = JSON.parse(fields);
+        } catch {
+            return null;
+        }
+    }
+
+    if (!Array.isArray(parsed)) {
+        return null;
+    }
+
+    const normalized = parsed
+        .map((item) => ({
+            label: String(item?.label ?? "").trim(),
+            is_required: Boolean(item?.is_required),
+        }))
+        .filter((item) => item.label);
+
+    return normalized.length ? JSON.stringify(normalized) : null;
+}
+
+function validateServiceId(value) {
+    const sid = value != null ? String(value).trim() : "";
+    if (!sid) {
+        return { ok: false, message: "service_id is required" };
+    }
+    if (/\s/.test(sid)) {
+        return { ok: false, message: "service_id must not contain spaces" };
+    }
+    return { ok: true, value: sid };
+}
+
 router.get("/list", authAdmin, async (req, res) => {
     try {
         const page_no = Math.max(1, Number(req.query.page_no) || 1);
         const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
         const offset = (page_no - 1) * limit;
         const search = req.query.search ? String(req.query.search).trim() : "";
+        const typeFilter = req.query.type ? String(req.query.type).trim().toLowerCase() : "";
 
         let baseFrom = "FROM services s";
         const filterParams = [];
+        const whereClauses = [];
+
+        if (typeFilter && VALID_TYPES.includes(typeFilter)) {
+            whereClauses.push("s.type = ?");
+            filterParams.push(typeFilter);
+        }
 
         if (search) {
             const sp = `%${search}%`;
-            baseFrom += ` WHERE (
+            whereClauses.push(`(
                 s.service_id LIKE ?
                 OR s.name LIKE ?
                 OR s.sac_code LIKE ?
                 OR s.type LIKE ?
                 OR s.remark LIKE ?
                 OR s.frequency LIKE ?
-            )`;
+            )`);
             filterParams.push(sp, sp, sp, sp, sp, sp);
+        }
+
+        if (whereClauses.length) {
+            baseFrom += ` WHERE ${whereClauses.join(" AND ")}`;
         }
 
         const [[{ total }]] = await pool.query(
@@ -88,6 +137,7 @@ router.get("/list", authAdmin, async (req, res) => {
             message: "Services list retrieved successfully",
             filters: {
                 search: search || null,
+                type: typeFilter && VALID_TYPES.includes(typeFilter) ? typeFilter : null,
             },
             data,
             pagination: {
@@ -110,6 +160,7 @@ router.get("/list", authAdmin, async (req, res) => {
 router.post("/create", authAdmin, async (req, res) => {
     try {
         const {
+            service_id,
             name,
             sac_code,
             type,
@@ -137,38 +188,42 @@ router.post("/create", authAdmin, async (req, res) => {
             });
         }
 
-        let sid = null;
-        for (let attempt = 0; attempt < 5; attempt++) {
-            const candidate = RANDOM_STRING();
-            const [existing] = await pool.query(
-                "SELECT service_id FROM services WHERE service_id = ? LIMIT 1",
-                [candidate]
-            );
-            if (!existing.length) {
-                sid = candidate;
-                break;
-            }
+        const serviceIdCheck = validateServiceId(service_id);
+        if (!serviceIdCheck.ok) {
+            return res.status(400).json({
+                success: false,
+                message: serviceIdCheck.message,
+            });
         }
 
-        if (!sid) {
-            return res.status(500).json({
+        const sid = serviceIdCheck.value;
+
+        const [existing] = await pool.query(
+            "SELECT service_id FROM services WHERE service_id = ? LIMIT 1",
+            [sid]
+        );
+
+        if (existing.length) {
+            return res.status(409).json({
                 success: false,
-                message: "Failed to generate unique service_id",
+                message: "service_id already exists",
             });
         }
 
         const sac = sac_code != null ? String(sac_code).trim() : null;
-        const freq = frequency != null ? String(frequency).trim().toLowerCase() : "monthly";
+        const freq =
+            serviceType === "compliance"
+                ? frequency != null && String(frequency).trim() !== ""
+                    ? String(frequency).trim().toLowerCase()
+                    : "monthly"
+                : frequency != null && String(frequency).trim() !== ""
+                    ? String(frequency).trim().toLowerCase()
+                    : null;
         const amount = default_amount != null ? Number(default_amount) : 0;
         const rem = remark != null ? String(remark).trim() : null;
         const dueDayRaw = default_due_date ?? due_day;
         const dueDayVal = dueDayRaw != null ? Number(dueDayRaw) : 10;
-        const fieldsJson =
-            fields != null
-                ? typeof fields === "string"
-                    ? fields
-                    : JSON.stringify(fields)
-                : null;
+        const fieldsJson = normalizeComplianceFields(fields, serviceType);
 
         await pool.query(
             `INSERT INTO services (service_id, name, sac_code, type, frequency, default_amount, remark, default_due_date, fields)
@@ -197,18 +252,7 @@ router.post("/create", authAdmin, async (req, res) => {
 
 router.put("/edit", authAdmin, async (req, res) => {
     try {
-        const {
-            service_id,
-            name,
-            sac_code,
-            type,
-            frequency,
-            default_amount,
-            remark,
-            due_day,
-            default_due_date,
-            fields,
-        } = req.body || {};
+        const { service_id, name, sac_code } = req.body || {};
 
         if (!service_id || String(service_id).trim() === "") {
             return res.status(400).json({
@@ -231,56 +275,24 @@ router.put("/edit", authAdmin, async (req, res) => {
             });
         }
 
-        const service = existing[0];
-
-        if (type != null) {
-            const serviceType = String(type).trim().toLowerCase();
-            if (!VALID_TYPES.includes(serviceType)) {
-                return res.status(400).json({
-                    success: false,
-                    message: "type must be 'general' or 'compliance'",
-                });
-            }
-        }
-
-        const finalType = type != null ? String(type).trim().toLowerCase() : service.type;
-        const finalName = name !== undefined ? String(name).trim() : service.name;
-        const finalSac = sac_code !== undefined
-            ? (sac_code != null ? String(sac_code).trim() : null)
-            : service.sac_code;
-        const finalFreq = frequency !== undefined
-            ? String(frequency).trim().toLowerCase()
-            : service.frequency;
-        const finalAmount = default_amount !== undefined
-            ? Number(default_amount)
-            : Number(service.default_amount);
-        const finalRemark = remark !== undefined
-            ? (remark != null ? String(remark).trim() : null)
-            : service.remark;
-        const finalDueDay = (default_due_date ?? due_day) !== undefined
-            ? Number(default_due_date ?? due_day)
-            : Number(service.default_due_date ?? service.due_day ?? 10);
-        const finalFields =
-            fields !== undefined
-                ? fields != null
-                    ? typeof fields === "string"
-                        ? fields
-                        : JSON.stringify(fields)
-                    : null
-                : service.fields;
-
-        if (!finalName) {
+        if (name === undefined || String(name).trim() === "") {
             return res.status(400).json({
                 success: false,
-                message: "name cannot be empty",
+                message: "name is required",
             });
         }
 
+        const finalName = String(name).trim();
+        const finalSac =
+            sac_code !== undefined
+                ? sac_code != null && String(sac_code).trim() !== ""
+                    ? String(sac_code).trim()
+                    : null
+                : existing[0].sac_code;
+
         await pool.query(
-            `UPDATE services
-             SET name = ?, sac_code = ?, type = ?, frequency = ?, default_amount = ?, remark = ?, default_due_date = ?, fields = ?
-             WHERE service_id = ?`,
-            [finalName, finalSac, finalType, finalFreq, finalAmount, finalRemark, finalDueDay, finalFields, sid]
+            "UPDATE services SET name = ?, sac_code = ? WHERE service_id = ?",
+            [finalName, finalSac, sid]
         );
 
         const [rows] = await pool.query(
