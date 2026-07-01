@@ -85,8 +85,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             await connection.query(
                 `INSERT INTO journal_entries (
                     branch_id, journal_id, create_by, invoice_id, invoice_no, transaction_id,
-                    transaction_date, from_username, to_username, amount, modify_by, is_deleted, remark
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', ?)`,
+                    transaction_date, party1_type, party1_id, party2_type, party2_id,
+                    amount, modify_by, is_deleted, remark
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', ?)`,
                 [
                     branch_id,
                     journal_id,
@@ -95,7 +96,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     invoice_no,
                     transaction_id,
                     txnDate,
+                    p1_type,
                     p1_id,
+                    p2_type,
                     p2_id,
                     amountFixed,
                     username,
@@ -132,6 +135,133 @@ router.post("/create", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Journal (create) error:", error);
         return res.status(500).json({ success: false, message: "Failed to record journal", error: error.message });
+    }
+});
+
+router.put("/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            journal_id,
+            transaction_id,
+            amount,
+            party1_id,
+            party2_id,
+            party1_type,
+            party2_type,
+            remark,
+            transaction_date,
+        } = req.body || {};
+
+        const journalIdVal = journal_id != null ? String(journal_id).trim() : "";
+        const transactionIdVal = transaction_id != null ? String(transaction_id).trim() : "";
+
+        if (!journalIdVal && !transactionIdVal) {
+            return res.status(400).json({ success: false, message: "journal_id or transaction_id is required" });
+        }
+        if (amount == null || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+        if (!party1_id || !party2_id || !party1_type || !party2_type) {
+            return res.status(400).json({ success: false, message: "party fields are required" });
+        }
+
+        const amountNum = Number(amount);
+        const amountFixed = Number(amountNum.toFixed(2));
+        const txnDate = transaction_date ? String(transaction_date).trim().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const remarkVal = remark != null ? String(remark).trim() : null;
+        const p1_id = String(party1_id).trim();
+        const p2_id = String(party2_id).trim();
+        const p1_type = String(party1_type).trim();
+        const p2_type = String(party2_type).trim();
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            let resolvedTransactionId = transactionIdVal;
+            if (!resolvedTransactionId && journalIdVal) {
+                const [jeRows] = await connection.query(
+                    `SELECT transaction_id FROM journal_entries
+                     WHERE branch_id = ? AND journal_id = ? AND is_deleted = '0' LIMIT 1`,
+                    [branch_id, journalIdVal]
+                );
+                if (!jeRows?.length) {
+                    await connection.rollback();
+                    connection.release();
+                    return res.status(404).json({ success: false, message: "Journal entry not found" });
+                }
+                resolvedTransactionId = jeRows[0].transaction_id;
+            }
+
+            const [txnRows] = await connection.query(
+                `SELECT t.transaction_id, t.invoice_id, i.type AS invoice_type
+                 FROM transactions t
+                 INNER JOIN invoice i ON i.invoice_id = t.invoice_id AND i.branch_id = t.branch_id
+                 WHERE t.branch_id = ? AND t.transaction_id = ?
+                 LIMIT 1`,
+                [branch_id, resolvedTransactionId]
+            );
+            if (!txnRows?.length) {
+                await connection.rollback();
+                connection.release();
+                return res.status(404).json({ success: false, message: "Transaction not found" });
+            }
+            const txn = txnRows[0];
+            if (String(txn.invoice_type) !== "journal") {
+                await connection.rollback();
+                connection.release();
+                return res.status(400).json({ success: false, message: "Transaction type mismatch" });
+            }
+
+            await connection.query(
+                `UPDATE transactions
+                 SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?,
+                     party1_type = ?, party1_id = ?, party2_type = ?, party2_id = ?
+                 WHERE branch_id = ? AND transaction_id = ?`,
+                [username, txnDate, amountFixed, remarkVal, p1_type, p1_id, p2_type, p2_id, branch_id, resolvedTransactionId]
+            );
+            await connection.query(
+                `UPDATE invoice
+                 SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
+                 WHERE branch_id = ? AND invoice_id = ?`,
+                [username, amountFixed, amountFixed, amountFixed, branch_id, txn.invoice_id]
+            );
+            await connection.query(
+                `UPDATE journal_entries
+                 SET modify_by = ?, transaction_date = ?,
+                     party1_type = ?, party1_id = ?, party2_type = ?, party2_id = ?,
+                     amount = ?, remark = ?
+                 WHERE branch_id = ? AND transaction_id = ? AND is_deleted = '0'`,
+                [username, txnDate, p1_type, p1_id, p2_type, p2_id, amountFixed, remarkVal, branch_id, resolvedTransactionId]
+            );
+
+            await connection.commit();
+
+            return res.status(200).json({
+                success: true,
+                message: "Journal updated successfully",
+                data: {
+                    journal_id: journalIdVal || null,
+                    transaction_id: resolvedTransactionId,
+                    amount: amountFixed,
+                    party1_type: p1_type,
+                    party1_id: p1_id,
+                    party2_type: p2_type,
+                    party2_id: p2_id,
+                    transaction_date: txnDate,
+                },
+            });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error("Journal (edit) error:", error);
+        return res.status(500).json({ success: false, message: "Failed to update journal", error: error.message });
     }
 });
 

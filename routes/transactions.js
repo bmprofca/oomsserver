@@ -13,6 +13,55 @@ import { notifyPaymentReceiveWhatsapp } from "../helpers/whatsappNotification.js
 
 const router = express.Router();
 
+async function updateInvoiceLinkedTransaction(connection, {
+    branch_id,
+    username,
+    transaction_id,
+    expectedInvoiceType,
+    amountNum,
+    txnDate,
+    remarkVal,
+    p1_id,
+    p1_type,
+    p2_id,
+    p2_type,
+}) {
+    const [txnRows] = await connection.query(
+        `SELECT t.transaction_id, t.invoice_id, i.type AS invoice_type
+         FROM transactions t
+         INNER JOIN invoice i ON i.invoice_id = t.invoice_id AND i.branch_id = t.branch_id
+         WHERE t.branch_id = ? AND t.transaction_id = ?
+         LIMIT 1`,
+        [branch_id, transaction_id]
+    );
+    if (!txnRows?.length) {
+        const err = new Error("Transaction not found");
+        err.statusCode = 404;
+        throw err;
+    }
+    const txn = txnRows[0];
+    if (String(txn.invoice_type) !== String(expectedInvoiceType)) {
+        const err = new Error("Transaction type mismatch");
+        err.statusCode = 400;
+        throw err;
+    }
+    const grandTotal = Number(amountNum);
+    await connection.query(
+        `UPDATE transactions
+         SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?,
+             party1_type = ?, party1_id = ?, party2_type = ?, party2_id = ?
+         WHERE branch_id = ? AND transaction_id = ?`,
+        [username, txnDate, grandTotal, remarkVal, p1_type, p1_id, p2_type, p2_id, branch_id, transaction_id]
+    );
+    await connection.query(
+        `UPDATE invoice
+         SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
+         WHERE branch_id = ? AND invoice_id = ?`,
+        [username, grandTotal, grandTotal, grandTotal, branch_id, txn.invoice_id]
+    );
+    return txn;
+}
+
 async function getTableColumns(db, tableName) {
     const [rows] = await db.query(`SHOW COLUMNS FROM \`${tableName}\``);
     return new Set(rows.map(r => r.Field));
@@ -842,6 +891,7 @@ router.post("/payment/journal", auth, validateBranch, async (req, res) => {
         const amountNum = Number(amount);
         const txnDate = transaction_date ? String(transaction_date).trim() : new Date().toISOString().slice(0, 10);
         const transaction_id = RANDOM_STRING(30);
+        const journal_id = RANDOM_STRING(30);
         const invoice_id = RANDOM_STRING(30);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
@@ -882,6 +932,31 @@ router.post("/payment/journal", auth, validateBranch, async (req, res) => {
                 [branch_id, transaction_id, username, username, txnDate, grandTotal, invoice_id, invoice_no, p1_type, p1_id, p2_type, p2_id, remarkVal]
             );
 
+            const amountFixed = Number(amountNum.toFixed(2));
+            await connection.query(
+                `INSERT INTO journal_entries (
+                    branch_id, journal_id, create_by, invoice_id, invoice_no, transaction_id,
+                    transaction_date, party1_type, party1_id, party2_type, party2_id,
+                    amount, modify_by, is_deleted, remark
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', ?)`,
+                [
+                    branch_id,
+                    journal_id,
+                    username,
+                    invoice_id,
+                    invoice_no,
+                    transaction_id,
+                    txnDate,
+                    p1_type,
+                    p1_id,
+                    p2_type,
+                    p2_id,
+                    amountFixed,
+                    username,
+                    remarkVal
+                ]
+            );
+
             await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
 
             await connection.commit();
@@ -895,11 +970,182 @@ router.post("/payment/journal", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Journal recorded successfully",
-            data: { transaction_id, amount: amountNum, party1_type: p1_type, party1_id: p1_id, party2_type: p2_type, party2_id: p2_id, transaction_date: txnDate }
+            data: {
+                journal_id,
+                transaction_id,
+                amount: amountNum,
+                party1_type: p1_type,
+                party1_id: p1_id,
+                party2_type: p2_type,
+                party2_id: p2_id,
+                transaction_date: txnDate
+            }
         });
     } catch (error) {
         console.error("Payment (journal) error:", error);
         return res.status(500).json({ success: false, message: "Failed to record journal", error: error.message });
+    }
+});
+
+router.put("/payment/payment/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            transaction_id,
+            amount,
+            party1_id,
+            party2_id,
+            party1_type,
+            party2_type,
+            remark,
+            transaction_date,
+        } = req.body || {};
+
+        if (!transaction_id || String(transaction_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_id is required" });
+        }
+        if (amount == null || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+        if (!party1_id || !party2_id || !party1_type || !party2_type) {
+            return res.status(400).json({ success: false, message: "party fields are required" });
+        }
+
+        const amountNum = Number(amount);
+        const txnDate = transaction_date ? String(transaction_date).trim().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const remarkVal = remark != null ? String(remark).trim() : null;
+        const p1_id = String(party1_id).trim();
+        const p2_id = String(party2_id).trim();
+        const p1_type = String(party1_type).trim();
+        const p2_type = String(party2_type).trim();
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            await updateInvoiceLinkedTransaction(connection, {
+                branch_id,
+                username,
+                transaction_id: String(transaction_id).trim(),
+                expectedInvoiceType: "payment",
+                amountNum,
+                txnDate,
+                remarkVal,
+                p1_id,
+                p1_type,
+                p2_id,
+                p2_type,
+            });
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Payment updated successfully",
+            data: {
+                transaction_id: String(transaction_id).trim(),
+                amount: amountNum,
+                party1_type: p1_type,
+                party1_id: p1_id,
+                party2_type: p2_type,
+                party2_id: p2_id,
+                transaction_date: txnDate,
+            },
+        });
+    } catch (error) {
+        console.error("Payment (edit) error:", error);
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            success: false,
+            message: error.statusCode ? error.message : "Failed to update payment",
+            error: error.message,
+        });
+    }
+});
+
+router.put("/payment/receive/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            transaction_id,
+            amount,
+            party1_id,
+            party2_id,
+            party1_type,
+            party2_type,
+            remark,
+            transaction_date,
+        } = req.body || {};
+
+        if (!transaction_id || String(transaction_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_id is required" });
+        }
+        if (amount == null || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+        if (!party1_id || !party2_id || !party1_type || !party2_type) {
+            return res.status(400).json({ success: false, message: "party fields are required" });
+        }
+
+        const amountNum = Number(amount);
+        const txnDate = transaction_date ? String(transaction_date).trim().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const remarkVal = remark != null ? String(remark).trim() : null;
+        const p1_id = String(party1_id).trim();
+        const p2_id = String(party2_id).trim();
+        const p1_type = String(party1_type).trim();
+        const p2_type = String(party2_type).trim();
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            await updateInvoiceLinkedTransaction(connection, {
+                branch_id,
+                username,
+                transaction_id: String(transaction_id).trim(),
+                expectedInvoiceType: "payment receive",
+                amountNum,
+                txnDate,
+                remarkVal,
+                p1_id,
+                p1_type,
+                p2_id,
+                p2_type,
+            });
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Payment receive updated successfully",
+            data: {
+                transaction_id: String(transaction_id).trim(),
+                amount: amountNum,
+                party1_type: p1_type,
+                party1_id: p1_id,
+                party2_type: p2_type,
+                party2_id: p2_id,
+                transaction_date: txnDate,
+            },
+        });
+    } catch (error) {
+        console.error("Payment receive (edit) error:", error);
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            success: false,
+            message: error.statusCode ? error.message : "Failed to update payment receive",
+            error: error.message,
+        });
     }
 });
 

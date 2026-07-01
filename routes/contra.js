@@ -244,4 +244,139 @@ router.get("/list", auth, validateBranch, async (req, res) => {
     }
 });
 
+router.put("/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            contra_id,
+            transaction_id,
+            party_1,
+            party_2,
+            transaction_date,
+            amount,
+            remark,
+        } = req.body || {};
+
+        const contraIdVal = contra_id != null ? String(contra_id).trim() : "";
+        const transactionIdVal = transaction_id != null ? String(transaction_id).trim() : "";
+
+        if (!contraIdVal && !transactionIdVal) {
+            return res.status(400).json({ success: false, message: "contra_id or transaction_id is required" });
+        }
+
+        const party1_id = party_1 != null ? String(party_1).trim() : "";
+        const party2_id = party_2 != null ? String(party_2).trim() : "";
+        const txnDate = transaction_date != null ? String(transaction_date).trim().slice(0, 10) : "";
+        const amountNum = Number(amount);
+        const remarkVal = remark != null ? String(remark).trim() : null;
+
+        if (!party1_id || !party2_id) {
+            return res.status(400).json({ success: false, message: "party_1 and party_2 are required" });
+        }
+        if (!txnDate) {
+            return res.status(400).json({ success: false, message: "transaction_date is required" });
+        }
+        if (!Number.isFinite(amountNum) || amountNum <= 0) {
+            return res.status(400).json({ success: false, message: "amount must be greater than 0" });
+        }
+        if (party1_id === party2_id) {
+            return res.status(400).json({ success: false, message: "party_1 and party_2 cannot be same bank" });
+        }
+
+        const [bankRows] = await pool.query(
+            `SELECT bank_id FROM banks WHERE branch_id = ? AND bank_id IN (?, ?)`,
+            [branch_id, party1_id, party2_id]
+        );
+        const bankSet = new Set(bankRows.map((el) => String(el.bank_id)));
+        if (!bankSet.has(party1_id)) {
+            return res.status(400).json({ success: false, message: "Invalid party_1 bank_id" });
+        }
+        if (!bankSet.has(party2_id)) {
+            return res.status(400).json({ success: false, message: "Invalid party_2 bank_id" });
+        }
+
+        const roundedAmount = Number(amountNum.toFixed(2));
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            let resolvedTransactionId = transactionIdVal;
+            if (!resolvedTransactionId && contraIdVal) {
+                const [ceRows] = await connection.query(
+                    `SELECT transaction_id FROM contra_entries WHERE branch_id = ? AND contra_id = ? LIMIT 1`,
+                    [branch_id, contraIdVal]
+                );
+                if (!ceRows?.length) {
+                    await connection.rollback();
+                    connection.release();
+                    return res.status(404).json({ success: false, message: "Contra entry not found" });
+                }
+                resolvedTransactionId = ceRows[0].transaction_id;
+            }
+
+            const [txnRows] = await connection.query(
+                `SELECT t.transaction_id, t.invoice_id, i.type AS invoice_type
+                 FROM transactions t
+                 INNER JOIN invoice i ON i.invoice_id = t.invoice_id AND i.branch_id = t.branch_id
+                 WHERE t.branch_id = ? AND t.transaction_id = ?
+                 LIMIT 1`,
+                [branch_id, resolvedTransactionId]
+            );
+            if (!txnRows?.length) {
+                await connection.rollback();
+                connection.release();
+                return res.status(404).json({ success: false, message: "Transaction not found" });
+            }
+            const txn = txnRows[0];
+            if (String(txn.invoice_type) !== "contra") {
+                await connection.rollback();
+                connection.release();
+                return res.status(400).json({ success: false, message: "Transaction type mismatch" });
+            }
+
+            await connection.query(
+                `UPDATE transactions
+                 SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?,
+                     party1_type = 'bank', party1_id = ?, party2_type = 'bank', party2_id = ?
+                 WHERE branch_id = ? AND transaction_id = ?`,
+                [username, txnDate, roundedAmount, remarkVal, party1_id, party2_id, branch_id, resolvedTransactionId]
+            );
+            await connection.query(
+                `UPDATE invoice
+                 SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
+                 WHERE branch_id = ? AND invoice_id = ?`,
+                [username, roundedAmount, roundedAmount, roundedAmount, branch_id, txn.invoice_id]
+            );
+            await connection.query(
+                `UPDATE contra_entries
+                 SET modify_by = ?, transaction_date = ?, from_bank_id = ?, to_bank_id = ?, amount = ?, remark = ?
+                 WHERE branch_id = ? AND transaction_id = ?`,
+                [username, txnDate, party1_id, party2_id, roundedAmount, remarkVal, branch_id, resolvedTransactionId]
+            );
+
+            await connection.commit();
+
+            return res.status(200).json({
+                success: true,
+                message: "Contra updated successfully",
+                data: {
+                    contra_id: contraIdVal || null,
+                    transaction_id: resolvedTransactionId,
+                    amount: roundedAmount,
+                    transaction_date: txnDate,
+                },
+            });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error("Contra (edit) error:", error);
+        return res.status(500).json({ success: false, message: "Failed to update contra", error: error.message });
+    }
+});
+
 export default router;

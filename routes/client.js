@@ -625,6 +625,13 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             });
             transformedRow.firms = firms || [];
 
+            const balanceResult = await GET_BALANCE({
+                party_type: "client",
+                party_id: transformedRow.username,
+                branch_id
+            });
+            transformedRow.balance = balanceResult?.balance ?? 0;
+
             return transformedRow;
         }));
 
@@ -646,166 +653,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to fetch Client list",
-            error: error.message
-        });
-    }
-});
-
-// Client search for searchable dropdown (no limit; search min 3 chars)
-router.get("/search", auth, validateBranch, async (req, res) => {
-    try {
-        const { branch_id } = req;
-        const { search } = req.query;
-
-        const searchTrimmed = typeof search === "string" ? search.trim() : "";
-        if (searchTrimmed.length < 3) {
-            return res.status(400).json({
-                success: false,
-                message: "Search keyword must be at least 3 characters"
-            });
-        }
-
-        const searchPattern = `%${searchTrimmed}%`;
-        const searchStart = `${searchTrimmed}%`;
-
-        let query = `
-            SELECT 
-                c.username,
-                c.branch_id,
-                c.create_date,
-                c.status,
-                p.profile_id,
-                p.name,
-                p.care_of,
-                p.guardian_name,
-                p.date_of_birth,
-                p.gender,
-                p.mobile,
-                p.country_code,
-                p.email,
-                p.pan_number,
-                p.state,
-                p.district,
-                p.city,
-                p.village_town,
-                p.address_line_1,
-                p.address_line_2,
-                p.pincode,
-                p.image
-            FROM clients c
-            LEFT JOIN profile p ON c.username = p.username 
-                AND p.id = (
-                    SELECT MAX(p2.id) 
-                    FROM profile p2 
-                    WHERE p2.username = c.username
-                )
-            WHERE c.user_type = 'client' 
-            AND c.is_deleted = '0'
-            AND c.branch_id = ?
-            AND (
-                p.name LIKE ?
-                OR p.email LIKE ?
-                OR p.mobile LIKE ?
-                OR p.guardian_name LIKE ?
-                OR p.pan_number LIKE ?
-                OR p.state LIKE ?
-                OR p.district LIKE ?
-                OR p.city LIKE ?
-                OR p.village_town LIKE ?
-                OR p.address_line_1 LIKE ?
-                OR p.address_line_2 LIKE ?
-                OR p.pincode LIKE ?
-                OR EXISTS (
-                    SELECT 1 FROM firms f 
-                    WHERE f.username = c.username AND f.branch_id = c.branch_id 
-                    AND f.is_deleted = '0' AND f.firm_name LIKE ?
-                )
-            )
-        `;
-
-        const queryParams = [
-            branch_id,
-            searchPattern, searchPattern, searchPattern, searchPattern, searchPattern,
-            searchPattern, searchPattern, searchPattern, searchPattern,
-            searchPattern, searchPattern, searchPattern,
-            searchPattern  // firms.firm_name
-        ];
-
-        // Prefer matches from start of field, then any match; then by c.id DESC
-        query += `
-            ORDER BY (
-                p.name LIKE ? OR p.email LIKE ? OR p.mobile LIKE ? OR p.guardian_name LIKE ?
-                OR p.pan_number LIKE ? OR p.state LIKE ? OR p.district LIKE ? OR p.city LIKE ?
-                OR p.village_town LIKE ? OR p.address_line_1 LIKE ? OR p.address_line_2 LIKE ?
-                OR p.pincode LIKE ?
-            ) DESC,
-            c.id DESC
-        `;
-        queryParams.push(
-            searchStart, searchStart, searchStart, searchStart,
-            searchStart, searchStart, searchStart, searchStart,
-            searchStart, searchStart, searchStart, searchStart
-        );
-
-        const [rows] = await pool.query(query, queryParams);
-
-        const transformedRows = await Promise.all(rows.map(async (row) => {
-            const imageRaw = row.image;
-            const image =
-                imageRaw && String(imageRaw).trim() !== ""
-                    ? `${BASE_DOMAIN}/media/profile/image/${String(imageRaw).trim()}`
-                    : null;
-
-            const firms = await GET_FIRMS_BY_USERNAME({
-                username: row.username,
-                branch_id
-            });
-
-            let balance = await GET_BALANCE({
-                party_type: "client",
-                party_id: row.username,
-                branch_id
-            });
-
-            return {
-                username: row.username,
-                create_date: row.create_date,
-                status: row.status == '1',
-                name: row.name,
-                care_of: row.care_of,
-                guardian_name: row.guardian_name,
-                date_of_birth: row.date_of_birth,
-                gender: row.gender,
-                mobile: row.mobile,
-                country_code: row.country_code,
-                email: row.email,
-                pan_number: row.pan_number,
-                balance: balance.balance,
-                address: {
-                    state: row.state,
-                    district: row.district,
-                    city: row.city,
-                    village_town: row.village_town,
-                    address_line_1: row.address_line_1,
-                    address_line_2: row.address_line_2,
-                    pincode: row.pincode
-                },
-                image,
-                firms: firms || []
-            };
-        }));
-
-        return res.status(200).json({
-            success: true,
-            message: "Client search completed successfully",
-            data: transformedRows
-        });
-
-    } catch (error) {
-        console.error('Error in client search:', error);
-        return res.status(500).json({
-            success: false,
-            message: "Failed to search clients",
             error: error.message
         });
     }

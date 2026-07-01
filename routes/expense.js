@@ -5,6 +5,64 @@ import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA, CAPITA
 
 const router = express.Router();
 
+const EXPENSE_ITEM_TYPES_ALLOWED = ["direct", "indirect", "reimbursement"];
+
+const mapExpenseItemRow = async (element, expenseEntryCount = null) => {
+    const create_by_user = await USER_DATA(element?.create_by);
+    const modify_by_user = await USER_DATA(element?.modify_by);
+    const entryCount =
+        expenseEntryCount != null
+            ? Number(expenseEntryCount) || 0
+            : Number(element?.expense_entry_count) || 0;
+
+    return {
+        item_id: element.item_id,
+        create_by: {
+            username: create_by_user?.username,
+            name: create_by_user?.name,
+            mobile: create_by_user?.mobile,
+            email: create_by_user?.email,
+        },
+        modify_by: {
+            username: modify_by_user?.username,
+            name: modify_by_user?.name,
+            mobile: modify_by_user?.mobile,
+            email: modify_by_user?.email,
+        },
+        name: element.name,
+        type: element.type,
+        remark: element.remark,
+        create_date: element.create_date,
+        modify_date: element.modify_date,
+        expense_entry_count: entryCount,
+        can_delete: entryCount === 0,
+    };
+};
+
+const getExpenseItemListFilters = (req) => {
+    const search = req.query?.search || "";
+    const searchSql = `%${String(search).trim()}%`;
+    const typeVal =
+        req.query?.type && String(req.query.type).trim() !== ""
+            ? String(req.query.type).trim().toLowerCase()
+            : null;
+    const hasType = typeVal != null;
+
+    if (hasType && !EXPENSE_ITEM_TYPES_ALLOWED.includes(typeVal)) {
+        const err = new Error(`type must be one of: ${EXPENSE_ITEM_TYPES_ALLOWED.join(", ")}`);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const whereClause = `ei.branch_id = ? AND ei.is_deleted = '0'
+        AND (ei.name LIKE ? OR ei.type LIKE ? OR ei.remark LIKE ?)
+        ${hasType ? "AND ei.type = ?" : ""}`;
+
+    const params = [req.branch_id, searchSql, searchSql, searchSql];
+    if (hasType) params.push(typeVal);
+
+    return { whereClause, params };
+};
 
 router.post("/item/create", auth, validateBranch, async (req, res) => {
     try {
@@ -34,8 +92,8 @@ router.post("/item/create", auth, validateBranch, async (req, res) => {
 
         const item_id = RANDOM_STRING(30);
         await pool.query(
-            `INSERT INTO expense_items (branch_id, item_id, create_by, modify_by, name, type, remark)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO expense_items (branch_id, item_id, create_by, modify_by, name, type, remark, is_deleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '0')`,
             [branch_id, item_id, username, username, itemName, itemType, itemRemark]
         );
 
@@ -72,7 +130,7 @@ router.put("/item/edit", auth, validateBranch, async (req, res) => {
         }
 
         const [rows] = await pool.query(
-            "SELECT id, branch_id, item_id, create_by, modify_by, name, type, remark, create_date, modify_date FROM expense_items WHERE branch_id = ? AND item_id = ? LIMIT 1",
+            "SELECT id, branch_id, item_id, create_by, modify_by, name, type, remark, create_date, modify_date FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
             [branch_id, String(item_id).trim()]
         );
 
@@ -123,50 +181,45 @@ router.get("/item/list", auth, validateBranch, async (req, res) => {
         const page_no = Math.max(1, Number(req.query?.page_no) || 1);
         const limit = Math.min(100, Math.max(1, Number(req.query?.limit) || 10));
         const offset = (page_no - 1) * limit;
-        const search = req.query?.search || "";
-        const searchSql = `%${String(search).trim()}%`;
 
+        let filters;
+        try {
+            filters = getExpenseItemListFilters(req);
+        } catch (filterErr) {
+            if (filterErr.statusCode === 400) {
+                return res.status(400).json({ success: false, message: filterErr.message });
+            }
+            throw filterErr;
+        }
+
+        const { whereClause, params } = filters;
+
+        const countWhere = whereClause;
         const [[{ total: totalRows }]] = await pool.query(
-            `SELECT COUNT(*) AS total
-             FROM expense_items
-             WHERE branch_id = ? AND (name LIKE ? OR type LIKE ? OR remark LIKE ?)`,
-            [branch_id, searchSql, searchSql, searchSql]
+            `SELECT COUNT(*) AS total FROM expense_items ei WHERE ${countWhere}`,
+            params
         );
         const total = Number(totalRows) || 0;
 
         const [rows] = await pool.query(
-            `SELECT id, branch_id, item_id, create_by, modify_by, name, type, remark, create_date, modify_date
-             FROM expense_items
-             WHERE branch_id = ? AND (name LIKE ? OR type LIKE ? OR remark LIKE ?)
-             ORDER BY id DESC
+            `SELECT
+                ei.id, ei.branch_id, ei.item_id, ei.create_by, ei.modify_by,
+                ei.name, ei.type, ei.remark, ei.create_date, ei.modify_date,
+                (
+                    SELECT COUNT(*)
+                    FROM expense_entries ee
+                    WHERE ee.branch_id = ei.branch_id AND ee.item_id = ei.item_id
+                ) AS expense_entry_count
+             FROM expense_items ei
+             WHERE ${whereClause}
+             ORDER BY ei.id DESC
              LIMIT ? OFFSET ?`,
-            [branch_id, searchSql, searchSql, searchSql, limit, offset]
+            [...params, limit, offset]
         );
+
         const data = [];
         for (let index = 0; index < rows.length; index++) {
-            const element = rows[index];
-            const create_by_user = await USER_DATA(element?.create_by);
-            const modify_by_user = await USER_DATA(element?.modify_by);
-            data.push({
-                item_id: element.item_id,
-                create_by: {
-                    username: create_by_user?.username,
-                    name: create_by_user?.name,
-                    mobile: create_by_user?.mobile,
-                    email: create_by_user?.email,
-                },
-                modify_by: {
-                    username: modify_by_user?.username,
-                    name: modify_by_user?.name,
-                    mobile: modify_by_user?.mobile,
-                    email: modify_by_user?.email,
-                },
-                name: element.name,
-                type: element.type,
-                remark: element.remark,
-                create_date: element.create_date,
-                modify_date: element.modify_date
-            });
+            data.push(await mapExpenseItemRow(rows[index]));
         }
 
         return res.status(200).json({
@@ -183,6 +236,100 @@ router.get("/item/list", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Expense item list error:", error);
         return res.status(500).json({ success: false, message: "Failed to fetch expense item list", error: error.message });
+    }
+});
+
+router.get("/item/details", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const item_id = req.query?.item_id;
+
+        if (!item_id || String(item_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "item_id is required" });
+        }
+
+        const itemIdVal = String(item_id).trim();
+
+        const [rows] = await pool.query(
+            `SELECT
+                ei.id, ei.branch_id, ei.item_id, ei.create_by, ei.modify_by,
+                ei.name, ei.type, ei.remark, ei.create_date, ei.modify_date,
+                (
+                    SELECT COUNT(*)
+                    FROM expense_entries ee
+                    WHERE ee.branch_id = ei.branch_id AND ee.item_id = ei.item_id
+                ) AS expense_entry_count
+             FROM expense_items ei
+             WHERE ei.branch_id = ? AND ei.item_id = ? AND ei.is_deleted = '0'
+             LIMIT 1`,
+            [branch_id, itemIdVal]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
+        }
+
+        const data = await mapExpenseItemRow(rows[0]);
+
+        return res.status(200).json({
+            success: true,
+            data,
+        });
+    } catch (error) {
+        console.error("Expense item details error:", error);
+        return res.status(500).json({ success: false, message: "Failed to fetch expense item details", error: error.message });
+    }
+});
+
+router.delete("/item/delete", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const item_id = req.body?.item_id || req.query?.item_id;
+
+        if (!item_id || String(item_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "item_id is required" });
+        }
+
+        const itemIdVal = String(item_id).trim();
+
+        const [rows] = await pool.query(
+            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
+            [branch_id, itemIdVal]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
+        }
+
+        const [[{ usage_count: usageCount }]] = await pool.query(
+            `SELECT COUNT(*) AS usage_count
+             FROM expense_entries
+             WHERE branch_id = ? AND item_id = ?`,
+            [branch_id, itemIdVal]
+        );
+
+        if (Number(usageCount) > 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Cannot delete this item because expense entries already exist for it",
+                data: { expense_entry_count: Number(usageCount) || 0 },
+            });
+        }
+
+        await pool.query(
+            "UPDATE expense_items SET is_deleted = '1', modify_by = ? WHERE branch_id = ? AND item_id = ?",
+            [username, branch_id, itemIdVal]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Expense item deleted successfully",
+            data: { item_id: itemIdVal },
+        });
+    } catch (error) {
+        console.error("Delete expense item error:", error);
+        return res.status(500).json({ success: false, message: "Failed to delete expense item", error: error.message });
     }
 });
 
@@ -237,7 +384,7 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
         const remarkVal = remark != null ? String(remark).trim() : null;
 
         const [itemRows] = await pool.query(
-            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? LIMIT 1",
+            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
             [branch_id, itemIdVal]
         );
         if (!itemRows || itemRows.length === 0) {
@@ -377,6 +524,130 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
     }
 });
 
+router.put("/entry/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            expense_id,
+            item_id,
+            remark,
+            amount,
+            transaction_date,
+            party_id,
+            party_type,
+        } = req.body || {};
+
+        if (!expense_id || String(expense_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "expense_id is required" });
+        }
+        if (!item_id || String(item_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "item_id is required" });
+        }
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
+        }
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
+        }
+        if (!transaction_date || String(transaction_date).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_date is required" });
+        }
+        if (!amount || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+
+        const partyTypeVal = String(party_type).trim().toLowerCase();
+        const allowedPartyTypes = ["bank", "capital"];
+        if (!allowedPartyTypes.includes(partyTypeVal)) {
+            return res.status(400).json({
+                success: false,
+                message: `party_type must be one of: ${allowedPartyTypes.join(", ")}`,
+            });
+        }
+
+        const expenseIdVal = String(expense_id).trim();
+        const itemIdVal = String(item_id).trim();
+        const partyIdVal = String(party_id).trim();
+        const txnDate = String(transaction_date).trim().slice(0, 10);
+        const expenseDate = txnDate;
+        const amountNum = Math.abs(Number(amount));
+        const remarkVal = remark != null ? String(remark).trim() : null;
+
+        const [itemRows] = await pool.query(
+            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
+            [branch_id, itemIdVal]
+        );
+        if (!itemRows?.length) {
+            return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
+        }
+
+        const [expenseRows] = await pool.query(
+            `SELECT expense_id, transaction_id, invoice_id FROM expense_entries
+             WHERE branch_id = ? AND expense_id = ? LIMIT 1`,
+            [branch_id, expenseIdVal]
+        );
+        if (!expenseRows?.length) {
+            return res.status(404).json({ success: false, message: "Expense entry not found" });
+        }
+        const expenseRow = expenseRows[0];
+        const transaction_id = expenseRow.transaction_id;
+        const invoice_id = expenseRow.invoice_id;
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            await connection.query(
+                `UPDATE expense_entries
+                 SET modify_by = ?, item_id = ?, expense_date = ?, party_type = ?, party_id = ?, amount = ?
+                 WHERE branch_id = ? AND expense_id = ?`,
+                [username, itemIdVal, expenseDate, partyTypeVal, partyIdVal, amountNum, branch_id, expenseIdVal]
+            );
+
+            await connection.query(
+                `UPDATE transactions
+                 SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?, party1_type = ?, party1_id = ?
+                 WHERE branch_id = ? AND transaction_id = ?`,
+                [username, txnDate, amountNum, remarkVal, partyTypeVal, partyIdVal, branch_id, transaction_id]
+            );
+
+            await connection.query(
+                `UPDATE invoice
+                 SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
+                 WHERE branch_id = ? AND invoice_id = ?`,
+                [username, amountNum, amountNum, amountNum, branch_id, invoice_id]
+            );
+
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Expense entry updated successfully",
+            data: {
+                expense_id: expenseIdVal,
+                transaction_id,
+                invoice_id,
+                item_id: itemIdVal,
+                party_type: partyTypeVal,
+                party_id: partyIdVal,
+                amount: amountNum,
+                transaction_date: expenseDate,
+                remark: remarkVal,
+            },
+        });
+    } catch (error) {
+        console.error("Edit expense entry error:", error);
+        return res.status(500).json({ success: false, message: "Failed to update expense entry", error: error.message });
+    }
+});
+
 
 router.get("/list", auth, validateBranch, async (req, res) => {
     try {
@@ -390,7 +661,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const item_id = req.query?.item_id || null;
         const type = req.query?.type || null;
 
-        const searchPattern = search && String(search).trim() !== "" ? `%${String(search).trim()}%` : null;
+        const searchRaw = search && String(search).trim() !== "" ? String(search).trim() : null;
+        const searchPattern = searchRaw != null ? `%${searchRaw}%` : null;
         const itemIdVal = item_id && String(item_id).trim() !== "" ? String(item_id).trim() : null;
         const typeVal = type && String(type).trim() !== "" ? String(type).trim().toLowerCase() : null;
         const hasSearch = searchPattern != null;
@@ -407,16 +679,38 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             }
         }
 
+        const searchClause = hasSearch
+            ? `AND (
+                ei.name LIKE ?
+                OR IFNULL(ei.remark, '') LIKE ?
+                OR IFNULL(t.remark, '') LIKE ?
+                OR ei.type LIKE ?
+                OR CONCAT(ei.type, ' expense') LIKE ?
+                OR ee.invoice_no LIKE ?
+                OR CAST(ee.amount AS CHAR) LIKE ?
+            )`
+            : "";
+
         const whereClause = `ee.branch_id = ?
             AND (ee.expense_date >= ? AND ee.expense_date <= ?)
             ${hasItemId ? "AND ee.item_id = ?" : ""}
             ${hasType ? "AND ei.type = ?" : ""}
-            ${hasSearch ? "AND (ee.remark LIKE ? OR CAST(ee.amount AS CHAR) LIKE ? OR ei.name LIKE ? OR ei.type LIKE ? OR ee.invoice_no LIKE ?)" : ""}`;
+            ${searchClause}`;
 
         const params = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
         if (hasItemId) params.push(itemIdVal);
         if (hasType) params.push(typeVal);
-        if (hasSearch) params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        if (hasSearch) {
+            params.push(
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern
+            );
+        }
 
         const [rows] = await pool.query(
             `SELECT
@@ -511,7 +805,5 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         return res.status(500).json({ success: false, message: "Failed to get expense list", error: error.message });
     }
 });
-
-
 
 export default router;
