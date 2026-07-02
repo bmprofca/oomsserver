@@ -123,6 +123,67 @@ function bankRowToItem(element, balance) {
     return object;
 }
 
+const buildBankSearchWhere = (alias = "") => {
+    const col = (name) => (alias ? `${alias}.${name}` : name);
+    return `${col("branch_id")} = ?
+        AND (${col("account_no")} LIKE ? OR ${col("holder")} LIKE ? OR ${col("ifsc")} LIKE ? OR ${col("bank")} LIKE ? OR ${col("branch")} LIKE ? OR IFNULL(${col("remark")}, '') LIKE ?)`;
+};
+
+const BANK_TYPES = ['savings', 'current', 'loan', 'cash'];
+
+const emptyBankTypeStats = () =>
+    BANK_TYPES.reduce((acc, type) => {
+        acc[type] = { count: 0, balance: 0 };
+        return acc;
+    }, {});
+
+const fetchBankListStats = async (branch_id, searchPattern) => {
+    const whereClause = buildBankSearchWhere("b");
+    const params = [branch_id, branch_id, branch_id, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern];
+
+    const [typeRows] = await pool.query(
+        `SELECT
+            LOWER(b.type) AS type,
+            COUNT(DISTINCT b.bank_id) AS count,
+            COALESCE(SUM(bt.balance), 0) AS balance
+         FROM banks b
+         LEFT JOIN (
+            SELECT
+                bank_id,
+                SUM(effect) AS balance
+            FROM (
+                SELECT
+                    party1_id AS bank_id,
+                    CASE WHEN party2_id IS NULL THEN amount ELSE -amount END AS effect
+                FROM transactions
+                WHERE branch_id = ? AND party1_type = 'bank'
+                UNION ALL
+                SELECT
+                    party2_id AS bank_id,
+                    amount AS effect
+                FROM transactions
+                WHERE branch_id = ? AND party2_type = 'bank' AND party2_id IS NOT NULL
+            ) effects
+            GROUP BY bank_id
+         ) bt ON bt.bank_id = b.bank_id
+         WHERE ${whereClause}
+         GROUP BY LOWER(b.type)`,
+        params
+    );
+
+    const by_type = emptyBankTypeStats();
+    for (const row of typeRows || []) {
+        const type = String(row?.type || '').toLowerCase();
+        if (!BANK_TYPES.includes(type)) continue;
+        by_type[type] = {
+            count: Number(row?.count) || 0,
+            balance: Number(Number(row?.balance ?? 0).toFixed(2)),
+        };
+    }
+
+    return { by_type };
+};
+
 
 function capitalRowToItem(element, balance) {
     return {
@@ -386,10 +447,12 @@ router.get('/bank/list', auth, validateBranch, async (req, res) => {
 
         const count = bank_list.length;
         const is_last_page = offset + count >= total;
+        const stats = await fetchBankListStats(branch_id, search_sql);
 
         return res.status(200).json({
             success: true,
             data: bank_list,
+            stats,
             meta: {
                 page_no: pageNum,
                 limit: limitNum,
@@ -1401,6 +1464,22 @@ router.get("/report/receive", auth, validateBranch, async (req, res) => {
         );
         const total = Number(totalRows) || 0;
 
+        const statsParams = [branch_id, "payment receive", from_date || "1970-01-01", to_date || "2099-12-31"];
+        const [[statsRow]] = await pool.query(
+            `SELECT
+                COUNT(*) AS count,
+                COALESCE(SUM(transactions.amount), 0) AS amount
+             FROM invoice
+             LEFT JOIN transactions ON invoice.transaction_id = transactions.transaction_id
+             WHERE invoice.branch_id = ? AND invoice.type = ?
+               AND (transactions.transaction_date >= ? AND transactions.transaction_date <= ?)`,
+            statsParams
+        );
+        const stats = {
+            count: Number(statsRow?.count) || 0,
+            amount: Number(Number(statsRow?.amount ?? 0).toFixed(2)),
+        };
+
         const data = [];
         for (let index = 0; index < rows.length; index++) {
             const row = rows[index];
@@ -1452,6 +1531,7 @@ router.get("/report/receive", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             data,
+            stats,
             meta: {
                 page_no,
                 limit,
