@@ -123,8 +123,7 @@ function bankRowToItem(element, balance) {
     return object;
 }
 
-// Normalize `capitals` rows to the same shape as `bankRowToItem` output,
-// so existing client UI logic can reuse the same rendering.
+
 function capitalRowToItem(element, balance) {
     return {
         capital_id: element?.capital_id,

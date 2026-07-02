@@ -6,6 +6,95 @@ import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA, CAPITA
 const router = express.Router();
 
 const EXPENSE_ITEM_TYPES_ALLOWED = ["direct", "indirect", "reimbursement"];
+const ALLOWED_DISCOUNT_PARTY_TYPES = ["client", "ca", "staff", "agent"];
+const DISCOUNT_RESERVED_ITEM_NAME = "Discount";
+
+const ensureDiscountExpenseItem = async (connection, branch_id, username) => {
+    const [rows] = await connection.query(
+        `SELECT item_id FROM expense_items
+         WHERE branch_id = ? AND name = ? AND is_deleted = '0' LIMIT 1`,
+        [branch_id, DISCOUNT_RESERVED_ITEM_NAME]
+    );
+    if (rows?.length) {
+        return rows[0].item_id;
+    }
+    const item_id = RANDOM_STRING(30);
+    await connection.query(
+        `INSERT INTO expense_items (branch_id, item_id, create_by, modify_by, name, type, remark, is_deleted)
+         VALUES (?, ?, ?, ?, ?, 'indirect', ?, '0')`,
+        [branch_id, item_id, username, username, DISCOUNT_RESERVED_ITEM_NAME, "Reserved system item for discount vouchers"]
+    );
+    return item_id;
+};
+
+const mapDiscountListRow = async (row) => {
+    let partyDetails = {};
+    const partyType = row.party_type;
+    if (partyType === "bank") {
+        partyDetails = await BANK_SNIPPED_DATA(row.party_id);
+    } else if (partyType === "capital") {
+        partyDetails = await CAPITAL_SNIPPED_DATA(row.party_id);
+    } else {
+        const userData = await USER_DATA(row.party_id);
+        partyDetails = {
+            username: row.party_id,
+            name: userData?.name,
+            email: userData?.email,
+            mobile: userData?.mobile,
+            country_code: userData?.country_code,
+            care_of: userData?.care_of,
+            guardian_name: userData?.guardian_name,
+        };
+    }
+
+    const create_by = await USER_SNIPPED_DATA(row.create_by);
+    const modify_by = await USER_SNIPPED_DATA(row.modify_by);
+
+    return {
+        discount_id: row.discount_id,
+        expense_id: row.expense_id,
+        transaction_id: row.transaction_id,
+        transaction_date: row.transaction_date || row.discount_date,
+        discount_date: row.discount_date,
+        amount: Number(row.amount) || 0,
+        remark: row.remark ?? row.expense_remark ?? null,
+        invoice_id: row.invoice_id,
+        invoice_no: row.invoice_no,
+        party_type: row.party_type,
+        party_id: row.party_id,
+        discount_party: {
+            type: row.party_type,
+            details: partyDetails,
+        },
+        create_by,
+        modify_by,
+        create_date: row.create_date,
+        modify_date: row.modify_date,
+    };
+};
+
+const fetchDiscountRowById = async (branch_id, discountIdVal) => {
+    const [rows] = await pool.query(
+        `SELECT
+            de.discount_id, de.discount_date, de.party_type, de.party_id, de.amount,
+            de.invoice_id, de.invoice_no, de.transaction_id,
+            de.create_by, de.modify_by, de.create_date, de.modify_date,
+            ee.expense_id, ee.item_id, ee.remark AS expense_remark,
+            t.remark, t.transaction_date
+         FROM discount_entries de
+         INNER JOIN expense_entries ee
+            ON ee.branch_id = de.branch_id
+            AND ee.transaction_id = de.transaction_id
+            AND IFNULL(ee.is_reserved, 0) = 1
+            AND ee.reserved = 'discount'
+         LEFT JOIN transactions t
+            ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
+         WHERE de.branch_id = ? AND de.discount_id = ?
+         LIMIT 1`,
+        [branch_id, discountIdVal]
+    );
+    return rows?.[0] || null;
+};
 
 const mapExpenseItemRow = async (element, expenseEntryCount = null) => {
     const create_by_user = await USER_DATA(element?.create_by);
@@ -692,6 +781,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             : "";
 
         const whereClause = `ee.branch_id = ?
+            AND IFNULL(ee.is_reserved, 0) = 0
             AND (ee.expense_date >= ? AND ee.expense_date <= ?)
             ${hasItemId ? "AND ee.item_id = ?" : ""}
             ${hasType ? "AND ei.type = ?" : ""}
@@ -803,6 +893,458 @@ router.get("/list", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Expense list error:", error);
         return res.status(500).json({ success: false, message: "Failed to get expense list", error: error.message });
+    }
+});
+
+router.post("/discount/create", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const { party_id, party_type, amount, remark, transaction_date } = req.body || {};
+
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
+        }
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
+        }
+        if (!amount || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+        if (!transaction_date || String(transaction_date).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_date is required" });
+        }
+
+        const partyTypeVal = String(party_type).trim().toLowerCase();
+        if (!ALLOWED_DISCOUNT_PARTY_TYPES.includes(partyTypeVal)) {
+            return res.status(400).json({
+                success: false,
+                message: `party_type must be one of: ${ALLOWED_DISCOUNT_PARTY_TYPES.join(", ")}`,
+            });
+        }
+
+        const partyIdVal = String(party_id).trim();
+        const txnDate = String(transaction_date).trim();
+        const discountDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
+        const amountNum = Math.abs(Number(amount));
+        const remarkVal = remark != null ? String(remark).trim() : null;
+
+        const transaction_id = RANDOM_STRING(30);
+        const invoice_id = RANDOM_STRING(30);
+        const expense_id = RANDOM_STRING(30);
+        const discount_id = RANDOM_STRING(30);
+        let invoice_no = "";
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            const itemIdVal = await ensureDiscountExpenseItem(connection, branch_id, username);
+
+            const [invoicePrefixRows] = await connection.query(
+                "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
+                [branch_id, "expense", "0", TODAY_DATE(), TODAY_DATE()]
+            );
+
+            if (!invoicePrefixRows || invoicePrefixRows.length === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(400).json({ success: false, message: "Invoice prefix not set for expense." });
+            }
+
+            const invoiceData = invoicePrefixRows[0];
+            const invoicePrimaryId = invoiceData?.id;
+            const serial = Number(invoiceData?.current || 0) + 1;
+            invoice_no = `${invoiceData?.prefix}${serial}`;
+
+            await connection.query(
+                `INSERT INTO invoice (
+                    invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id,
+                    subtotal, discount_type, discount_perc_rate, discount_value,
+                    tax_rate, tax_value, additional_charge, total, round_off, grand_total
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    invoice_id,
+                    branch_id,
+                    invoice_no,
+                    username,
+                    username,
+                    "expense",
+                    transaction_id,
+                    amountNum,
+                    "not applicable",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    amountNum,
+                    0,
+                    amountNum,
+                ]
+            );
+
+            await connection.query(
+                `INSERT INTO transactions (
+                    branch_id, transaction_id, create_by, modify_by, transaction_date,
+                    amount, transaction_type, invoice_id, invoice_no,
+                    party1_type, party1_id, remark
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, 'expense', ?, ?, ?, ?, ?)`,
+                [
+                    branch_id,
+                    transaction_id,
+                    username,
+                    username,
+                    txnDate,
+                    amountNum,
+                    invoice_id,
+                    invoice_no,
+                    partyTypeVal,
+                    partyIdVal,
+                    remarkVal,
+                ]
+            );
+
+            await connection.query(
+                `INSERT INTO expense_entries (
+                    branch_id, expense_id, item_id, create_by, modify_by, expense_date,
+                    party_type, party_id, amount, invoice_id, invoice_no, transaction_id,
+                    is_reserved, reserved, remark
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'discount', ?)`,
+                [
+                    branch_id,
+                    expense_id,
+                    itemIdVal,
+                    username,
+                    username,
+                    discountDate,
+                    partyTypeVal,
+                    partyIdVal,
+                    amountNum,
+                    invoice_id,
+                    invoice_no,
+                    transaction_id,
+                    remarkVal,
+                ]
+            );
+
+            await connection.query(
+                `INSERT INTO discount_entries (
+                    branch_id, discount_id, create_by, modify_by, discount_date,
+                    party_type, party_id, amount,
+                    invoice_id, invoice_no, transaction_id
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    branch_id,
+                    discount_id,
+                    username,
+                    username,
+                    discountDate,
+                    partyTypeVal,
+                    partyIdVal,
+                    amountNum,
+                    invoice_id,
+                    invoice_no,
+                    transaction_id,
+                ]
+            );
+
+            await connection.query(
+                "UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?",
+                [serial, invoicePrimaryId]
+            );
+
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+
+        const mapped = await fetchDiscountRowById(branch_id, discount_id);
+        const data = mapped ? await mapDiscountListRow(mapped) : {
+            discount_id,
+            expense_id,
+            transaction_id,
+            invoice_id,
+            invoice_no,
+            party_type: partyTypeVal,
+            party_id: partyIdVal,
+            amount: amountNum,
+            transaction_date: discountDate,
+            discount_date: discountDate,
+            remark: remarkVal,
+        };
+
+        return res.status(200).json({
+            success: true,
+            message: "Discount entry created successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("Create discount entry error:", error);
+        return res.status(500).json({ success: false, message: "Failed to create discount entry", error: error.message });
+    }
+});
+
+router.put("/discount/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const { discount_id, party_id, party_type, amount, remark, transaction_date } = req.body || {};
+
+        if (!discount_id || String(discount_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "discount_id is required" });
+        }
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
+        }
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
+        }
+        if (!amount || Number(amount) <= 0) {
+            return res.status(400).json({ success: false, message: "Valid amount is required" });
+        }
+        if (!transaction_date || String(transaction_date).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_date is required" });
+        }
+
+        const discountIdVal = String(discount_id).trim();
+        const partyTypeVal = String(party_type).trim().toLowerCase();
+        if (!ALLOWED_DISCOUNT_PARTY_TYPES.includes(partyTypeVal)) {
+            return res.status(400).json({
+                success: false,
+                message: `party_type must be one of: ${ALLOWED_DISCOUNT_PARTY_TYPES.join(", ")}`,
+            });
+        }
+
+        const existing = await fetchDiscountRowById(branch_id, discountIdVal);
+        if (!existing) {
+            return res.status(404).json({ success: false, message: "Discount entry not found" });
+        }
+
+        const partyIdVal = String(party_id).trim();
+        const txnDate = String(transaction_date).trim();
+        const discountDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
+        const amountNum = Math.abs(Number(amount));
+        const remarkVal = remark != null ? String(remark).trim() : null;
+        const transaction_id = existing.transaction_id;
+        const invoice_id = existing.invoice_id;
+        const expense_id = existing.expense_id;
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            await connection.query(
+                `UPDATE discount_entries
+                 SET modify_by = ?, discount_date = ?, party_type = ?, party_id = ?, amount = ?
+                 WHERE branch_id = ? AND discount_id = ?`,
+                [username, discountDate, partyTypeVal, partyIdVal, amountNum, branch_id, discountIdVal]
+            );
+
+            await connection.query(
+                `UPDATE expense_entries
+                 SET modify_by = ?, expense_date = ?, party_type = ?, party_id = ?, amount = ?, remark = ?
+                 WHERE branch_id = ? AND expense_id = ?`,
+                [username, discountDate, partyTypeVal, partyIdVal, amountNum, remarkVal, branch_id, expense_id]
+            );
+
+            await connection.query(
+                `UPDATE transactions
+                 SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?, party1_type = ?, party1_id = ?
+                 WHERE branch_id = ? AND transaction_id = ?`,
+                [username, txnDate, amountNum, remarkVal, partyTypeVal, partyIdVal, branch_id, transaction_id]
+            );
+
+            await connection.query(
+                `UPDATE invoice
+                 SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
+                 WHERE branch_id = ? AND invoice_id = ?`,
+                [username, amountNum, amountNum, amountNum, branch_id, invoice_id]
+            );
+
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+
+        const mapped = await fetchDiscountRowById(branch_id, discountIdVal);
+        const data = mapped ? await mapDiscountListRow(mapped) : {
+            discount_id: discountIdVal,
+            expense_id,
+            transaction_id,
+            invoice_id,
+            party_type: partyTypeVal,
+            party_id: partyIdVal,
+            amount: amountNum,
+            transaction_date: discountDate,
+            discount_date: discountDate,
+            remark: remarkVal,
+        };
+
+        return res.status(200).json({
+            success: true,
+            message: "Discount entry updated successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("Edit discount entry error:", error);
+        return res.status(500).json({ success: false, message: "Failed to update discount entry", error: error.message });
+    }
+});
+
+router.get("/discount/details", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const discount_id = req.query?.discount_id;
+
+        if (!discount_id || String(discount_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "discount_id is required" });
+        }
+
+        const row = await fetchDiscountRowById(branch_id, String(discount_id).trim());
+        if (!row) {
+            return res.status(404).json({ success: false, message: "Discount entry not found" });
+        }
+
+        return res.status(200).json({
+            success: true,
+            data: await mapDiscountListRow(row),
+        });
+    } catch (error) {
+        console.error("Discount details error:", error);
+        return res.status(500).json({ success: false, message: "Failed to get discount details", error: error.message });
+    }
+});
+
+router.get("/discount/list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const page_no = Math.max(1, Number(req.query?.page_no) || 1);
+        const limit = Math.min(100, Math.max(1, Number(req.query?.limit) || 10));
+        const offset = (page_no - 1) * limit;
+        const from_date = req.query?.from_date || null;
+        const to_date = req.query?.to_date || null;
+        const search = req.query?.search || null;
+
+        const searchRaw = search && String(search).trim() !== "" ? String(search).trim() : null;
+        const searchPattern = searchRaw != null ? `%${searchRaw}%` : null;
+        const hasSearch = searchPattern != null;
+
+        const searchClause = hasSearch
+            ? `AND (
+                IFNULL(t.remark, '') LIKE ?
+                OR IFNULL(ee.remark, '') LIKE ?
+                OR de.invoice_no LIKE ?
+                OR CAST(de.amount AS CHAR) LIKE ?
+                OR de.party_id LIKE ?
+            )`
+            : "";
+
+        const whereClause = `de.branch_id = ?
+            AND (de.discount_date >= ? AND de.discount_date <= ?)
+            ${searchClause}`;
+
+        const params = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
+        if (hasSearch) {
+            params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        }
+
+        const [rows] = await pool.query(
+            `SELECT
+                de.discount_id, de.discount_date, de.party_type, de.party_id, de.amount,
+                de.invoice_id, de.invoice_no, de.transaction_id,
+                de.create_by, de.modify_by, de.create_date, de.modify_date,
+                ee.expense_id, ee.remark AS expense_remark,
+                t.remark, t.transaction_date
+             FROM discount_entries de
+             INNER JOIN expense_entries ee
+                ON ee.branch_id = de.branch_id
+                AND ee.transaction_id = de.transaction_id
+                AND IFNULL(ee.is_reserved, 0) = 1
+                AND ee.reserved = 'discount'
+             LEFT JOIN transactions t
+                ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
+             WHERE ${whereClause}
+             ORDER BY de.discount_date DESC, de.id DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
+        );
+
+        const [[{ total: totalRows }]] = await pool.query(
+            `SELECT COUNT(*) AS total
+             FROM discount_entries de
+             INNER JOIN expense_entries ee
+                ON ee.branch_id = de.branch_id
+                AND ee.transaction_id = de.transaction_id
+                AND IFNULL(ee.is_reserved, 0) = 1
+                AND ee.reserved = 'discount'
+             LEFT JOIN transactions t
+                ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
+             WHERE ${whereClause}`,
+            params
+        );
+        const total = Number(totalRows) || 0;
+
+        const statsWhereClause = `de.branch_id = ? AND (de.discount_date >= ? AND de.discount_date <= ?)`;
+        const statsParams = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
+
+        const [[{ total: statsCount }]] = await pool.query(
+            `SELECT COUNT(*) AS total
+             FROM discount_entries de
+             INNER JOIN expense_entries ee
+                ON ee.branch_id = de.branch_id
+                AND ee.transaction_id = de.transaction_id
+                AND IFNULL(ee.is_reserved, 0) = 1
+                AND ee.reserved = 'discount'
+             WHERE ${statsWhereClause}`,
+            statsParams
+        );
+
+        const [[{ total_amount: totalAmountRows }]] = await pool.query(
+            `SELECT COALESCE(SUM(de.amount), 0) AS total_amount
+             FROM discount_entries de
+             INNER JOIN expense_entries ee
+                ON ee.branch_id = de.branch_id
+                AND ee.transaction_id = de.transaction_id
+                AND IFNULL(ee.is_reserved, 0) = 1
+                AND ee.reserved = 'discount'
+             WHERE ${statsWhereClause}`,
+            statsParams
+        );
+        const total_amount = Number(Number(totalAmountRows ?? 0).toFixed(2));
+
+        const data = [];
+        for (let index = 0; index < rows.length; index++) {
+            data.push(await mapDiscountListRow(rows[index]));
+        }
+
+        return res.status(200).json({
+            success: true,
+            data,
+            stats: {
+                count: Number(statsCount) || 0,
+                amount: total_amount,
+            },
+            pagination: {
+                page_no,
+                limit,
+                total,
+                is_last_page: offset + data.length >= total,
+            },
+        });
+    } catch (error) {
+        console.error("Discount list error:", error);
+        return res.status(500).json({ success: false, message: "Failed to get discount list", error: error.message });
     }
 });
 
