@@ -1,7 +1,8 @@
 import express from "express";
 import axios from "axios";
 import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+import { auth, validateBranch } from "../middleware/auth.js";
+import { getOrCreateWallet, debitWallet } from "../services/walletService.js";
 
 const router = express.Router();
 
@@ -24,14 +25,15 @@ router.post("/create-checkout", auth, async (req, res) => {
 
         const cycle = billingCycle === "yearly" ? "yearly" : "monthly";
 
-        // Plan pricing in INR (represented in Paise, where 1 INR = 100 Paise)
+        // Plan pricing in INR Rupees
         const pricing = {
-            Business: { monthly: 99900, yearly: 999900 },
-            BusinessPlus: { monthly: 199900, yearly: 1999900 },
-            BusinessPro: { monthly: 299900, yearly: 2999900 }
+            Business: { monthly: 999, yearly: 9999 },
+            BusinessPlus: { monthly: 1999, yearly: 19999 },
+            BusinessPro: { monthly: 2999, yearly: 29999 }
         };
 
-        const amount = pricing[planName][cycle];
+        const amountRupees = pricing[planName][cycle];
+        const amountPaise = amountRupees * 100;
 
         const keyId = process.env.RAZORPAY_KEY_ID;
         const keySecret = process.env.RAZORPAY_KEY_SECRET;
@@ -49,7 +51,7 @@ router.post("/create-checkout", auth, async (req, res) => {
         const response = await axios.post(
             "https://api.razorpay.com/v1/orders",
             {
-                amount,
+                amount: amountPaise,
                 currency: "INR",
                 receipt: `rcpt_${username}_${Date.now()}`,
                 notes: {
@@ -68,19 +70,19 @@ router.post("/create-checkout", auth, async (req, res) => {
 
         const orderId = response.data.id;
 
-        // Insert pending order status in DB
+        // Insert pending order status in DB (amount stored in Paise)
         await pool.query(
             `INSERT INTO razorpay_orders 
                 (razorpay_order_id, username, plan_name, billing_cycle, amount, status) 
              VALUES (?, ?, ?, ?, ?, 'pending')`,
-            [orderId, username, planName, cycle, amount]
+            [orderId, username, planName, cycle, amountPaise]
         );
 
         return res.status(200).json({
             success: true,
             data: {
                 key: keyId,
-                amount,
+                amount: amountPaise,
                 currency: "INR",
                 order_id: orderId,
                 name: "OOMS CRM",
@@ -155,13 +157,20 @@ router.post("/verify-payment", auth, async (req, res) => {
             [planName, expiresAt, razorpay_order_id, username]
         );
 
-        // Update orders tracking
+        // Update orders tracking (convert to paise or retrieve)
+        const pricing = {
+            Business: { monthly: 999, yearly: 9999 },
+            BusinessPlus: { monthly: 1999, yearly: 19999 },
+            BusinessPro: { monthly: 2999, yearly: 29999 }
+        };
+        const amountPaise = (pricing[planName]?.[billingCycle || 'monthly'] || 0) * 100;
+
         await pool.query(
             `INSERT INTO razorpay_orders 
-                (razorpay_order_id, username, plan_name, billing_cycle, status, razorpay_payment_id) 
-             VALUES (?, ?, ?, ?, 'paid', ?) 
+                (razorpay_order_id, username, plan_name, billing_cycle, amount, status, razorpay_payment_id) 
+             VALUES (?, ?, ?, ?, ?, 'paid', ?) 
              ON DUPLICATE KEY UPDATE status = 'paid', razorpay_payment_id = ?`,
-            [razorpay_order_id, username, planName, billingCycle || 'monthly', razorpay_payment_id, razorpay_payment_id]
+            [razorpay_order_id, username, planName, billingCycle || 'monthly', amountPaise, razorpay_payment_id, razorpay_payment_id, razorpay_payment_id]
         );
 
         return res.status(200).json({
@@ -258,4 +267,115 @@ router.get("/status", auth, async (req, res) => {
     }
 });
 
+/**
+ * 4. POST /pay-from-wallet
+ * Subscribes a user to a plan by debiting the active branch's wallet balance.
+ * Body: { planName: 'Business' | 'BusinessPlus' | 'BusinessPro', billingCycle: 'monthly' | 'yearly' }
+ */
+router.post("/pay-from-wallet", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const { planName, billingCycle } = req.body || {};
+        const username = req.headers["username"] || req.headers["Username"] || '';
+        const branchId = req.branch_id;
+
+        if (!planName || !["Business", "BusinessPlus", "BusinessPro"].includes(planName)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid planName. Must be Business, BusinessPlus, or BusinessPro."
+            });
+        }
+
+        const cycle = billingCycle === "yearly" ? "yearly" : "monthly";
+
+        // Plan pricing in INR Rupees
+        const pricing = {
+            Business: { monthly: 999, yearly: 9999 },
+            BusinessPlus: { monthly: 1999, yearly: 19999 },
+            BusinessPro: { monthly: 2999, yearly: 29999 }
+        };
+
+        const amountRupees = pricing[planName][cycle];
+
+        // Fetch and verify wallet balance
+        const wallet = await getOrCreateWallet(branchId);
+        if (wallet.balance < amountRupees) {
+            return res.status(400).json({
+                success: false,
+                message: `Insufficient wallet balance. Plan price is ₹${amountRupees}, but your wallet balance is ₹${wallet.balance}. Please add money to your wallet.`
+            });
+        }
+
+        // Calculate Plan Expiration Date
+        const expiresAt = new Date();
+        if (cycle === "yearly") {
+            expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+        } else {
+            expiresAt.setMonth(expiresAt.getMonth() + 1);
+        }
+
+        const walletOrderId = `wallet_pay_${branchId}_${Date.now()}`;
+
+        // Process payment and activate subscription inside transaction
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        // 1. Debit wallet
+        await debitWallet({
+            branch_id: branchId,
+            amount: amountRupees,
+            purpose: `Subscription: ${planName} (${cycle})`,
+            details: `Subscribed via wallet payment for user ${username}`,
+            connection: conn
+        });
+
+        // 2. Update user subscription status
+        await conn.query(
+            `UPDATE users 
+             SET is_subscribed = 'yes', 
+                 subscription_plan = ?, 
+                 subscription_expires_at = ?, 
+                 razorpay_subscription_id = ? 
+             WHERE username = ?`,
+            [planName, expiresAt, walletOrderId, username]
+        );
+
+        // 3. Record transaction in orders table (amount in Paise)
+        await conn.query(
+            `INSERT INTO razorpay_orders 
+                (razorpay_order_id, username, plan_name, billing_cycle, amount, status, razorpay_payment_id) 
+             VALUES (?, ?, ?, ?, ?, 'paid', ?)`,
+            [walletOrderId, username, planName, cycle, amountRupees * 100, walletOrderId]
+        );
+
+        await conn.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: "Subscription successfully paid and activated via wallet.",
+            data: {
+                is_subscribed: "yes",
+                subscription_plan: planName,
+                subscription_expires_at: expiresAt,
+                remaining_wallet_balance: wallet.balance - amountRupees
+            }
+        });
+    } catch (error) {
+        if (conn) {
+            try {
+                await conn.rollback();
+            } catch (_) {}
+        }
+        console.error("Wallet Subscription Payment Error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to process wallet payment for subscription",
+            error: error.message
+        });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
 export default router;
+// Trigger reload: loaded Razorpay test credentials
