@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 const router = express.Router();
 import authRoutes from "./auth.js";
+import subscriptionRoutes from "./subscription.js";
 import clientRoutes from "./client.js";
 import caRoutes from "./ca.js";
 import adminRoutes from "./admin.js";
@@ -45,6 +46,7 @@ import backupRoutes from "./backup.js";
 
 
 router.use("/auth", authRoutes);
+router.use("/subscription", subscriptionRoutes);
 router.use("/client", clientRoutes);
 router.use("/ca", caRoutes);
 router.use("/admin", adminRoutes);

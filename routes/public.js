@@ -299,4 +299,86 @@ router.get("/contact", async (req, res) => {
     });
 });
 
+/**
+ * POST /webhook/razorpay
+ * Unauthenticated webhook handler to listen for Razorpay payment notifications.
+ */
+router.post("/webhook/razorpay", async (req, res) => {
+    const signature = req.headers["x-razorpay-signature"];
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    // Optional webhook signature verification
+    if (webhookSecret && signature) {
+        try {
+            const crypto = await import("crypto");
+            const shasum = crypto.createHmac("sha256", webhookSecret);
+            shasum.update(JSON.stringify(req.body));
+            const digest = shasum.digest("hex");
+
+            if (digest !== signature) {
+                console.error("Razorpay Webhook Signature verification failed.");
+                return res.status(400).json({ success: false, message: "Invalid signature" });
+            }
+        } catch (err) {
+            console.error("Webhook signature calculation error:", err);
+            return res.status(500).json({ success: false, message: "Signature verification failed error" });
+        }
+    }
+
+    const event = req.body?.event;
+    console.log("Razorpay Webhook Received. Event:", event);
+
+    try {
+        if (event === "order.paid" || event === "payment.captured") {
+            const payload = req.body.payload;
+            const payment = payload?.payment?.entity;
+            const orderId = payment?.order_id;
+
+            if (orderId) {
+                // Fetch the pending order details
+                const [orders] = await pool.query(
+                    "SELECT username, plan_name, billing_cycle FROM razorpay_orders WHERE razorpay_order_id = ? LIMIT 1",
+                    [orderId]
+                );
+
+                if (orders.length > 0) {
+                    const { username, plan_name, billing_cycle } = orders[0];
+
+                    // Calculate Plan Expiration Date
+                    const expiresAt = new Date();
+                    if (billing_cycle === "yearly") {
+                        expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+                    } else {
+                        expiresAt.setMonth(expiresAt.getMonth() + 1);
+                    }
+
+                    // Update user subscription state
+                    await pool.query(
+                        `UPDATE users 
+                         SET is_subscribed = 'yes', 
+                             subscription_plan = ?, 
+                             subscription_expires_at = ?, 
+                             razorpay_subscription_id = ? 
+                         WHERE username = ?`,
+                        [plan_name, expiresAt, orderId, username]
+                    );
+
+                    // Update order status to paid
+                    await pool.query(
+                        "UPDATE razorpay_orders SET status = 'paid', razorpay_payment_id = ? WHERE razorpay_order_id = ?",
+                        [payment.id, orderId]
+                    );
+
+                    console.log(`Razorpay Webhook processed successfully. Plan: ${plan_name} for User: ${username}`);
+                }
+            }
+        }
+
+        return res.status(200).json({ status: "ok" });
+    } catch (error) {
+        console.error("Razorpay Webhook Processing Error:", error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 export default router;

@@ -49,6 +49,9 @@ const ONECHATTING_TEMPLATE_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/temp
 
 const router = express.Router();
 
+import { checkSubscription, requirePlan } from "../middleware/auth.js";
+router.use(checkSubscription, requirePlan(['BusinessPro']));
+
 async function resolveOneChattingToken(username, branch_id) {
     const [rows] = await pool.query(
         `SELECT onechatting_token, onechatting_enabled

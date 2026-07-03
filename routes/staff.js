@@ -1,6 +1,9 @@
 import express from 'express';
 const router = express.Router();
 
+import { checkSubscription, requirePlan } from "../middleware/auth.js";
+router.use(checkSubscription, requirePlan(['BusinessPlus', 'BusinessPro']));
+
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, USER_DATA } from "../helpers/function.js";

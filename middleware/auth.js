@@ -157,4 +157,87 @@ async function validateBranch(req, res, next) {
     }
 }
 
-export { auth, checkToken, CheckUserProjectMaping, validateBranch }
+async function checkSubscription(req, res, next) {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || '';
+        const branch = req.headers["branch"] || req.headers["Branch"] || req.query.branch_id || '';
+        
+        if (!username) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired or username missing"
+            });
+        }
+        
+        let targetUsername = username;
+        
+        // Resolve the subscription of the active branch admin/owner
+        if (branch) {
+            const [ownerRows] = await pool.query(
+                "SELECT username FROM branch_mapping WHERE branch_id = ? AND type = 'admin' AND is_deleted = '0' LIMIT 1",
+                [branch]
+            );
+            if (ownerRows.length > 0) {
+                targetUsername = ownerRows[0].username;
+            }
+        }
+        
+        const [rows] = await pool.query(
+            "SELECT is_subscribed, subscription_plan, subscription_expires_at FROM users WHERE username = ? LIMIT 1",
+            [targetUsername]
+        );
+        
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "User account not found"
+            });
+        }
+        
+        const user = rows[0];
+        const isSubscribed = user.is_subscribed === 'yes';
+        const hasExpired = user.subscription_expires_at && new Date(user.subscription_expires_at) < new Date();
+        
+        req.subscription = {
+            is_subscribed: isSubscribed && !hasExpired ? 'yes' : 'no',
+            subscription_plan: isSubscribed && !hasExpired ? user.subscription_plan : 'None',
+            subscription_expires_at: user.subscription_expires_at
+        };
+        
+        next();
+    } catch (err) {
+        console.error("Subscription validation error:", err);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to validate subscription status",
+            error: err.message
+        });
+    }
+}
+
+function requirePlan(allowedPlans) {
+    return (req, res, next) => {
+        const isSubscribed = req.subscription?.is_subscribed === 'yes';
+        const plan = req.subscription?.subscription_plan || 'None';
+        
+        if (!isSubscribed) {
+            return res.status(403).json({
+                success: false,
+                message: "Active subscription required. Please subscribe to a plan.",
+                code: "SUBSCRIPTION_REQUIRED"
+            });
+        }
+        
+        if (!allowedPlans.includes(plan)) {
+            return res.status(403).json({
+                success: false,
+                message: `This feature is not available in your current plan (${plan}). Please upgrade your plan.`,
+                code: "PLAN_UPGRADE_REQUIRED"
+            });
+        }
+        
+        next();
+    };
+}
+
+export { auth, checkToken, CheckUserProjectMaping, validateBranch, checkSubscription, requirePlan }
