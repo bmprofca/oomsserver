@@ -3284,6 +3284,7 @@ router.post("/import", auth, validateBranch, (req, res) => {
         try {
             const branch_id = req.branch_id;
             const createdBy = req.headers["username"] || "";
+            const normalizeStr = (str) => String(str || '').trim().toLowerCase().replace(/\s+/g, ' ');
             const isPreview = req.query.preview === 'true';
             const fileBuffer = req.file.buffer;
             const originalName = req.file.originalname;
@@ -3385,7 +3386,8 @@ router.post("/import", auth, validateBranch, (req, res) => {
             if (!mappedCols.name) missingRequiredHeaders.push("Client Name");
             if (!mappedCols.mobile) missingRequiredHeaders.push("Mobile");
             if (!mappedCols.email) missingRequiredHeaders.push("Email");
-            if (!mappedCols.pan_number) missingRequiredHeaders.push("PAN Number");
+            // PAN number is now optional for bulk client uploads
+            // if (!mappedCols.pan_number) missingRequiredHeaders.push("PAN Number");
             if (!mappedCols.gender) missingRequiredHeaders.push("Gender");
             if (!mappedCols.date_of_birth) missingRequiredHeaders.push("Date of Birth");
             if (!mappedCols.state) missingRequiredHeaders.push("State");
@@ -3422,7 +3424,7 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 const name = String(row[mappedCols.name] || '').trim();
                 const mobile = String(row[mappedCols.mobile] || '').trim();
                 const email = String(row[mappedCols.email] || '').trim();
-                const pan_number = String(row[mappedCols.pan_number] || '').trim().toUpperCase();
+                const pan_number = String(mappedCols.pan_number ? (row[mappedCols.pan_number] || '') : '').trim().toUpperCase();
                 const rawGender = String(row[mappedCols.gender] || '').trim().toLowerCase();
                 const rawDob = row[mappedCols.date_of_birth];
                 const care_of = String(mappedCols.care_of ? (row[mappedCols.care_of] || '') : '').trim();
@@ -3466,10 +3468,10 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 }
 
                 const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
-                if (!pan_number) {
-                    rowErrors.push("PAN Number is required");
-                } else if (!panRegex.test(pan_number)) {
-                    rowErrors.push("Invalid PAN format (should be 10 characters e.g. ABCDE1234F)");
+                if (pan_number) {
+                    if (!panRegex.test(pan_number)) {
+                        rowErrors.push("Invalid PAN format (should be 10 characters e.g. ABCDE1234F)");
+                    }
                 }
 
                 let gender = null;
@@ -3522,39 +3524,117 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 }
 
                 // Check duplicates in database (if no local errors found yet, to save DB query overhead)
+                let isDuplicateOfExistingInBranch = false;
                 if (rowErrors.length === 0) {
-                    // Duplicate mobile check
-                    const [dupMobile] = await pool.query(
-                        "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.mobile = ? AND c.user_type = 'client' AND c.is_deleted = '0' LIMIT 1",
-                        [mobile]
-                    );
-                    if (dupMobile.length > 0) {
-                        rowErrors.push(`Mobile number already exists (registered to ${dupMobile[0].name})`);
-                    }
+                    if (!pan_number) {
+                        // PAN is optional. If no PAN, we check per-branch uniqueness.
+                        // Query database for clients with the same mobile or email in the current branch
+                        const [existingClients] = await pool.query(
+                            `SELECT p.name, p.mobile, p.email, p.address_line_1, p.address_line_2, p.city, p.state, p.pincode 
+                             FROM profile p 
+                             JOIN clients c ON p.username = c.username 
+                             WHERE (p.mobile = ? OR p.email = ?) 
+                               AND c.branch_id = ? 
+                               AND c.user_type = 'client' 
+                               AND c.is_deleted = '0'`,
+                            [mobile, email, branch_id]
+                        );
 
-                    // Duplicate email check
-                    const [dupEmail] = await pool.query(
-                        "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.email = ? AND c.user_type = 'client' AND c.is_deleted = '0' LIMIT 1",
-                        [email]
-                    );
-                    if (dupEmail.length > 0) {
-                        rowErrors.push(`Email already exists (registered to ${dupEmail[0].name})`);
-                    }
+                        if (existingClients.length > 0) {
+                            // Check if any of them is an exact match (same mobile, name, address)
+                            const isExactMatch = existingClients.some(ec => {
+                                return normalizeStr(ec.name) === normalizeStr(name) &&
+                                       normalizeStr(ec.mobile) === normalizeStr(mobile) &&
+                                       normalizeStr(ec.address_line_1) === normalizeStr(address_line_1) &&
+                                       normalizeStr(ec.address_line_2) === normalizeStr(address_line_2) &&
+                                       normalizeStr(ec.city) === normalizeStr(city) &&
+                                       normalizeStr(ec.state) === normalizeStr(state) &&
+                                       normalizeStr(ec.pincode) === normalizeStr(pincode);
+                            });
 
-                    // Duplicate PAN check (branch specific)
-                    const [dupPan] = await pool.query(
-                        "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.pan_number = ? AND c.user_type = 'client' AND c.is_deleted = '0' AND c.branch_id = ? LIMIT 1",
-                        [pan_number, branch_id]
-                    );
-                    if (dupPan.length > 0) {
-                        rowErrors.push(`PAN number already exists in this branch (registered to ${dupPan[0].name})`);
-                    }
+                            if (isExactMatch) {
+                                // If exact match, we skip importing this row since it's already there
+                                isDuplicateOfExistingInBranch = true;
+                            } else {
+                                // If mobile or email matches but Name/Address is different, it is a duplicate conflict in this branch
+                                for (const ec of existingClients) {
+                                    if (normalizeStr(ec.mobile) === normalizeStr(mobile) && normalizeStr(ec.name) !== normalizeStr(name)) {
+                                        rowErrors.push(`Mobile number already exists in this branch (registered to ${ec.name})`);
+                                    }
+                                    if (normalizeStr(ec.email) === normalizeStr(email) && normalizeStr(ec.name) !== normalizeStr(name)) {
+                                        rowErrors.push(`Email already exists in this branch (registered to ${ec.name})`);
+                                    }
+                                }
+                            }
+                        }
 
-                    // Also check duplicates within the uploaded file itself
-                    const isDupInFile = parsedClients.some(c => c.mobile === mobile || c.email === email || c.pan_number === pan_number);
-                    if (isDupInFile) {
-                        rowErrors.push("Duplicate record within this spreadsheet (mobile, email, or PAN already present in a previous row)");
+                        // Also check duplicate within the uploaded spreadsheet
+                        if (rowErrors.length === 0 && !isDuplicateOfExistingInBranch) {
+                            const isDupInFile = parsedClients.some(c => {
+                                return normalizeStr(c.mobile) === normalizeStr(mobile) || 
+                                       normalizeStr(c.email) === normalizeStr(email);
+                            });
+
+                            if (isDupInFile) {
+                                // Check if there is an exact match in the file already parsed
+                                const exactMatchInFile = parsedClients.find(c => {
+                                    return normalizeStr(c.name) === normalizeStr(name) &&
+                                           normalizeStr(c.mobile) === normalizeStr(mobile) &&
+                                           normalizeStr(c.address_line_1) === normalizeStr(address_line_1) &&
+                                           normalizeStr(c.address_line_2) === normalizeStr(address_line_2) &&
+                                           normalizeStr(c.city) === normalizeStr(city) &&
+                                           normalizeStr(c.state) === normalizeStr(state) &&
+                                           normalizeStr(c.pincode) === normalizeStr(pincode);
+                                });
+
+                                if (exactMatchInFile) {
+                                    // Exact duplicate in spreadsheet: skip it (don't insert twice)
+                                    isDuplicateOfExistingInBranch = true;
+                                } else {
+                                    rowErrors.push("Duplicate record within this spreadsheet (mobile or email already present in a previous row with different client details)");
+                                }
+                            }
+                        }
+
+                    } else {
+                        // Standard validation checks if PAN is present:
+                        // Duplicate mobile check (global)
+                        const [dupMobile] = await pool.query(
+                            "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.mobile = ? AND c.user_type = 'client' AND c.is_deleted = '0' LIMIT 1",
+                            [mobile]
+                        );
+                        if (dupMobile.length > 0) {
+                            rowErrors.push(`Mobile number already exists (registered to ${dupMobile[0].name})`);
+                        }
+
+                        // Duplicate email check (global)
+                        const [dupEmail] = await pool.query(
+                            "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.email = ? AND c.user_type = 'client' AND c.is_deleted = '0' LIMIT 1",
+                            [email]
+                        );
+                        if (dupEmail.length > 0) {
+                            rowErrors.push(`Email already exists (registered to ${dupEmail[0].name})`);
+                        }
+
+                        // Duplicate PAN check (branch specific)
+                        const [dupPan] = await pool.query(
+                            "SELECT p.name FROM profile p JOIN clients c ON p.username = c.username WHERE p.pan_number = ? AND c.user_type = 'client' AND c.is_deleted = '0' AND c.branch_id = ? LIMIT 1",
+                            [pan_number, branch_id]
+                        );
+                        if (dupPan.length > 0) {
+                            rowErrors.push(`PAN number already exists in this branch (registered to ${dupPan[0].name})`);
+                        }
+
+                        // Check duplicates within the uploaded file itself
+                        const isDupInFile = parsedClients.some(c => c.mobile === mobile || c.email === email || c.pan_number === pan_number);
+                        if (isDupInFile) {
+                            rowErrors.push("Duplicate record within this spreadsheet (mobile, email, or PAN already present in a previous row)");
+                        }
                     }
+                }
+
+                if (isDuplicateOfExistingInBranch && rowErrors.length === 0) {
+                    continue; // Skip inserting and continue to next row!
                 }
 
                 if (rowErrors.length > 0) {
@@ -3568,7 +3648,7 @@ router.post("/import", auth, validateBranch, (req, res) => {
                         name,
                         mobile,
                         email,
-                        pan_number,
+                        pan_number: pan_number || null,
                         gender,
                         date_of_birth: dob,
                         care_of: care_of || 'N/A',
@@ -3583,7 +3663,7 @@ router.post("/import", auth, validateBranch, (req, res) => {
                         firm: {
                             firm_name: finalFirmName,
                             firm_type: firmType,
-                            pan_no: finalFirmPan,
+                            pan_no: finalFirmPan || null,
                             gst_no: gst_no || null,
                             tan_no: tan_no || null,
                             vat_no: vat_no || null,
