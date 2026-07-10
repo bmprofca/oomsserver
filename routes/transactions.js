@@ -685,7 +685,8 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
             party1_type,
             party2_type,
             remark,
-            transaction_date
+            transaction_date,
+            notification
         } = req.body || {};
 
         if (amount == null || Number(amount) <= 0) {
@@ -721,6 +722,9 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
         const remarkVal = remark != null ? String(remark).trim() : null;
+        const shouldNotifyEmail = notification?.email !== false;
+        const shouldNotifyWhatsapp = notification?.whatsapp !== false;
+        const shouldNotifySms = notification?.sms === true;
 
         const connection = await pool.getConnection();
         try {
@@ -759,28 +763,34 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
             await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
 
             await connection.commit();
-            // After connection.commit() and before returning response
-            await notifyPaymentReceiptEmail({
-                branch_id: branch_id,
-                transaction_id: transaction_id,
-                amount: amountNum,
-                party1_id: p1_id,
-                party1_type: p1_type,
-                party2_id: p2_id,
-                party2_type: p2_type,
-                transaction_date: txnDate,
-                remark: remarkVal,
-                invoice_no: invoice_no
-            });
-            notifyPaymentReceiveWhatsapp({
-                branch_id,
-                amount: amountNum,
-                party1_id: p1_id,
-                party1_type: p1_type,
-                transaction_date: txnDate,
-                invoice_no,
-                received_by: username,
-            });
+            if (shouldNotifyEmail) {
+                await notifyPaymentReceiptEmail({
+                    branch_id: branch_id,
+                    transaction_id: transaction_id,
+                    amount: amountNum,
+                    party1_id: p1_id,
+                    party1_type: p1_type,
+                    party2_id: p2_id,
+                    party2_type: p2_type,
+                    transaction_date: txnDate,
+                    remark: remarkVal,
+                    invoice_no: invoice_no
+                });
+            }
+            if (shouldNotifyWhatsapp) {
+                notifyPaymentReceiveWhatsapp({
+                    branch_id,
+                    amount: amountNum,
+                    party1_id: p1_id,
+                    party1_type: p1_type,
+                    transaction_date: txnDate,
+                    invoice_no,
+                    received_by: username,
+                });
+            }
+            if (shouldNotifySms) {
+                // SMS notification hook is not wired for payment receive yet.
+            }
         } catch (err) {
             await connection.rollback();
             throw err;
@@ -814,7 +824,8 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
             party1_type,
             party2_type,
             remark,
-            transaction_date
+            transaction_date,
+            notification
         } = req.body || {};
 
         if (amount == null || Number(amount) <= 0) {
@@ -850,6 +861,8 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
         const p2_id = String(party2_id).trim();
         const p2_type = String(party2_type).trim();
         const remarkVal = remark != null ? String(remark).trim() : null;
+        const shouldNotifyEmail = notification?.email !== false;
+        const shouldNotifySms = notification?.sms === true;
 
         const connection = await pool.getConnection();
         try {
@@ -888,19 +901,23 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
             await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
 
             await connection.commit();
-            // After connection.commit()
-            await notifyPaymentEmail({
-                branch_id: branch_id,
-                transaction_id: transaction_id,
-                amount: amountNum,
-                party1_id: p1_id,
-                party1_type: p1_type,
-                party2_id: p2_id,
-                party2_type: p2_type,
-                transaction_date: txnDate,
-                remark: remarkVal,
-                invoice_no: invoice_no
-            });
+            if (shouldNotifyEmail) {
+                await notifyPaymentEmail({
+                    branch_id: branch_id,
+                    transaction_id: transaction_id,
+                    amount: amountNum,
+                    party1_id: p1_id,
+                    party1_type: p1_type,
+                    party2_id: p2_id,
+                    party2_type: p2_type,
+                    transaction_date: txnDate,
+                    remark: remarkVal,
+                    invoice_no: invoice_no
+                });
+            }
+            if (shouldNotifySms) {
+                // SMS notification hook is not wired for payment yet.
+            }
         } catch (err) {
             await connection.rollback();
             throw err;
