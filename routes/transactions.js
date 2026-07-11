@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
+import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import {
@@ -265,7 +265,7 @@ router.post("/bank/create", auth, validateBranch, async (req, res) => {
         const branchForInsert = isCashType ? null : branch;
 
 
-        const bank_id = RANDOM_STRING(30);
+        const bank_id = await UNIQUE_RANDOM_STRING("banks", "bank_id", { length: ID_LENGTH });
         await pool.query(
             "INSERT INTO `banks` (`branch_id`, `bank_id`, `create_by`, `modify_by`, `account_no`, `holder`, `ifsc`, `bank`, `branch`, `type`, `remark`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
@@ -716,8 +716,6 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
 
         const amountNum = Number(amount);
         const txnDate = transaction_date ? String(transaction_date).trim() : new Date().toISOString().slice(0, 10);
-        const transaction_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
@@ -729,6 +727,9 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -855,8 +856,6 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
 
         const amountNum = Number(amount);
         const txnDate = transaction_date ? String(transaction_date).trim() : new Date().toISOString().slice(0, 10);
-        const transaction_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
         const p2_type = String(party2_type).trim();
@@ -867,6 +866,9 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -969,9 +971,6 @@ router.post("/payment/journal", auth, validateBranch, async (req, res) => {
 
         const amountNum = Number(amount);
         const txnDate = transaction_date ? String(transaction_date).trim() : new Date().toISOString().slice(0, 10);
-        const transaction_id = RANDOM_STRING(30);
-        const journal_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
@@ -981,6 +980,10 @@ router.post("/payment/journal", auth, validateBranch, async (req, res) => {
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const journal_id = await UNIQUE_RANDOM_STRING("journal_entries", "journal_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -1669,8 +1672,8 @@ router.post("/set-opening-balance", auth, validateBranch, async (req, res) => {
             const serial = Number(invoiceData?.current || 0) + 1;
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
-            const transaction_id = RANDOM_STRING(30);
-            const invoice_id = RANDOM_STRING(30);
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const grandTotal = absAmount;
             await connection.query(
@@ -2596,7 +2599,7 @@ router.post("/capital/create", auth, validateBranch, async (req, res) => {
         } = req.body || {};
 
 
-        const capital_id = RANDOM_STRING(30);
+        const capital_id = await UNIQUE_RANDOM_STRING("capitals", "capital_id", { length: ID_LENGTH });
         await pool.query(
             "INSERT INTO `capitals` (`branch_id`, `capital_id`, `create_by`, `modify_by`, `name`, `remark`) VALUES (?,?,?,?,?,?)",
             [
@@ -2841,14 +2844,15 @@ router.post("/payment/discount", auth, validateBranch, async (req, res) => {
         // Store discount as a negative grand_total so ledger balance decreases.
         const grandTotal = -absAmount;
 
-        const transaction_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
-        const discount_id = RANDOM_STRING(30);
         let invoice_no = "";
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const discount_id = await UNIQUE_RANDOM_STRING("discount_entries", "discount_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",

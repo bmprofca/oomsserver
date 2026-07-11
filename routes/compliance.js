@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, USER_SNIPPED_DATA, ID_LENGTH } from "../helpers/function.js";
 import {
     formatMySqlDate,
     getPeriodDueDate,
@@ -148,10 +148,11 @@ function buildComplianceTaskDueDate(complianceYear, compliancePeriod, dueDay) {
 async function insertTaskStaffs(conn, branch_id, task_id, staffsCsv, createdBy) {
     const staffIds = splitCsvList(staffsCsv);
     for (const staffId of staffIds) {
+        const assign_id = await UNIQUE_RANDOM_STRING("task_staffs", "assign_id", { conn, length: ID_LENGTH });
         await conn.query(
             `INSERT INTO task_staffs (branch_id, assign_id, task_id, username, create_by)
              VALUES (?, ?, ?, ?, ?)`,
-            [branch_id, RANDOM_STRING(30), task_id, staffId, createdBy]
+            [branch_id, assign_id, task_id, staffId, createdBy]
         );
     }
 }
@@ -1161,7 +1162,7 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
 
         if (!existingTasks.length) {
             action = "created";
-            taskId = RANDOM_STRING(30);
+            taskId = await UNIQUE_RANDOM_STRING("tasks", "task_id", { conn });
 
             const caId = splitCsvFirst(complianceFirm.ca);
             const agentId = splitCsvFirst(complianceFirm.agent);

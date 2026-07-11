@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA, CAPITAL_SNIPPED_DATA, USER_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA, CAPITAL_SNIPPED_DATA, USER_DATA } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -18,7 +18,7 @@ const ensureDiscountExpenseItem = async (connection, branch_id, username) => {
     if (rows?.length) {
         return rows[0].item_id;
     }
-    const item_id = RANDOM_STRING(30);
+    const item_id = await UNIQUE_RANDOM_STRING("expense_items", "item_id", { length: ID_LENGTH, conn: connection });
     await connection.query(
         `INSERT INTO expense_items (branch_id, item_id, create_by, modify_by, name, type, remark, is_deleted)
          VALUES (?, ?, ?, ?, ?, 'indirect', ?, '0')`,
@@ -179,7 +179,7 @@ router.post("/item/create", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const item_id = RANDOM_STRING(30);
+        const item_id = await UNIQUE_RANDOM_STRING("expense_items", "item_id", { length: ID_LENGTH });
         await pool.query(
             `INSERT INTO expense_items (branch_id, item_id, create_by, modify_by, name, type, remark, is_deleted)
              VALUES (?, ?, ?, ?, ?, ?, ?, '0')`,
@@ -480,14 +480,15 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
             return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
         }
 
-        const transaction_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
-        const expense_id = RANDOM_STRING(30);
         let invoice_no = "";
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -929,15 +930,16 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
         const amountNum = Math.abs(Number(amount));
         const remarkVal = remark != null ? String(remark).trim() : null;
 
-        const transaction_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
-        const expense_id = RANDOM_STRING(30);
-        const discount_id = RANDOM_STRING(30);
         let invoice_no = "";
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
+            const discount_id = await UNIQUE_RANDOM_STRING("discount_entries", "discount_id", { length: ID_LENGTH, conn: connection });
 
             const itemIdVal = await ensureDiscountExpenseItem(connection, branch_id, username);
 

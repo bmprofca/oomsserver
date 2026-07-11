@@ -1,25 +1,10 @@
 // routes/branchRoutes.js
 import express from "express";
 import pool from "../db.js";
-import { RANDOM_STRING } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
 import { initializeBranchDefaults } from "../services/branchSetupService.js";
 
 const router = express.Router();
-
-const generateUniqueBranchId = async (conn, maxAttempts = 25) => {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const candidate = RANDOM_STRING(6);
-        const [existing] = await conn.query(
-            "SELECT branch_id FROM branch_list WHERE branch_id = ? AND is_deleted = '0'",
-            [candidate]
-        );
-        if (existing.length === 0) {
-            return candidate;
-        }
-    }
-    throw new Error("Failed to generate a unique branch ID");
-};
-
 
 const auth = async (req, res, next) => {
     let conn;
@@ -174,7 +159,11 @@ router.post("/create", auth, async (req, res) => {
 
         let branch_id = explicitBranchId;
         if (!branch_id) {
-            branch_id = await generateUniqueBranchId(conn);
+            branch_id = await UNIQUE_RANDOM_STRING("branch_list", "branch_id", {
+                length: SHORT_ID_LENGTH,
+                conn,
+                where: "is_deleted = '0'",
+            });
         } else {
             const [existingBranch] = await conn.query(
                 "SELECT branch_id FROM branch_list WHERE branch_id = ? AND is_deleted = '0'",
@@ -190,7 +179,11 @@ router.post("/create", auth, async (req, res) => {
             }
         }
 
-        const map_id = `MAP_${Date.now()}_${RANDOM_STRING(6)}`;
+        const map_id = await UNIQUE_RANDOM_STRING("branch_mapping", "map_id", {
+            length: SHORT_ID_LENGTH,
+            prefix: `MAP_${Date.now()}_`,
+            conn,
+        });
         const trimOrNull = (value) => {
             const trimmed = typeof value === "string" ? value.trim() : value;
             return trimmed || null;
@@ -865,7 +858,11 @@ router.post("/:branch_id/invite", auth, async (req, res) => {
 
         // Create mapping for invited user
         const currentTime = new Date();
-        const map_id = `MAP_${Date.now()}_${RANDOM_STRING(6)}`;
+        const map_id = await UNIQUE_RANDOM_STRING("branch_mapping", "map_id", {
+            length: SHORT_ID_LENGTH,
+            prefix: `MAP_${Date.now()}_`,
+            conn,
+        });
         const invitation_token = RANDOM_STRING(50);
 
         await conn.query(

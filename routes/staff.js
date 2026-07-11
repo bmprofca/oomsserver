@@ -6,7 +6,7 @@ router.use(checkSubscription, requirePlan(['BusinessPlus', 'BusinessPro']));
 
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, USER_DATA } from "../helpers/function.js";
+import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
 import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
 import { SendMail } from '../helpers/Mail.js';
 
@@ -412,7 +412,10 @@ router.post('/create', auth, validateBranch, async (req, res) => {
 
         if (!existingMap?.length) {
             // Insert into branch_mapping (schema-safe)
-            map_id = RANDOM_STRING(30);
+            map_id = await UNIQUE_RANDOM_STRING("branch_mapping", "map_id", {
+                length: SHORT_ID_LENGTH,
+                prefix: `MAP_${Date.now()}_`,
+            });
             invitation_token = RANDOM_STRING(100);
             // Let DB defaults handle create_date/modify_date (TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
             await insertRow("branch_mapping", {

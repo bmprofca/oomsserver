@@ -1,121 +1,20 @@
 import express from "express";
-import axios from "axios";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
 import pool from "../db.js";
-import { GET_FIRMS_BY_USERNAME, RANDOM_STRING } from "../helpers/function.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { GET_FIRMS_BY_USERNAME, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { validateAgentSession } from "../middleware/validateAgentSession.js";
+import {
+    deleteProfileImage,
+    downloadAndUploadProfileImage,
+    getProfileImageAccessUrl,
+} from "../helpers/b2Storage.js";
 
 const router = express.Router();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROFILE_IMAGE_DIR = path.join(__dirname, "..", "media", "profile", "image");
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const ALLOWED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
-const ALLOWED_IMAGE_MIME_TYPES = [
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-];
-
-if (!fs.existsSync(PROFILE_IMAGE_DIR)) {
-    fs.mkdirSync(PROFILE_IMAGE_DIR, { recursive: true });
-}
-
-function validateImageFile(buffer, ext) {
-    if (buffer.length < 4) return false;
-
-    const signatures = {
-        jpg: [0xff, 0xd8, 0xff],
-        jpeg: [0xff, 0xd8, 0xff],
-        png: [0x89, 0x50, 0x4e, 0x47],
-        gif: [0x47, 0x49, 0x46, 0x38],
-        webp: [0x52, 0x49, 0x46, 0x46],
-        bmp: [0x42, 0x4d],
-    };
-
-    const signature = signatures[ext];
-    if (!signature) return false;
-
-    for (let i = 0; i < signature.length; i++) {
-        if (buffer[i] !== signature[i]) {
-            return false;
-        }
+async function resolveProfileImageUrl(image) {
+    if (!image || String(image).trim() === "") {
+        return null;
     }
-
-    if (ext === "webp") {
-        const webpString = buffer.toString("ascii", 8, 12);
-        if (webpString !== "WEBP") {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-async function downloadAndSaveProfileImage(imageUrl) {
-    try {
-        if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.trim()) {
-            throw new Error("Invalid image URL");
-        }
-
-        const response = await axios({
-            method: "GET",
-            url: imageUrl,
-            responseType: "arraybuffer",
-            maxContentLength: MAX_IMAGE_SIZE,
-            timeout: 30000,
-            validateStatus: (status) => status === 200,
-        });
-
-        const buffer = Buffer.from(response.data);
-        const contentType = response.headers["content-type"] || "";
-
-        if (buffer.length > MAX_IMAGE_SIZE) {
-            throw new Error("Image size exceeds maximum allowed size of 5MB");
-        }
-
-        if (!ALLOWED_IMAGE_MIME_TYPES.includes(contentType.toLowerCase())) {
-            throw new Error(`Invalid image MIME type: ${contentType}. Allowed types: ${ALLOWED_IMAGE_MIME_TYPES.join(", ")}`);
-        }
-
-        let ext = "jpg";
-        if (contentType.includes("jpeg")) ext = "jpg";
-        else if (contentType.includes("png")) ext = "png";
-        else if (contentType.includes("gif")) ext = "gif";
-        else if (contentType.includes("webp")) ext = "webp";
-        else if (contentType.includes("bmp")) ext = "bmp";
-        else {
-            const urlExt = imageUrl.split(".").pop()?.toLowerCase().split("?")[0];
-            if (urlExt && ALLOWED_IMAGE_EXTENSIONS.includes(urlExt)) {
-                ext = urlExt;
-            }
-        }
-
-        if (!validateImageFile(buffer, ext)) {
-            throw new Error("Invalid image file. File content does not match the image type.");
-        }
-
-        const filename = `${RANDOM_STRING(30)}.${ext}`;
-        fs.writeFileSync(path.join(PROFILE_IMAGE_DIR, filename), buffer);
-        return filename;
-    } catch (error) {
-        if (error.response) {
-            throw new Error(`Failed to download image: HTTP ${error.response.status}`);
-        }
-        if (error.code === "ECONNABORTED") {
-            throw new Error("Image download timeout");
-        }
-        if (error.message.includes("maxContentLength")) {
-            throw new Error("Image size exceeds maximum allowed size of 5MB");
-        }
-        throw new Error(`Failed to download image: ${error.message}`);
-    }
+    return getProfileImageAccessUrl(String(image).trim());
 }
 
 async function getTableColumns(tableName) {
@@ -236,10 +135,8 @@ async function getAgentClientProfile(username, branch_id) {
     return rows[0] || null;
 }
 
-function buildClientDetailsResponse(row) {
-    const image = row.image && String(row.image).trim() !== ""
-        ? `${BASE_DOMAIN}/media/profile/image/${row.image}`
-        : null;
+async function buildClientDetailsResponse(row) {
+    const image = await resolveProfileImageUrl(row.image);
 
     return {
         username: row.username,
@@ -399,7 +296,7 @@ router.get("/list", validateAgentSession, async (req, res) => {
             transformedRow.status = formatClientStatus(transformedRow.status);
 
             if (transformedRow.image && String(transformedRow.image).trim() !== "") {
-                transformedRow.image = `${BASE_DOMAIN}/media/profile/image/${transformedRow.image}`;
+                transformedRow.image = await resolveProfileImageUrl(transformedRow.image);
             } else {
                 transformedRow.image = null;
             }
@@ -552,7 +449,8 @@ router.post("/create", validateAgentSession, async (req, res) => {
 
         if (image && image !== null && String(image).trim() !== "") {
             try {
-                savedImageFilename = await downloadAndSaveProfileImage(image);
+                const uploadResult = await downloadAndUploadProfileImage(image);
+                savedImageFilename = uploadResult.filename;
             } catch (imageError) {
                 return res.status(400).json({
                     success: false,
@@ -563,8 +461,8 @@ router.post("/create", validateAgentSession, async (req, res) => {
 
         await conn.beginTransaction();
 
-        const username = RANDOM_STRING(20);
-        const profile_id = RANDOM_STRING(30);
+        const username = await UNIQUE_RANDOM_STRING("clients", "username", { length: ID_LENGTH, conn });
+        const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH, conn });
 
         await insertRow("clients", {
             username,
@@ -615,7 +513,7 @@ router.post("/create", validateAgentSession, async (req, res) => {
             } = biz;
 
             const isIndividual = business_type.toLowerCase() === "individual";
-            const firm_id = RANDOM_STRING(30);
+            const firm_id = await UNIQUE_RANDOM_STRING("firms", "firm_id", { length: ID_LENGTH, conn });
 
             await insertRow("firms", {
                 firm_id,
@@ -670,10 +568,7 @@ router.post("/create", validateAgentSession, async (req, res) => {
 
         if (savedImageFilename) {
             try {
-                const imagePath = path.join(PROFILE_IMAGE_DIR, savedImageFilename);
-                if (fs.existsSync(imagePath)) {
-                    fs.unlinkSync(imagePath);
-                }
+                await deleteProfileImage(savedImageFilename);
             } catch (cleanupError) {
                 console.error("Error cleaning up image file:", cleanupError);
             }
@@ -722,7 +617,7 @@ router.get("/details/:username", validateAgentSession, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Client details retrieved successfully",
-            data: buildClientDetailsResponse(profileRow),
+            data: await buildClientDetailsResponse(profileRow),
         });
     } catch (error) {
         console.error("AGENT CLIENT DETAILS ERROR:", error);
@@ -952,7 +847,8 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
 
         if (image && image !== null && String(image).trim() !== "") {
             try {
-                savedImageFilename = await downloadAndSaveProfileImage(image);
+                const uploadResult = await downloadAndUploadProfileImage(image);
+                savedImageFilename = uploadResult.filename;
             } catch (imageError) {
                 return res.status(400).json({
                     success: false,
@@ -967,7 +863,7 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
         );
         const profile_id = existingProfileRow.length > 0
             ? existingProfileRow[0].profile_id
-            : RANDOM_STRING(30);
+            : await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH, conn });
         const existingImage = existingProfileRow.length > 0 ? existingProfileRow[0].image : null;
 
         await conn.beginTransaction();
@@ -1037,10 +933,7 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
 
         if (savedImageFilename) {
             try {
-                const imagePath = path.join(PROFILE_IMAGE_DIR, savedImageFilename);
-                if (fs.existsSync(imagePath)) {
-                    fs.unlinkSync(imagePath);
-                }
+                await deleteProfileImage(savedImageFilename);
             } catch (cleanupError) {
                 console.error("Error cleaning up image file:", cleanupError);
             }

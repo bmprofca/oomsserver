@@ -4,7 +4,7 @@ import PDFDocument from 'pdfkit';
 import { Readable } from 'stream';
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, USER_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, ID_LENGTH } from "../helpers/function.js";
 
 // Helper function to get table columns
 async function getTableColumns(tableName) {
@@ -210,7 +210,10 @@ router.post('/punch-in', auth, validateBranch, async (req, res) => {
         }
 
         // Create new attendance
-        const attendance_id = `ATT${RANDOM_STRING(20)}`;
+        const attendance_id = await UNIQUE_RANDOM_STRING("attendance", "attendance_id", {
+            prefix: "ATT",
+            length: ID_LENGTH,
+        });
         
         await insertRow("attendance", {
             attendance_id,
@@ -607,7 +610,10 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
         }
 
         // Create new salary with all fields including break and adjustment settings
-        const salary_id = `SAL${RANDOM_STRING(20)}`;
+        const salary_id = await UNIQUE_RANDOM_STRING("staff_salary", "salary_id", {
+            prefix: "SAL",
+            length: ID_LENGTH,
+        });
         
         await pool.query(
             `INSERT INTO staff_salary (
@@ -3770,7 +3776,10 @@ router.post('/admin/set-weekly-off', auth, validateBranch, async (req, res) => {
             );
         } else {
             // Create new weekly off
-            const off_id = `WOF${RANDOM_STRING(20)}`;
+            const off_id = await UNIQUE_RANDOM_STRING("employee_weekly_off", "off_id", {
+                prefix: "WOF",
+                length: ID_LENGTH,
+            });
             
             await insertRow("employee_weekly_off", {
                 off_id,
@@ -6012,7 +6021,10 @@ router.post('/admin/add-adjustment', auth, validateBranch, async (req, res) => {
         }
 
         // Generate adjustment ID
-        const adjustment_id = `ADJ${RANDOM_STRING(20)}`;
+        const adjustment_id = await UNIQUE_RANDOM_STRING("salary_adjustments", "adjustment_id", {
+            prefix: "ADJ",
+            length: ID_LENGTH,
+        });
 
         await insertRow("salary_adjustments", {
             adjustment_id,

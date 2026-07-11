@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { RANDOM_STRING } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { validateClientSession } from "../middleware/validateClientSession.js";
 
 const router = express.Router();
@@ -420,7 +420,7 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
         const tax_rate = Number(serviceRows[0].gst_rate) || 0;
         const tax_value = Number(serviceRows[0].gst_value) || 0;
         const amount = Number((fees + tax_value).toFixed(2));
-        const request_id = RANDOM_STRING(30);
+        const request_id = await UNIQUE_RANDOM_STRING("service_requests", "request_id", { length: ID_LENGTH });
 
         await pool.query(
             `INSERT INTO service_requests (

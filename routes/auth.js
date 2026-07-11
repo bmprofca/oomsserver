@@ -1,7 +1,7 @@
 import express from "express";
 const router = express.Router();
 import pool from "../db.js";
-import { FORMAT_DATE, RANDOM_INTEGER, RANDOM_STRING } from "../helpers/function.js";
+import { FORMAT_DATE, RANDOM_INTEGER, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { decrypt } from "../utils/smsEncryption.js";
 import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
@@ -232,7 +232,7 @@ router.post("/login/send-otp", async (req, res) => {
         }
 
         // OTP generation
-        const otp_id = RANDOM_STRING();
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
         const otp = RANDOM_INTEGER ? String(RANDOM_INTEGER()) : String(Math.floor(100000 + Math.random() * 900000));
 
         // Optional: invalidate previous active OTPs for this user/type to prevent confusion
@@ -410,7 +410,7 @@ const verifyOtpHandler = async (req, res) => {
         }
 
         // 3) Create token
-        const token_id = RANDOM_STRING(30);
+        const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const token = RANDOM_STRING(50);
         await conn.query(
             `INSERT INTO tokens
@@ -515,7 +515,7 @@ router.post("/register/send-otp", async (req, res) => {
             });
         }
 
-        const otp_id = RANDOM_STRING();
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
         const otp = RANDOM_INTEGER ? String(RANDOM_INTEGER()) : String(Math.floor(100000 + Math.random() * 900000));
         const remark = JSON.stringify({
             name: trimmedName,
@@ -657,11 +657,15 @@ router.post("/register/verify-otp", async (req, res) => {
             });
         }
 
-        const username = `usr_${RANDOM_STRING(16)}`;
+        const username = await UNIQUE_RANDOM_STRING("users", "username", {
+            conn,
+            prefix: "usr_",
+            length: ID_LENGTH,
+        });
         const loginId = contact.email || contact.mobile;
         const tempPassword = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(tempPassword, 10);
-        const profile_id = `PROF_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+        const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
 
         await conn.query(
             `INSERT INTO users (username, login_id, password, create_by, status, remark, type, create_date)
@@ -687,7 +691,7 @@ router.post("/register/verify-otp", async (req, res) => {
         }
 
         const IP = req.ip;
-        const token_id = RANDOM_STRING(30);
+        const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const token = RANDOM_STRING(50);
 
         await conn.query(
@@ -792,7 +796,7 @@ router.post('/google-auth', async (req, res) => {
 
         // ✅ Generate session token
         const sessionToken = crypto.randomBytes(32).toString('hex');
-        const tokenId = crypto.randomBytes(16).toString('hex');
+        const tokenId = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const userIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
 
         // ✅ Insert token (make sure your tokens table exists with these columns)

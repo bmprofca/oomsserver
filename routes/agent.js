@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, SET_OPENING_BALANCE, GET_BALANCE } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, SET_OPENING_BALANCE, GET_BALANCE, ID_LENGTH } from "../helpers/function.js";
 import {
     deleteProfileImage,
     downloadAndUploadProfileImage,
@@ -145,8 +145,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         await conn.beginTransaction();
 
-        const username = RANDOM_STRING(20);
-        const profile_id = RANDOM_STRING(30);
+        const username = await UNIQUE_RANDOM_STRING("clients", "username", { conn });
+        const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
 
         await insertRow("clients", {
             username,
@@ -534,8 +534,9 @@ router.post("/details/edit-profile", auth, validateBranch, async (req, res) => {
                  ORDER BY id DESC LIMIT 1`,
             [String(username).trim()]
         );
-        const profile_id =
-            existingProfileRow.length > 0 ? existingProfileRow[0].profile_id : RANDOM_STRING(30);
+        const profile_id = existingProfileRow.length > 0
+            ? existingProfileRow[0].profile_id
+            : await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH });
         const existingImage =
             existingProfileRow.length > 0 ? existingProfileRow[0].image : null;
 

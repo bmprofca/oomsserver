@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
+import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { notifySaleInvoiceEmail, getSaleItems } from "../helpers/saleStaticEmail.js";
@@ -188,8 +188,6 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             }
         }
 
-        const invoice_id = RANDOM_STRING(30);
-        const transaction_id = RANDOM_STRING(30);
         const saleItemsToInsert = [];
 
         let amountTotal = 0;
@@ -204,8 +202,6 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             itemsTaxTotal += taxValue;
 
             saleItemsToInsert.push({
-                item_id: RANDOM_STRING(30),
-                invoice_id,
                 service_id: current.service_id,
                 fees: Number(current.feesNum.toFixed(2)),
                 tax_perc: Number(taxRateNum.toFixed(2)),
@@ -236,6 +232,9 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
         try {
             await connection.beginTransaction();
 
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
                 [branch_id, "sale", "0", TODAY_DATE(), TODAY_DATE()]
@@ -264,7 +263,7 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                 return res.status(400).json({ success: false, message: "Invalid branch_id for sale_entries" });
             }
 
-            const sale_entry_id = RANDOM_STRING(30);
+            const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
             await connection.query(
                 `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -279,10 +278,11 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
 
             for (let index = 0; index < saleItemsToInsert.length; index++) {
                 const row = saleItemsToInsert[index];
+                const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
                 await connection.query(
                     `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [branch_id, row.item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
+                    [branch_id, item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
                 );
             }
 
@@ -433,8 +433,6 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
             }
         }
 
-        const invoice_id = RANDOM_STRING(30);
-        const transaction_id = RANDOM_STRING(30);
         const saleItemsToInsert = [];
 
         let amountTotal = 0;
@@ -449,8 +447,6 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
             itemsTaxTotal += taxValue;
 
             saleItemsToInsert.push({
-                item_id: RANDOM_STRING(30),
-                invoice_id,
                 service_id: current.service_id,
                 fees: Number(current.feesNum.toFixed(2)),
                 tax_perc: Number(taxRateNum.toFixed(2)),
@@ -481,6 +477,9 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
         try {
             await connection.beginTransaction();
 
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
                 [branch_id, "sale", "0", TODAY_DATE(), TODAY_DATE()]
@@ -509,7 +508,7 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
                 return res.status(400).json({ success: false, message: "Invalid branch_id for sale_entries" });
             }
 
-            const sale_entry_id = RANDOM_STRING(30);
+            const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
             await connection.query(
                 `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -524,10 +523,11 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
 
             for (let index = 0; index < saleItemsToInsert.length; index++) {
                 const row = saleItemsToInsert[index];
+                const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
                 await connection.query(
                     `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [branch_id, row.item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
+                    [branch_id, item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
                 );
             }
 

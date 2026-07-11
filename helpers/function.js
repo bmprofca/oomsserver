@@ -18,6 +18,51 @@ const RANDOM_STRING = (length = 30) => {
     return result;
 };
 
+const ID_LENGTH = 10;
+const SHORT_ID_LENGTH = 6;
+
+/**
+ * Generate a random string and retry until it is unique in the given table column.
+ * Use length 6 for compact ids (e.g. branch_id) and 10 for most entity primary keys.
+ */
+async function UNIQUE_RANDOM_STRING(table, column, options = {}) {
+    const {
+        length = ID_LENGTH,
+        conn = null,
+        maxAttempts = 25,
+        where = null,
+        whereParams = [],
+        prefix = "",
+        suffix = "",
+    } = options;
+
+    if (!table || !column) {
+        throw new Error("table and column are required for UNIQUE_RANDOM_STRING");
+    }
+
+    const db = conn || pool;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const candidate = `${prefix}${RANDOM_STRING(length)}${suffix}`;
+        let sql = `SELECT \`${column}\` FROM \`${table}\` WHERE \`${column}\` = ?`;
+        const params = [candidate];
+
+        if (where) {
+            sql += ` AND ${where}`;
+            params.push(...whereParams);
+        }
+
+        sql += " LIMIT 1";
+
+        const [rows] = await db.query(sql, params);
+        if (!rows.length) {
+            return candidate;
+        }
+    }
+
+    throw new Error(`Failed to generate unique value for ${table}.${column}`);
+}
+
 const RANDOM_INTEGER = (length = 6) => {
     if (!length || length < 1) return 0;
 
@@ -454,6 +499,9 @@ async function SINGLE_TASK_STAFF_LIST(task_id = "") {
 
 export {
     RANDOM_STRING,
+    UNIQUE_RANDOM_STRING,
+    ID_LENGTH,
+    SHORT_ID_LENGTH,
     GENERATE_PASSWORD,
     IS_STRONG_PASSWORD,
     USER_DATA,

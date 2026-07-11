@@ -3,7 +3,7 @@ const router = express.Router();
 
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
 
 // Helper to check if a user is an admin in the branch
 async function isBranchAdmin(username, branchId) {
@@ -175,7 +175,10 @@ router.post('/role/create', auth, validateBranch, async (req, res) => {
             });
         }
 
-        const permission_role_id = `PR_${Date.now()}_${RANDOM_STRING(6)}`;
+        const permission_role_id = await UNIQUE_RANDOM_STRING("permission_role", "permission_role_id", {
+            length: SHORT_ID_LENGTH,
+            prefix: `PR_${Date.now()}_`,
+        });
         const permissions_assigned_json = JSON.stringify(permissions);
 
         await pool.query(

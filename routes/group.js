@@ -3,7 +3,7 @@ const router = express.Router();
 
 import pool from "../db.js";
 import { auth, validateBranch } from '../middleware/auth.js';
-import { RANDOM_STRING, USER_DATA, TODAY_DATE, SET_OPENING_BALANCE } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, TODAY_DATE, SET_OPENING_BALANCE, ID_LENGTH } from "../helpers/function.js";
 import multer from 'multer';
 import xlsx from 'xlsx';
 import moment from 'moment';
@@ -77,7 +77,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         await conn.beginTransaction();
 
-        const group_id = RANDOM_STRING(30);
+        const group_id = await UNIQUE_RANDOM_STRING("groups", "group_id", { conn });
 
         /* ===============================
            ➕ Insert group
@@ -617,12 +617,13 @@ router.post('/group-firms/add-firms', auth, validateBranch, async (req, res) => 
         }
 
         for (const firm_id of insertableFirmIds) {
+            const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { conn, length: ID_LENGTH });
             await conn.query(
                 `INSERT INTO group_firms
                  (unique_id, group_id, firm_id, create_by, modify_by, is_deleted, create_date, modify_date)
                  VALUES (?, ?, ?, ?, ?, '0', NOW(), NOW())`,
                 [
-                    RANDOM_STRING(30),
+                    unique_id,
                     group_id,
                     firm_id,
                     createdBy,
@@ -1784,12 +1785,13 @@ export async function handleGroupImport(req, res, createdBy, branch_id) {
         // 1. Map existing clients' firms to the group if not already mapped
         for (const matched of matchedClients) {
             if (!matched.already_in_group && matched.firm_id) {
+                const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { conn, length: ID_LENGTH });
                 await conn.query(
                     `INSERT INTO group_firms
                      (unique_id, group_id, firm_id, create_by, modify_by, is_deleted, create_date, modify_date)
                      VALUES (?, ?, ?, ?, ?, '0', NOW(), NOW())`,
                     [
-                        RANDOM_STRING(30),
+                        unique_id,
                         group_id,
                         matched.firm_id,
                         createdBy,
@@ -1801,9 +1803,9 @@ export async function handleGroupImport(req, res, createdBy, branch_id) {
 
         // 2. Insert new clients and map their new firms to the group
         for (const client of parsedClients) {
-            const username = RANDOM_STRING(20);
-            const profile_id = RANDOM_STRING(30);
-            const firm_id = RANDOM_STRING(30);
+            const username = await UNIQUE_RANDOM_STRING("clients", "username", { conn });
+            const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
+            const firm_id = await UNIQUE_RANDOM_STRING("firms", "firm_id", { conn, length: ID_LENGTH });
 
             // Insert client
             await conn.query(
@@ -1837,12 +1839,13 @@ export async function handleGroupImport(req, res, createdBy, branch_id) {
             );
 
             // Insert group mapping
+            const groupFirmUniqueId = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { conn, length: ID_LENGTH });
             await conn.query(
                 `INSERT INTO group_firms
                  (unique_id, group_id, firm_id, create_by, modify_by, is_deleted, create_date, modify_date)
                  VALUES (?, ?, ?, ?, ?, '0', NOW(), NOW())`,
                 [
-                    RANDOM_STRING(30),
+                    groupFirmUniqueId,
                     group_id,
                     firm_id,
                     createdBy,

@@ -1,15 +1,16 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
-import axios from "axios";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
+import {
+    deleteProfileDocument,
+    downloadAndUploadProfileDocument,
+    getProfileDocumentAccessUrl,
+} from "../helpers/b2Storage.js";
 
 const router = express.Router();
 
@@ -87,87 +88,7 @@ function normalizeInUser(value) {
     return String(value).trim();
 }
 
-// Get current directory (where task.js is located)
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Documents directory for tasks
-const TASK_DOCUMENT_DIR = path.join(__dirname, "..", "media", "profile", "document", "task");
-const MAX_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
-
-// Allowed extensions (used only to infer the saved extension)
-const ALLOWED_FILE_EXTENSIONS = [
-    "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv",
-    "mp4", "avi", "mov", "wmv", "flv", "webm", "mkv", "m4v",
-    "zip", "rar", "7z", "tar", "gz"
-];
-
-if (!fs.existsSync(TASK_DOCUMENT_DIR)) {
-    fs.mkdirSync(TASK_DOCUMENT_DIR, { recursive: true });
-}
-
-// Helper: download document from URL and save to targetDir; returns { filename, mimeType, size }
-async function downloadAndSaveDocument(fileUrl, targetDir) {
-    try {
-        if (!fileUrl || typeof fileUrl !== "string" || !fileUrl.trim()) {
-            throw new Error("Invalid file URL");
-        }
-
-        const response = await axios({
-            method: "GET",
-            url: fileUrl,
-            responseType: "arraybuffer",
-            maxContentLength: MAX_DOCUMENT_SIZE,
-            timeout: 60000,
-            validateStatus: (status) => status === 200
-        });
-
-        const buffer = Buffer.from(response.data);
-        const contentType = response.headers["content-type"] || "";
-        const mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
-        const size = buffer.length;
-
-        if (buffer.length > MAX_DOCUMENT_SIZE) {
-            throw new Error("File size exceeds maximum allowed size of 50MB");
-        }
-
-        let ext = "bin";
-        const urlExt = fileUrl.split(".").pop()?.toLowerCase().split("?")[0];
-        if (urlExt && ALLOWED_FILE_EXTENSIONS.includes(urlExt)) {
-            ext = urlExt;
-        } else if (contentType) {
-            const mimeToExt = {
-                "application/pdf": "pdf",
-                "application/msword": "doc",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-                "application/vnd.ms-excel": "xls",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-                "text/plain": "txt",
-                "text/csv": "csv",
-                "application/zip": "zip"
-            };
-            const baseMime = contentType.split(";")[0].trim();
-            if (mimeToExt[baseMime]) ext = mimeToExt[baseMime];
-        }
-
-        const randomName = RANDOM_STRING(30);
-        const filename = `${randomName}.${ext}`;
-        const filePath = path.join(targetDir, filename);
-        fs.writeFileSync(filePath, buffer);
-
-        return { filename, mimeType, size };
-    } catch (error) {
-        if (error.response) {
-            throw new Error(`Failed to download file: HTTP ${error.response.status}`);
-        } else if (error.code === "ECONNABORTED") {
-            throw new Error("File download timeout");
-        } else if (error.message?.includes("maxContentLength") || error.message?.includes("50MB")) {
-            throw new Error("File size exceeds maximum allowed size of 50MB");
-        }
-        throw new Error(error.message || "Failed to download file");
-    }
-}
+const TASK_DOCUMENT_CATEGORY = "task";
 
 /** tasks.status — align with DB enum (unassign removed from schema) */
 const TASK_STATUS_ENUM = [
@@ -400,7 +321,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 for (const fid of allFirmIds) {
                     const firmRow = firmMap.get(String(fid));
                     const firm_username = firmRow?.username ?? null;
-                    const task_id = RANDOM_STRING(30);
+                    const task_id = await UNIQUE_RANDOM_STRING("tasks", "task_id", { length: ID_LENGTH, conn });
 
                     await insertRow(conn, "tasks", {
                         branch_id,
@@ -434,9 +355,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     const textItems = Array.isArray(notesText) ? notesText : (notesText ? [notesText] : []);
                     for (const content of textItems) {
                         if (content == null || content === "") continue;
+                        const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                         await insertRow(conn, "notes", {
                             branch_id,
-                            note_id: RANDOM_STRING(30),
+                            note_id,
                             username: firm_username || username,
                             firm_id: fid,
                             task_id,
@@ -456,9 +378,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         const url = (att?.url ?? "").trim();
                         const savedFile = url ? urlToSavedFile.get(url) : null;
                         if (!savedFile && url) continue;
+                        const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                         await insertRow(conn, "notes", {
                             branch_id,
-                            note_id: RANDOM_STRING(30),
+                            note_id,
                             username: firm_username || username,
                             firm_id: fid,
                             task_id,
@@ -477,9 +400,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         if (!voiceUrl) continue;
                         const savedVoice = urlToSavedFile.get(voiceUrl);
                         if (!savedVoice) continue;
+                        const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                         await insertRow(conn, "notes", {
                             branch_id,
-                            note_id: RANDOM_STRING(30),
+                            note_id,
                             username: firm_username || username,
                             firm_id: fid,
                             task_id,
@@ -498,8 +422,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         const subtaskType = st?.type === "service" ? "task" : "text";
                         const textVal = st?.content != null ? String(st.content).slice(0, 100) : null;
                         const serviceIdVal = st?.service_id ?? null;
+                        const subtask_id = await UNIQUE_RANDOM_STRING("subtask", "subtask_id", { length: ID_LENGTH, conn });
                         await insertRow(conn, "subtask", {
-                            subtask_id: RANDOM_STRING(30),
+                            subtask_id,
                             branch_id,
                             task_id,
                             type: subtaskType,
@@ -513,9 +438,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     // task_staffs: one row per staff in assignment.staff
                     for (const staffId of staffIds) {
                         if (!staffId) continue;
+                        const assign_id = await UNIQUE_RANDOM_STRING("task_staffs", "assign_id", { length: ID_LENGTH, conn });
                         await insertRow(conn, "task_staffs", {
                             branch_id,
-                            assign_id: RANDOM_STRING(30),
+                            assign_id,
                             task_id,
                             username: String(staffId),
                             create_by: username
@@ -679,7 +605,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             const tax_value = Number(((finalFees * gst_rate) / 100).toFixed(2));
             const total = Number((finalFees + tax_value).toFixed(2));
 
-            const task_id = RANDOM_STRING(30);
+            const task_id = await UNIQUE_RANDOM_STRING("tasks", "task_id", { length: ID_LENGTH, conn });
             const ca_id = legacyAssignment?.ca_id ?? legacyAssignment?.ca ?? null;
             const agent_id = legacyAssignment?.agent_id ?? legacyAssignment?.agent ?? null;
             const has_ca = ca_id ? "1" : "0";
@@ -719,9 +645,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             const legacyNotesText = Array.isArray(legacyNotes) ? legacyNotes : (legacyNotes != null ? [legacyNotes] : []);
             for (const content of legacyNotesText) {
                 if (content == null || content === "") continue;
+                const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                 await insertRow(conn, "notes", {
                     branch_id,
-                    note_id: RANDOM_STRING(30),
+                    note_id,
                     username: firm_username || username,
                     firm_id,
                     task_id,
@@ -741,9 +668,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const url = (att?.url ?? "").trim();
                 const savedFile = url ? legacyUrlToSaved.get(url) : null;
                 if (!savedFile && url) continue;
+                const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                 await insertRow(conn, "notes", {
                     branch_id,
-                    note_id: RANDOM_STRING(30),
+                    note_id,
                     username: firm_username || username,
                     firm_id,
                     task_id,
@@ -761,9 +689,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             if (voice_note_id) {
                 const savedVoice = legacyUrlToSaved.get(voice_note_id);
                 if (savedVoice) {
+                    const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
                     await insertRow(conn, "notes", {
                         branch_id,
-                        note_id: RANDOM_STRING(30),
+                        note_id,
                         username: firm_username || username,
                         firm_id,
                         task_id,
@@ -783,8 +712,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const subtaskType = st?.subtask_type === "service" || st?.type === "service" ? "task" : "text";
                 const textVal = (st?.description ?? st?.content) != null ? String(st.description ?? st.content).slice(0, 100) : null;
                 const serviceIdVal = st?.service_id ?? null;
+                const subtask_id = await UNIQUE_RANDOM_STRING("subtask", "subtask_id", { length: ID_LENGTH, conn });
                 await insertRow(conn, "subtask", {
-                    subtask_id: RANDOM_STRING(30),
+                    subtask_id,
                     branch_id,
                     task_id,
                     type: subtaskType,
@@ -798,9 +728,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             // task_staffs
             for (const staffId of legacyStaffIds) {
                 if (!staffId) continue;
+                const assign_id = await UNIQUE_RANDOM_STRING("task_staffs", "assign_id", { length: ID_LENGTH, conn });
                 await insertRow(conn, "task_staffs", {
                     branch_id,
-                    assign_id: RANDOM_STRING(30),
+                    assign_id,
                     task_id,
                     username: String(staffId),
                     create_by: username
@@ -1756,9 +1687,11 @@ router.post("/details/note/create", auth, validateBranch, async (req, res) => {
             const content = t != null ? String(t).trim() : "";
             if (!content) continue;
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             const noteRow = {
                 branch_id,
-                note_id: RANDOM_STRING(30),
+                note_id,
                 username: taskUsername || create_by,
                 firm_id: taskFirmId,
                 task_id,
@@ -1787,9 +1720,11 @@ router.post("/details/note/create", auth, validateBranch, async (req, res) => {
             const name = att?.name ?? att?.remark ?? "";
             const remark = att?.remark ?? att?.name ?? "";
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             const noteRow = {
                 branch_id,
-                note_id: RANDOM_STRING(30),
+                note_id,
                 username: taskUsername || create_by,
                 firm_id: taskFirmId,
                 task_id,
@@ -1816,9 +1751,11 @@ router.post("/details/note/create", auth, validateBranch, async (req, res) => {
             const savedVoice = urlToSavedFile.get(url);
             if (!savedVoice) continue;
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             const noteRow = {
                 branch_id,
-                note_id: RANDOM_STRING(30),
+                note_id,
                 username: taskUsername || create_by,
                 firm_id: taskFirmId,
                 task_id,
@@ -1988,7 +1925,7 @@ router.post("/details/subtask/create", auth, validateBranch, async (req, res) =>
         const createdSubtasks = [];
 
         for (const st of subtasks) {
-            const subtask_id = RANDOM_STRING(30);
+            const subtask_id = await UNIQUE_RANDOM_STRING("subtask", "subtask_id", { length: ID_LENGTH, conn });
             const status = st.status || "pending";
             const dbType = st.type === "service" ? "task" : "text";
 
@@ -2578,7 +2515,7 @@ router.put("/details/staff/update", auth, validateBranch, async (req, res) => {
         for (const staffId of staff_ids) {
             if (!staffId) continue;
 
-            const assign_id = RANDOM_STRING(30);
+            const assign_id = await UNIQUE_RANDOM_STRING("task_staffs", "assign_id", { length: ID_LENGTH, conn });
             await conn.query(
                 `INSERT INTO task_staffs (branch_id, assign_id, task_id, username, create_by, is_deleted) 
                  VALUES (?, ?, ?, ?, ?, '0')`,
@@ -2801,7 +2738,7 @@ router.post("/details/timelog/create", auth, validateBranch, async (req, res) =>
         const total_seconds = calculateTotalSeconds(start_datetime, end_datetime);
 
         // Create timelog
-        const timelog_id = RANDOM_STRING(30);
+        const timelog_id = await UNIQUE_RANDOM_STRING("timelogs", "timelog_id", { length: ID_LENGTH, conn });
 
         await conn.query(
             `INSERT INTO timelogs 
@@ -3341,11 +3278,11 @@ router.post("/details/document/create", auth, validateBranch, async (req, res) =
 
             let result;
             try {
-                result = await downloadAndSaveDocument(url.trim(), TASK_DOCUMENT_DIR);
+                result = await downloadAndUploadProfileDocument(url.trim(), TASK_DOCUMENT_CATEGORY);
             } catch (downloadErr) {
                 await conn.rollback();
                 for (const f of savedFiles) {
-                    try { fs.unlinkSync(path.join(TASK_DOCUMENT_DIR, f)); } catch (_) { }
+                    try { await deleteProfileDocument(TASK_DOCUMENT_CATEGORY, f); } catch (_) { }
                 }
                 conn.release();
                 return res.status(400).json({
@@ -3356,7 +3293,7 @@ router.post("/details/document/create", auth, validateBranch, async (req, res) =
 
             savedFiles.push(result.filename);
 
-            const document_id = RANDOM_STRING(30);
+            const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", { length: ID_LENGTH, conn });
 
             await conn.query(
                 `INSERT INTO documents (
@@ -3395,7 +3332,7 @@ router.post("/details/document/create", auth, validateBranch, async (req, res) =
     } catch (error) {
         try { await conn.rollback(); } catch { }
         for (const f of savedFiles) {
-            try { fs.unlinkSync(path.join(TASK_DOCUMENT_DIR, f)); } catch (_) { }
+            try { await deleteProfileDocument(TASK_DOCUMENT_CATEGORY, f); } catch (_) { }
         }
         conn.release();
         console.error("Task documents create error:", error);
@@ -3452,7 +3389,9 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
                 firm_id: element.firm_id,
                 name: element.name,
                 remark: element.remark,
-                file: `${BASE_DOMAIN}/media/profile/document/task/${element.file}`,
+                file: element.file
+                    ? await getProfileDocumentAccessUrl(TASK_DOCUMENT_CATEGORY, element.file)
+                    : null,
                 size: element.size,
                 mime_type: element.mime_type,
                 create_date: element.create_date,
@@ -3542,7 +3481,7 @@ router.delete("/details/document/delete", auth, validateBranch, async (req, res)
         for (const row of foundRows) {
             if (row.file) {
                 try {
-                    fs.unlinkSync(path.join(TASK_DOCUMENT_DIR, String(row.file)));
+                    await deleteProfileDocument(TASK_DOCUMENT_CATEGORY, String(row.file));
                 } catch {
                     /* file may already be missing */
                 }

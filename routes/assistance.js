@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, TIMESTAMP, USER_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, RANDOM_STRING, TIMESTAMP, USER_DATA } from "../helpers/function.js";
 import { DSC_TYPES, DSC_COMPANIES } from "../helpers/Config.js";
 
 const router = express.Router();
@@ -200,7 +200,7 @@ router.post("/dsc/create", auth, validateBranch, async (req, res) => {
 
         await conn.beginTransaction();
 
-        const dsc_id = RANDOM_STRING(30);
+        const dsc_id = await UNIQUE_RANDOM_STRING("dsc_register", "dsc_id", { conn });
         await insertRow("dsc_register", {
             dsc_id,
             username,
@@ -569,7 +569,7 @@ router.post("/file-index/create", auth, validateBranch, async (req, res) => {
 
         await conn.beginTransaction();
 
-        const index_id = RANDOM_STRING(30);
+        const index_id = await UNIQUE_RANDOM_STRING("file_index", "index_id", { conn });
 
         await conn.query(
             `INSERT INTO file_index 
@@ -1272,7 +1272,7 @@ router.post("/password-group/create", auth, validateBranch, async (req, res) => 
 
         await conn.beginTransaction();
 
-        const group_id = RANDOM_STRING(30);
+        const group_id = await UNIQUE_RANDOM_STRING("password_groups", "group_id", { conn });
 
         await conn.query(
             `INSERT INTO password_groups 
@@ -1616,7 +1616,7 @@ router.post("/password-group/create-firm-credentials", auth, validateBranch, asy
 
         await conn.beginTransaction();
 
-        const credential_id = RANDOM_STRING(30);
+        const credential_id = await UNIQUE_RANDOM_STRING("password_group_firms", "credential_id", { conn });
 
         await conn.query(
             `INSERT INTO password_group_firms 

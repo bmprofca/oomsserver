@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -72,8 +72,6 @@ async function createPurchase({
         return res.status(400).json({ success: false, message: err.message });
     }
 
-    const invoice_id = RANDOM_STRING(30);
-    const transaction_id = RANDOM_STRING(30);
     const purchaseItemsToInsert = [];
     let subtotal = 0;
 
@@ -82,8 +80,6 @@ async function createPurchase({
         subtotal += current.feesNum;
 
         purchaseItemsToInsert.push({
-            item_id: RANDOM_STRING(30),
-            purchase_id: null,
             service_id: current.service_id,
             amount: Number(current.feesNum.toFixed(2)),
             remark: current.itemRemark
@@ -95,6 +91,9 @@ async function createPurchase({
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
+
+        const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+        const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
 
         const [invoicePrefixRows] = await connection.query(
             "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -116,7 +115,7 @@ async function createPurchase({
             [invoice_id, branch_id, invoice_no, username, username, "purchase", transaction_id, subtotal, "not applicable", 0, 0, 0, 0, 0, total, 0, total]
         );
 
-        const purchase_entry_id = RANDOM_STRING(30);
+        const purchase_entry_id = await UNIQUE_RANDOM_STRING("purchase_entries", "purchase_id", { length: ID_LENGTH, conn: connection });
         await connection.query(
             `INSERT INTO purchase_entries (branch_id, purchase_id, invoice_id, party_id, party_type, purchase_date, create_by, modify_by, amount)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -132,11 +131,11 @@ async function createPurchase({
 
         for (let index = 0; index < purchaseItemsToInsert.length; index++) {
             const row = purchaseItemsToInsert[index];
-            row.purchase_id = purchase_entry_id;
+            const item_id = await UNIQUE_RANDOM_STRING("purchase_items", "item_id", { length: ID_LENGTH, conn: connection });
             await connection.query(
                 `INSERT INTO purchase_items (branch_id, item_id, purchase_id, invoice_id, service_id, amount, remark)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [branch_id, row.item_id, row.purchase_id, invoice_id, row.service_id, row.amount, row.remark]
+                [branch_id, item_id, purchase_entry_id, invoice_id, row.service_id, row.amount, row.remark]
             );
         }
 

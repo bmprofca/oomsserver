@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { FORMAT_DATE, RANDOM_STRING } from "../helpers/function.js";
+import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { SendMail } from "../helpers/Mail.js";
 import { APP_NAME } from "../helpers/Config.js";
 import { authAdmin } from "../middleware/authAdmin.js";
@@ -38,7 +38,7 @@ router.post("/login/send-otp", async (req, res) => {
 
         const { username, login_id } = rows[0];
 
-        const otp_id = RANDOM_STRING();
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { length: ID_LENGTH, conn });
         const otp = "123456";
 
         await conn.execute(
@@ -166,7 +166,7 @@ router.post("/login", async (req, res) => {
 
         await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
 
-        const token_id = RANDOM_STRING(30);
+        const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { length: ID_LENGTH, conn });
         const token = RANDOM_STRING(50);
         await conn.query(
             `INSERT INTO tokens

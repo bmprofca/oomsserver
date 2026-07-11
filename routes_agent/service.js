@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { RANDOM_STRING } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { validateAgentSession } from "../middleware/validateAgentSession.js";
 
 const router = express.Router();
@@ -606,7 +606,7 @@ router.post("/service-request/create", validateAgentSession, async (req, res) =>
             agent_username
         );
         const margin = resolveMargin(resolvedServiceId, globalMargin, serviceMarginMap);
-        const request_id = RANDOM_STRING(30);
+        const request_id = await UNIQUE_RANDOM_STRING("service_requests", "request_id", { length: ID_LENGTH });
 
         await pool.query(
             `INSERT INTO service_requests (

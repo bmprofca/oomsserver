@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -53,14 +53,15 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid party_2 bank_id" });
         }
 
-        const invoice_id = RANDOM_STRING(30);
-        const transaction_id = RANDOM_STRING(30);
-        const contra_id = RANDOM_STRING(30);
         const roundedAmount = Number(amountNum.toFixed(2));
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const contra_id = await UNIQUE_RANDOM_STRING("contra_entries", "contra_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",

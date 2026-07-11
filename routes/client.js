@@ -8,40 +8,32 @@ import {
     filterSchedulesByRecurringRules
 } from "../helpers/recurringTaskHelper.js";
 import { auth, CheckUserProjectMaping, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { Decrypt } from "../helpers/Decrypt.js";
 import { BASE_DOMAIN, DOCUMENT_RESERVED_CATEGORIES } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
+    deleteProfileImage,
     downloadAndUploadProfileDocument,
+    downloadAndUploadProfileImage,
     getProfileDocumentAccessUrl,
+    getProfileImageAccessUrl,
 } from "../helpers/b2Storage.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile, NOTE_FILE_DIR, NOTE_VOICE_DIR } from "../helpers/NoteFile.js";
-import axios from "axios";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import multer from "multer";
 import xlsx from "xlsx";
 import moment from "moment";
 
 const router = express.Router();
 
-// Get current directory (where client.js is located)
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Profile image configuration
-const PROFILE_IMAGE_DIR = path.join(__dirname, "..", "media", "profile", "image");
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
-const ALLOWED_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
-const ALLOWED_IMAGE_MIME_TYPES = [
-    'image/jpeg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'image/bmp'
-];
+async function resolveProfileImageUrl(image) {
+    if (!image || String(image).trim() === "") {
+        return null;
+    }
+    return getProfileImageAccessUrl(String(image).trim());
+}
 
 // Note file configuration (NOTE_FILE_DIR, NOTE_VOICE_DIR imported from helpers/NoteFile.js)
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -79,118 +71,7 @@ const ALLOWED_AUDIO_MIME_TYPES = [
     'audio/webm'
 ];
 
-// Ensure directories exist
-if (!fs.existsSync(PROFILE_IMAGE_DIR)) {
-    fs.mkdirSync(PROFILE_IMAGE_DIR, { recursive: true });
-}
 // Note file/voice dirs are ensured in helpers/NoteFile.js on download
-
-// Helper function to validate image file by checking file headers
-function validateImageFile(buffer, ext) {
-    if (buffer.length < 4) return false;
-
-    const signatures = {
-        'jpg': [0xFF, 0xD8, 0xFF],
-        'jpeg': [0xFF, 0xD8, 0xFF],
-        'png': [0x89, 0x50, 0x4E, 0x47],
-        'gif': [0x47, 0x49, 0x46, 0x38],
-        'webp': [0x52, 0x49, 0x46, 0x46], // RIFF header
-        'bmp': [0x42, 0x4D] // BM
-    };
-
-    const signature = signatures[ext];
-    if (!signature) return false;
-
-    // Check if buffer starts with the signature
-    for (let i = 0; i < signature.length; i++) {
-        if (buffer[i] !== signature[i]) {
-            return false;
-        }
-    }
-
-    // Additional check for WebP (RIFF...WEBP)
-    if (ext === 'webp') {
-        const webpString = buffer.toString('ascii', 8, 12);
-        if (webpString !== 'WEBP') {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-// Helper function to download and save profile image
-async function downloadAndSaveProfileImage(imageUrl) {
-    try {
-        // Validate URL
-        if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.trim()) {
-            throw new Error('Invalid image URL');
-        }
-
-        // Download image with size limit
-        const response = await axios({
-            method: 'GET',
-            url: imageUrl,
-            responseType: 'arraybuffer',
-            maxContentLength: MAX_IMAGE_SIZE,
-            timeout: 30000, // 30 seconds timeout
-            validateStatus: (status) => status === 200
-        });
-
-        const buffer = Buffer.from(response.data);
-        const contentType = response.headers['content-type'] || '';
-
-        // Validate file size
-        if (buffer.length > MAX_IMAGE_SIZE) {
-            throw new Error(`Image size exceeds maximum allowed size of 5MB`);
-        }
-
-        // Validate MIME type
-        if (!ALLOWED_IMAGE_MIME_TYPES.includes(contentType.toLowerCase())) {
-            throw new Error(`Invalid image MIME type: ${contentType}. Allowed types: ${ALLOWED_IMAGE_MIME_TYPES.join(', ')}`);
-        }
-
-        // Determine file extension from MIME type or URL
-        let ext = 'jpg'; // default
-        if (contentType.includes('jpeg')) ext = 'jpg';
-        else if (contentType.includes('png')) ext = 'png';
-        else if (contentType.includes('gif')) ext = 'gif';
-        else if (contentType.includes('webp')) ext = 'webp';
-        else if (contentType.includes('bmp')) ext = 'bmp';
-        else {
-            // Try to get extension from URL
-            const urlExt = imageUrl.split('.').pop()?.toLowerCase().split('?')[0];
-            if (urlExt && ALLOWED_IMAGE_EXTENSIONS.includes(urlExt)) {
-                ext = urlExt;
-            }
-        }
-
-        // Validate image file content
-        if (!validateImageFile(buffer, ext)) {
-            throw new Error(`Invalid image file. File content does not match the image type.`);
-        }
-
-        // Generate random filename
-        const randomName = RANDOM_STRING(30);
-        const filename = `${randomName}.${ext}`;
-        const filePath = path.join(PROFILE_IMAGE_DIR, filename);
-
-        // Save file
-        fs.writeFileSync(filePath, buffer);
-
-        return filename;
-    } catch (error) {
-        if (error.response) {
-            throw new Error(`Failed to download image: HTTP ${error.response.status}`);
-        } else if (error.code === 'ECONNABORTED') {
-            throw new Error('Image download timeout');
-        } else if (error.message.includes('maxContentLength')) {
-            throw new Error(`Image size exceeds maximum allowed size of 5MB`);
-        } else {
-            throw new Error(`Failed to download image: ${error.message}`);
-        }
-    }
-}
 
 async function rollbackUploadedDocuments(savedFiles = []) {
     for (const item of savedFiles) {
@@ -354,7 +235,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         // Process profile image if provided
         if (image && image !== null && image.trim() !== '') {
             try {
-                savedImageFilename = await downloadAndSaveProfileImage(image);
+                const uploadResult = await downloadAndUploadProfileImage(image);
+                savedImageFilename = uploadResult.filename;
             } catch (imageError) {
                 return res.status(400).json({
                     success: false,
@@ -366,8 +248,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         await conn.beginTransaction();
 
         // Generate unique IDs
-        const username = RANDOM_STRING(20);
-        const profile_id = RANDOM_STRING(30);
+        const username = await UNIQUE_RANDOM_STRING("clients", "username", { length: ID_LENGTH, conn });
+        const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH, conn });
 
         // Insert into clients table
         await insertRow("clients", {
@@ -422,7 +304,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             } = biz;
 
             const isIndividual = business_type.toLowerCase() === 'individual';
-            const firm_id = RANDOM_STRING(30);
+            const firm_id = await UNIQUE_RANDOM_STRING("firms", "firm_id", { length: ID_LENGTH, conn });
 
             // Insert into firms table
             await insertRow("firms", {
@@ -451,7 +333,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             // Insert group mappings for this firm
             if (bizGroups && Array.isArray(bizGroups) && bizGroups.length > 0) {
                 for (const groupId of bizGroups) {
-                    const unique_id = RANDOM_STRING(30);
+                    const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { length: ID_LENGTH, conn });
                     await conn.query(
                         "INSERT INTO group_firms (unique_id, firm_id, group_id, create_by, modify_by) VALUES (?, ?, ?, ?, ?)",
                         [unique_id, firm_id, groupId, createdBy, createdBy]
@@ -518,10 +400,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         // Clean up downloaded image if transaction failed
         if (savedImageFilename) {
             try {
-                const imagePath = path.join(PROFILE_IMAGE_DIR, savedImageFilename);
-                if (fs.existsSync(imagePath)) {
-                    fs.unlinkSync(imagePath);
-                }
+                await deleteProfileImage(savedImageFilename);
             } catch (cleanupError) {
                 console.error('Error cleaning up image file:', cleanupError);
             }
@@ -613,7 +492,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             // Transform image field to include BASE_DOMAIN if not null/empty
             if (transformedRow.image && transformedRow.image.trim() !== '') {
-                transformedRow.image = `${BASE_DOMAIN}/media/profile/image/${transformedRow.image}`;
+                transformedRow.image = await resolveProfileImageUrl(transformedRow.image);
             } else {
                 transformedRow.image = null;
             }
@@ -693,7 +572,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             address_line_1,
             address_line_2
         };
-        const image_url = image ? `${BASE_DOMAIN}/media/profile/image/${image}` : null;
+        const image_url = await resolveProfileImageUrl(image);
 
 
         const { balance, debit, credit } = await GET_BALANCE({
@@ -1106,7 +985,8 @@ router.post("/details/edit-profile", auth, validateBranch, async (req, res) => {
         // Process profile image if provided
         if (imageInput && imageInput !== null && imageInput.trim() !== '') {
             try {
-                savedImageFilename = await downloadAndSaveProfileImage(imageInput);
+                const uploadResult = await downloadAndUploadProfileImage(imageInput);
+                savedImageFilename = uploadResult.filename;
             } catch (imageError) {
                 return res.status(400).json({
                     success: false,
@@ -1133,7 +1013,7 @@ router.post("/details/edit-profile", auth, validateBranch, async (req, res) => {
             "SELECT profile_id, image FROM profile WHERE username = ? AND status = '1' ORDER BY id DESC LIMIT 1",
             [username]
         );
-        const profile_id = existingProfileRow.length > 0 ? existingProfileRow[0].profile_id : RANDOM_STRING(30);
+        const profile_id = existingProfileRow.length > 0 ? existingProfileRow[0].profile_id : await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH });
         const existingImage = existingProfileRow.length > 0 ? existingProfileRow[0].image : null;
 
         await conn.beginTransaction();
@@ -1220,10 +1100,7 @@ router.post("/details/edit-profile", auth, validateBranch, async (req, res) => {
         // Clean up downloaded image if transaction failed
         if (savedImageFilename) {
             try {
-                const imagePath = path.join(PROFILE_IMAGE_DIR, savedImageFilename);
-                if (fs.existsSync(imagePath)) {
-                    fs.unlinkSync(imagePath);
-                }
+                await deleteProfileImage(savedImageFilename);
             } catch (cleanupError) {
                 console.error('Error cleaning up image file:', cleanupError);
             }
@@ -1563,12 +1440,14 @@ router.post("/details/notes/create", auth, validateBranch, async (req, res) => {
             const content = t != null ? String(t).trim() : "";
             if (!content) continue;
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             await conn.query(
                 `INSERT INTO notes
                 (note_id, username, branch_id, note_type, subject, note, type, priority, status, create_by, modify_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    RANDOM_STRING(30),
+                    note_id,
                     username,
                     branch_id,
                     "client",
@@ -1595,12 +1474,14 @@ router.post("/details/notes/create", auth, validateBranch, async (req, res) => {
             const name = att?.name ?? att?.remark ?? "";
             const remark = att?.remark ?? att?.name ?? "";
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             await conn.query(
                 `INSERT INTO notes
                 (note_id, username, branch_id, note_type, subject, note, type, file, priority, status, create_by, modify_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    RANDOM_STRING(30),
+                    note_id,
                     username,
                     branch_id,
                     "client",
@@ -1625,12 +1506,14 @@ router.post("/details/notes/create", auth, validateBranch, async (req, res) => {
             const savedVoice = urlToSavedFile.get(url);
             if (!savedVoice) continue;
 
+            const note_id = await UNIQUE_RANDOM_STRING("notes", "note_id", { length: ID_LENGTH, conn });
+
             await conn.query(
                 `INSERT INTO notes
                 (note_id, username, branch_id, note_type, type, file, priority, status, create_by, modify_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    RANDOM_STRING(30),
+                    note_id,
                     username,
                     branch_id,
                     "client",
@@ -1867,7 +1750,7 @@ router.post("/details/firms/create", auth, validateBranch, async (req, res) => {
         await conn.beginTransaction();
 
         // Generate firm_id
-        const firm_id = RANDOM_STRING(30);
+        const firm_id = await UNIQUE_RANDOM_STRING("firms", "firm_id", { length: ID_LENGTH, conn });
 
         // Insert into firms table
         await conn.query(
@@ -1916,7 +1799,7 @@ router.post("/details/firms/create", auth, validateBranch, async (req, res) => {
                             message: `Group "${groupId.trim()}" not found or does not belong to this branch or is inactive/deleted`
                         });
                     }
-                    const unique_id = RANDOM_STRING(30);
+                    const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { length: ID_LENGTH, conn });
                     await conn.query(
                         "INSERT INTO group_firms (unique_id, firm_id, group_id, create_by, modify_by) VALUES (?, ?, ?, ?, ?)",
                         [unique_id, firm_id, groupId.trim(), createdBy, createdBy]
@@ -2084,7 +1967,7 @@ router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
                             message: `Group "${groupId.trim()}" not found or does not belong to this branch or is inactive/deleted`
                         });
                     }
-                    const unique_id = RANDOM_STRING(30);
+                    const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { length: ID_LENGTH, conn });
                     await conn.query(
                         "INSERT INTO group_firms (unique_id, firm_id, group_id, create_by, modify_by) VALUES (?, ?, ?, ?, ?)",
                         [unique_id, firm_id.trim(), groupId.trim(), modifyBy, modifyBy]
@@ -2186,7 +2069,7 @@ router.post("/details/documents/create/gst", auth, validateBranch, async (req, r
             }
             savedFiles.push({ filename, categoryFolder: "gst" });
 
-            const document_id = RANDOM_STRING(30);
+            const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", { length: ID_LENGTH, conn });
             await conn.query(
                 `INSERT INTO documents (
                     document_id, branch_id, firm_id, username, category_id, name, f_year, type, remark, month,
@@ -2299,7 +2182,7 @@ router.post("/details/documents/create/it", auth, validateBranch, async (req, re
             }
             savedFiles.push({ filename, categoryFolder: "it" });
 
-            const document_id = RANDOM_STRING(30);
+            const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", { length: ID_LENGTH, conn });
             await conn.query(
                 `INSERT INTO documents (
                     document_id, branch_id, firm_id, username, category_id, name, f_year, type, remark,
@@ -2411,7 +2294,7 @@ router.post("/details/documents/create/mca", auth, validateBranch, async (req, r
             }
             savedFiles.push({ filename, categoryFolder: "mca" });
 
-            const document_id = RANDOM_STRING(30);
+            const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", { length: ID_LENGTH, conn });
             await conn.query(
                 `INSERT INTO documents (
                     document_id, branch_id, firm_id, username, category_id, name, f_year, type, remark,
@@ -2701,7 +2584,7 @@ router.post("/details/documents/create-category", auth, validateBranch, async (r
             return res.status(400).json({ success: false, message: "Name is required" });
         }
 
-        const category_id = RANDOM_STRING(30);
+        const category_id = await UNIQUE_RANDOM_STRING("document_categories", "category_id", { length: ID_LENGTH });
 
         await pool.query(
             `INSERT INTO document_categories (category_id, branch_id, name, remark, create_by, modify_by, create_date, modify_date, is_deleted)
@@ -3713,8 +3596,8 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 await conn.beginTransaction();
 
                 for (const client of parsedClients) {
-                    const username = RANDOM_STRING(20);
-                    const profile_id = RANDOM_STRING(30);
+                    const username = await UNIQUE_RANDOM_STRING("clients", "username", { length: ID_LENGTH, conn });
+                    const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { length: ID_LENGTH, conn });
 
                     // Insert client
                     await conn.query(
@@ -3736,7 +3619,7 @@ router.post("/import", auth, validateBranch, (req, res) => {
                     );
 
                     // Insert firm
-                    const firm_id = RANDOM_STRING(30);
+                    const firm_id = await UNIQUE_RANDOM_STRING("firms", "firm_id", { length: ID_LENGTH, conn });
                     await conn.query(
                         `INSERT INTO firms (firm_id, branch_id, username, firm_name, firm_type, pan_no, gst_no, tan_no, vat_no, cin_no, file_no, state, district, city, pincode, address_line_1, address_line_2, create_by, status, is_deleted)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', '0')`,

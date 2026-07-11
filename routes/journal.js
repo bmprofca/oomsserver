@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
+import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -38,9 +38,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         const amountNum = Number(amount);
         const txnDate = transaction_date ? String(transaction_date).trim() : new Date().toISOString().slice(0, 10);
-        const transaction_id = RANDOM_STRING(30);
-        const journal_id = RANDOM_STRING(30);
-        const invoice_id = RANDOM_STRING(30);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
@@ -51,6 +48,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
+
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            const journal_id = await UNIQUE_RANDOM_STRING("journal_entries", "journal_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",

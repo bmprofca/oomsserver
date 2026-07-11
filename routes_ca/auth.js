@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { FORMAT_DATE, RANDOM_STRING } from "../helpers/function.js";
+import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { generateClientOtp, sendClientOtp } from "../helpers/clientOtp.js";
 import { authCa } from "../middleware/authCa.js";
 import {
@@ -77,7 +77,7 @@ router.post("/login/send-otp", async (req, res) => {
             ["1", normalizedCountryCode, normalizedMobile, CA_OTP_TYPE, "0"]
         );
 
-        const otp_id = RANDOM_STRING();
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { length: ID_LENGTH, conn });
         await conn.execute(
             `INSERT INTO otps
             (otp_id, type, otp, country_code, mobile, create_date, expire_date, status, remark)
@@ -182,7 +182,7 @@ router.post("/login", async (req, res) => {
         await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
 
         const username = caProfile.username;
-        const token_id = RANDOM_STRING(30);
+        const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { length: ID_LENGTH, conn });
         const token = RANDOM_STRING(50);
 
         await conn.query(

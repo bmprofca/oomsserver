@@ -3,7 +3,7 @@ const router = express.Router();
 
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING } from "../helpers/function.js";
+import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING } from "../helpers/function.js";
 import { BASE_DOMAIN } from '../helpers/Config.js';
 import multer from 'multer';
 import path from "path";
@@ -146,7 +146,7 @@ router.post('/create', auth, validateBranch, upload.single('attachment'), async 
 
         await conn.beginTransaction();
 
-        const expense_id = RANDOM_STRING(30);
+        const expense_id = await UNIQUE_RANDOM_STRING("staff_expenses", "expense_id", { conn });
         const amountNum = Number(amount);
 
         await conn.query(
@@ -601,7 +601,7 @@ router.post('/verify', auth, validateBranch, async (req, res) => {
 
         if (isApproved) {
             const amountNum = Number(expense.amount);
-            const transactionId = RANDOM_STRING(30);
+            const transactionId = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { conn });
             
             await conn.query(
                 `INSERT INTO transactions (

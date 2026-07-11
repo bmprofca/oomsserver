@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST } from "../helpers/function.js";
+import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST } from "../helpers/function.js";
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
@@ -153,8 +153,8 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
         throw e;
     }
 
-    const invoice_id = RANDOM_STRING(30);
-    const transaction_id = RANDOM_STRING(30);
+    const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+    const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
     const txnDate = TODAY_DATE();
 
     const [invoicePrefixRows] = await connection.query(
@@ -204,7 +204,7 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
         throw e;
     }
 
-    const sale_entry_id = RANDOM_STRING(30);
+    const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
     await insertRow(connection, "sale_entries", {
         branch_id: numericBranchId,
         sale_id: sale_entry_id,
@@ -239,7 +239,7 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
         ]
     );
 
-    const item_id = RANDOM_STRING(30);
+    const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
     const fees = Number(Number(taskRow.fees).toFixed(2));
     const tax_perc = Number(Number(taskRow.tax_rate).toFixed(2));
     const tax_value = Number(Number(taskRow.tax_value).toFixed(2));

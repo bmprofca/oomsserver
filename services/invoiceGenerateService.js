@@ -1,17 +1,9 @@
-import crypto from "crypto";
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
 import pool from "../db.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
 import { getActiveFormatKeyForInvoiceType, normalizeInvoiceTypeForMatch } from "../helpers/invoiceFormats.js";
 import { buildSaleInvoicePdfBuffer } from "../helpers/SaleInvoicePdf.js";
 import { buildSimpleInvoicePdfBuffer } from "../helpers/SimpleInvoicePdf.js";
 import { getSimpleDocTitleForInvoiceType } from "../helpers/invoiceSimpleDocTitles.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const INVOICE_PDF_MEDIA_DIR = path.join(__dirname, "..", "media", "invoice");
+import { uploadBufferToOneSaas } from "./onesaasUploadService.js";
 
 const ALLOWED_GENERATE_TYPES = new Set([
     "sale",
@@ -223,14 +215,15 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
 }
 
 async function saveInvoicePdfLink(built) {
-    await fs.mkdir(INVOICE_PDF_MEDIA_DIR, { recursive: true });
-    const storedName = `${crypto.randomBytes(24).toString("hex")}.pdf`;
-    await fs.writeFile(path.join(INVOICE_PDF_MEDIA_DIR, storedName), built.buffer);
-    const url = `${BASE_DOMAIN}/media/invoice/${storedName}`;
+    const uploaded = await uploadBufferToOneSaas({
+        buffer: built.buffer,
+        filename: built.filename,
+        mimeType: "application/pdf",
+    });
 
     return {
-        url,
-        filename: storedName,
+        url: uploaded.url,
+        filename: built.filename,
         suggested_filename: built.filename,
     };
 }

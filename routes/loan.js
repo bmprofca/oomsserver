@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { RANDOM_STRING, TODAY_DATE, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA } from "../helpers/function.js";
 
 const router = express.Router();
 
@@ -74,9 +74,9 @@ async function createLoanEntry({ req, res, loanType }) {
             const serial = Number(invoiceData?.current || 0) + 1;
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
-            const entry_id = RANDOM_STRING(30);
-            const invoice_id = RANDOM_STRING(30);
-            const transaction_id = RANDOM_STRING(30);
+            const entry_id = await UNIQUE_RANDOM_STRING("loan_entries", "entry_id", { length: ID_LENGTH, conn: connection });
+            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
 
             await connection.query(
                 `INSERT INTO loan_entries (branch_id, entry_id, type, party_type, party_id, transaction_date, amount, invoice_id, invoice_no, transaction_id, remark, create_by, modify_by)

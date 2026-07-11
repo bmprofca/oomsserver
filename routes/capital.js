@@ -3,7 +3,8 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import {
     GET_BALANCE,
-    RANDOM_STRING,
+    UNIQUE_RANDOM_STRING,
+    ID_LENGTH,
     SET_OPENING_BALANCE,
     EDIT_OPENING_BALANCE,
     USER_SNIPPED_DATA,
@@ -122,7 +123,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         const capitalName = String(name).trim();
         const capitalRemark = remark != null ? String(remark).trim() : null;
-        const capital_id = RANDOM_STRING(30);
+        const capital_id = await UNIQUE_RANDOM_STRING("capitals", "capital_id", { length: ID_LENGTH });
 
         await pool.query(
             `INSERT INTO capitals (

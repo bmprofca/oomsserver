@@ -6,7 +6,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import { buildQuotationPdfBuffer } from "../helpers/QuotationPdf.js";
-import { RANDOM_STRING, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, USER_DATA, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, USER_DATA, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { createTaskFromQuotation } from "../helpers/taskCreateHelper.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -88,11 +88,11 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             }
         }
 
-        const quotation_id = RANDOM_STRING(30);
-        const normalizedStatus = "pending";
-
         await connection.beginTransaction();
         transactionStarted = true;
+
+        const quotation_id = await UNIQUE_RANDOM_STRING("quotations", "quotation_id", { length: ID_LENGTH, conn: connection });
+        const normalizedStatus = "pending";
 
         await connection.query(
             `INSERT INTO quotations (branch_id, quotation_id, username, firm_id, create_by, modify_by, status)

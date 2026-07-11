@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { RANDOM_STRING, USER_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA } from "../helpers/function.js";
 import {
     deleteProfileDocument,
     downloadAndUploadProfileDocument,
@@ -329,7 +329,7 @@ router.post("/sharable/create", validateClientSession, async (req, res) => {
             });
         }
 
-        const document_id = RANDOM_STRING(30);
+        const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", { length: ID_LENGTH });
 
         try {
             await pool.query(
