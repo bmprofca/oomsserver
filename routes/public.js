@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { USER_SNIPPED_DATA } from "../helpers/function.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
+import { activateOrExtendPlan } from "../services/subscriptionService.js";
 
 const router = express.Router();
 
@@ -337,31 +338,25 @@ router.post("/webhook/razorpay", async (req, res) => {
             if (orderId) {
                 // Fetch the pending order details
                 const [orders] = await pool.query(
-                    "SELECT username, plan_name, billing_cycle FROM razorpay_orders WHERE razorpay_order_id = ? LIMIT 1",
+                    "SELECT username, branch_id, plan_name, billing_cycle FROM razorpay_orders WHERE razorpay_order_id = ? LIMIT 1",
                     [orderId]
                 );
 
                 if (orders.length > 0) {
-                    const { username, plan_name, billing_cycle } = orders[0];
+                    const { username, branch_id, plan_name, billing_cycle } = orders[0];
 
-                    // Calculate Plan Expiration Date
-                    const expiresAt = new Date();
-                    if (billing_cycle === "yearly") {
-                        expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+                    if (!branch_id) {
+                        console.error(`Razorpay Webhook: missing branch_id for order ${orderId}`);
                     } else {
-                        expiresAt.setMonth(expiresAt.getMonth() + 1);
+                        await activateOrExtendPlan({
+                            branchId: branch_id,
+                            username,
+                            planName: plan_name,
+                            billingCycle: billing_cycle || "monthly",
+                            paymentRef: orderId,
+                            paymentMethod: "razorpay_webhook",
+                        });
                     }
-
-                    // Update user subscription state
-                    await pool.query(
-                        `UPDATE users 
-                         SET is_subscribed = 'yes', 
-                             subscription_plan = ?, 
-                             subscription_expires_at = ?, 
-                             razorpay_subscription_id = ? 
-                         WHERE username = ?`,
-                        [plan_name, expiresAt, orderId, username]
-                    );
 
                     // Update order status to paid
                     await pool.query(

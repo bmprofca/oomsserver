@@ -1,5 +1,6 @@
 import pool from "../db.js";
 import crypto from "crypto";
+import { getWalletBalance } from "../services/walletService.js";
 
 const sessions = new Map();
 
@@ -168,11 +169,7 @@ const botController = {
 
                 // Check wallet balance
                 if (lowerMsg.includes("balance") || lowerMsg.includes("wallet") || lowerMsg.includes("how much money")) {
-                    const [wallets] = await pool.query(
-                        `SELECT balance FROM branch_wallets WHERE branch_id = ? LIMIT 1`,
-                        [branch_id]
-                    );
-                    const balance = wallets.length ? Number(wallets[0].balance).toFixed(2) : "0.00";
+                    const balance = (await getWalletBalance(branch_id)).toFixed(2);
                     return res.json({
                         success: true,
                         session_id: activeSessionId,

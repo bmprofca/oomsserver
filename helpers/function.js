@@ -2,22 +2,20 @@ import moment from "moment";
 import pool from "../db.js";
 
 const RANDOM_STRING = (length = 30) => {
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let randomPart = '';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-    for (let i = 0; i < length; i++) {
-        randomPart += chars.charAt(Math.floor(Math.random() * chars.length));
+    if (!length || length < 1) {
+        return letters.charAt(Math.floor(Math.random() * letters.length));
     }
 
-    const timestamp = new Date().getTime().toString();
-    const final = randomPart + timestamp;
+    let result = letters.charAt(Math.floor(Math.random() * letters.length));
 
-    const shuffled = final
-        .split('')
-        .sort(() => Math.random() - 0.5)
-        .join('');
+    for (let i = 1; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
 
-    return shuffled;
+    return result;
 };
 
 const RANDOM_INTEGER = (length = 6) => {
