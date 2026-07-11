@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { authAdmin } from "../middleware/authAdmin.js";
 import { FORMAT_DATE } from "../helpers/function.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
 
@@ -416,9 +416,7 @@ router.get("/profile/:username", authAdmin, async (req, res) => {
                 country_code: profileRow.country_code,
                 email: profileRow.email,
                 pan_number: profileRow.pan_number,
-                image: profileRow.image
-                    ? `${BASE_DOMAIN}/media/profile/image/${profileRow.image}`
-                    : null,
+                image: buildProfileImageUrl(profileRow.image),
                 status: profileRow.status === "1",
                 create_date: FORMAT_DATE(profileRow.create_date),
                 address: {

@@ -4,6 +4,7 @@ const router = express.Router();
 import pool from "../db.js";
 import { auth, validateBranch } from '../middleware/auth.js';
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, TODAY_DATE, SET_OPENING_BALANCE, ID_LENGTH } from "../helpers/function.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import multer from 'multer';
 import xlsx from 'xlsx';
 import moment from 'moment';
@@ -1143,7 +1144,7 @@ router.get("/groups/all", auth, validateBranch, async (req, res) => {
                             state: firm.profile_state,
                             pincode: firm.profile_pincode
                         },
-                        image: firm.profile_image,
+                        image: buildProfileImageUrl(firm.profile_image),
                         created_at: firm.profile_create_date
                     }
                 }))

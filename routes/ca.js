@@ -5,8 +5,8 @@ import { UNIQUE_RANDOM_STRING, RANDOM_STRING, SET_OPENING_BALANCE, GET_BALANCE, 
 import {
     deleteProfileImage,
     downloadAndUploadProfileImage,
-    getProfileImageAccessUrl,
 } from "../helpers/b2Storage.js";
+import { resolveProfileImageUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
 
@@ -33,13 +33,6 @@ async function insertRow(tableName, data) {
     );
 
     return result;
-}
-
-async function resolveProfileImageUrl(image) {
-    if (!image || String(image).trim() === "") {
-        return null;
-    }
-    return getProfileImageAccessUrl(String(image).trim());
 }
 
 router.post("/create", auth, validateBranch, async (req, res) => {
@@ -318,7 +311,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 return {
                     ...row,
                     status: row.status == "1",
-                    image: await resolveProfileImageUrl(row.image),
+                    image: resolveProfileImageUrl(row.image),
                     balance: balance?.balance ?? 0,
                 };
             })
@@ -400,7 +393,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                     country_code: row.country_code,
                     email: row.email,
                     pan_number: row.pan_number,
-                    image: await resolveProfileImageUrl(row.image),
+                    image: resolveProfileImageUrl(row.image),
                     is_active: row.is_active == "1",
                     address: {
                         state: row.state,

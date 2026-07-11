@@ -13,6 +13,7 @@ import { generateDatabaseContext } from "./helpers/DatabaseContext.js";
 import { startEmailBroadcastCron } from "./cron/emailBroadcastCron.js";
 import { startSmsBroadcastCron } from "./cron/smsBroadcastCron.js";
 import publicRoutes from "./routes/public.js";
+import mediaProxyHandler from "./routes/mediaProxy.js";
 
 const PORT = Number(process.env.PORT) || 8877;
 
@@ -50,6 +51,8 @@ app.use(express.json({
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+app.use("/proxy/media", mediaProxyHandler);
 
 app.use("/temp", express.static(path.join(__dirname, "media", "upload", "temp")));
 app.use("/media/profile/image", express.static(path.join(__dirname, "media", "profile", "image")));

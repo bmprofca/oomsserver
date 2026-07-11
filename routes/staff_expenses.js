@@ -5,6 +5,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING } from "../helpers/function.js";
 import { BASE_DOMAIN } from '../helpers/Config.js';
+import { buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import multer from 'multer';
 import path from "path";
 import fs from "fs";
@@ -497,8 +498,9 @@ router.get('/details/:expense_id', auth, validateBranch, async (req, res) => {
         expense.attachment_url = expense.attachment ? 
             `${BASE_DOMAIN}/media/expense/attachment/${expense.attachment}` : null;
         
-        expense.staff_image_url = expense.staff_image ? 
-            `${BASE_DOMAIN}/media/profile/image/${expense.staff_image}` : null;
+        expense.staff_image_url = expense.staff_image
+            ? buildProfileImageUrl(expense.staff_image)
+            : null;
         
         expense.status_text = expense.status === '0' ? 'pending' : 
                              expense.status === '1' ? 'approved' : 'rejected';

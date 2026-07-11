@@ -3,8 +3,28 @@ const router = express.Router();
 import PDFDocument from 'pdfkit';
 import { Readable } from 'stream';
 import pool from "../db.js";
-import { auth, validateBranch } from "../middleware/auth.js";
+import { auth, validateBranch, checkSubscription, requireFeature } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, ID_LENGTH } from "../helpers/function.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
+
+const SALARY_ROUTE_PREFIXES = [
+    '/admin/set-salary',
+    '/admin/salary-history',
+    '/admin/salary-calculation',
+    '/generate-payslip',
+    '/detailed-payslip-pdf',
+    '/admin/add-adjustment',
+    '/admin/adjustments',
+];
+
+router.use(checkSubscription, (req, res, next) => {
+    const path = req.path || '';
+    const isSalaryRoute = SALARY_ROUTE_PREFIXES.some(
+        (prefix) => path === prefix || path.startsWith(`${prefix}/`)
+    );
+    const feature = isSalaryRoute ? 'salary-management' : 'attendance-management';
+    return requireFeature(feature)(req, res, next);
+});
 
 // Helper function to get table columns
 async function getTableColumns(tableName) {
@@ -246,7 +266,7 @@ router.post('/punch-in', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null
             }
         });
@@ -346,7 +366,7 @@ router.post('/punch-out', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null
             }
         });
@@ -446,7 +466,7 @@ router.get('/my-attendance', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null,
                 current_salary: salary[0]?.monthly_salary || null,
                 today: today[0] || null,
@@ -730,7 +750,7 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null
             }
         });
@@ -1105,7 +1125,7 @@ router.post('/admin/verify', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null,
                 status: finalStatus,
                 amount: calculatedAmount,
@@ -1303,7 +1323,7 @@ router.post('/admin/bulk-verify', auth, validateBranch, async (req, res) => {
                         email: profile.email,
                         mobile: profile.mobile,
                         designation: profile.designation,
-                        image: profile.image
+                        image: buildProfileImageUrl(profile.image)
                     } : null,
                     status: finalStatus,
                     original_status: calculatedStatus,
@@ -2817,7 +2837,7 @@ router.get('/showLoginTimes', auth, validateBranch, async (req, res) => {
                     name: profile[0].name,
                     email: profile[0].email,
                     mobile: profile[0].mobile,
-                    image: profile[0].image,
+                    image: buildProfileImageUrl(profile[0].image),
                     designation: profile[0].designation,
                     map_id: profile[0].map_id
                 },
@@ -3159,7 +3179,7 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
                     name: profile.name,
                     email: profile.email,
                     mobile: profile.mobile,
-                    image: profile.image,
+                    image: buildProfileImageUrl(profile.image),
                     designation: profile.designation
                 } : null,
                 current: activeSalary,
@@ -3809,7 +3829,7 @@ router.post('/admin/set-weekly-off', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null,
                 weekly_off_day: weekly_off_day,
                 is_active: is_active || '1'
@@ -3872,7 +3892,7 @@ router.get('/admin/get-weekly-off', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null,
                 weekly_off: weeklyOff.length > 0 ? {
                     weekly_off_day: weeklyOff[0].weekly_off_day,
@@ -4028,7 +4048,7 @@ router.get('/admin/employee-login-history/:username/by-date', auth, validateBran
                             email: profile.email,
                             mobile: profile.mobile,
                             designation: profile.designation,
-                            image: profile.image
+                            image: buildProfileImageUrl(profile.image)
                         }
                     },
                     status: 'absent',
@@ -4107,7 +4127,7 @@ router.get('/admin/employee-login-history/:username/by-date', auth, validateBran
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 }
             },
             
@@ -4434,7 +4454,7 @@ router.get('/staff-monthly-summary/:username', auth, validateBranch, async (req,
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 },
                 period: {
                     month: targetMonth,
@@ -4556,7 +4576,7 @@ router.get('/attendance-calendar/:username', auth, validateBranch, async (req, r
                 staffEmail = profile.email || '';
                 staffMobile = profile.mobile || '';
                 staffDesignation = profile.designation || 'Staff';
-                staffImage = profile.image || null;
+                staffImage = buildProfileImageUrl(profile.image);
             }
         } catch (profileError) {
             console.log('Profile fetch error:', profileError.message);
@@ -5213,7 +5233,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image,
+                    image: buildProfileImageUrl(profile.image),
                     weekly_off_day: weeklyOffDay || 'Not Set'
                 },
                 period: {
@@ -6642,7 +6662,7 @@ router.post('/admin/verify-v2', auth, validateBranch, async (req, res) => {
                     email: profile.email,
                     mobile: profile.mobile,
                     designation: profile.designation,
-                    image: profile.image
+                    image: buildProfileImageUrl(profile.image)
                 } : null,
                 status: finalStatus,
                 calculated_amount: finalCalculatedAmount,

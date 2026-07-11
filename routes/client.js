@@ -17,8 +17,8 @@ import {
     downloadAndUploadProfileDocument,
     downloadAndUploadProfileImage,
     getProfileDocumentAccessUrl,
-    getProfileImageAccessUrl,
 } from "../helpers/b2Storage.js";
+import { resolveProfileImageUrl } from "../helpers/mediaUrl.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile, NOTE_FILE_DIR, NOTE_VOICE_DIR } from "../helpers/NoteFile.js";
 import path from "path";
 import fs from "fs";
@@ -27,13 +27,6 @@ import xlsx from "xlsx";
 import moment from "moment";
 
 const router = express.Router();
-
-async function resolveProfileImageUrl(image) {
-    if (!image || String(image).trim() === "") {
-        return null;
-    }
-    return getProfileImageAccessUrl(String(image).trim());
-}
 
 // Note file configuration (NOTE_FILE_DIR, NOTE_VOICE_DIR imported from helpers/NoteFile.js)
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -492,7 +485,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             // Transform image field to include BASE_DOMAIN if not null/empty
             if (transformedRow.image && transformedRow.image.trim() !== '') {
-                transformedRow.image = await resolveProfileImageUrl(transformedRow.image);
+                transformedRow.image = resolveProfileImageUrl(transformedRow.image);
             } else {
                 transformedRow.image = null;
             }
@@ -572,7 +565,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             address_line_1,
             address_line_2
         };
-        const image_url = await resolveProfileImageUrl(image);
+        const image_url = resolveProfileImageUrl(image);
 
 
         const { balance, debit, credit } = await GET_BALANCE({

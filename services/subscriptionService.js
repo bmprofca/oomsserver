@@ -26,7 +26,8 @@ const emptyStatus = (branchId = '') => ({
     active_plans: [],
     features: {
         core: false,
-        'staff-management': false,
+        'salary-management': false,
+        'attendance-management': false,
         'live-chat': false,
     },
 });
@@ -62,12 +63,13 @@ export function getHighestPlanTier(activePlanNames = []) {
 export function buildFeatureAccess(activePlanNames = []) {
     const set = new Set(activePlanNames);
     const hasCore = VALID_PLANS.some((plan) => set.has(plan));
-    const hasStaff = set.has('BusinessPlus') || set.has('BusinessPro');
+    const hasPlusOrPro = set.has('BusinessPlus') || set.has('BusinessPro');
     const hasLiveChat = set.has('BusinessPro');
 
     return {
         core: hasCore,
-        'staff-management': hasStaff,
+        'salary-management': hasPlusOrPro,
+        'attendance-management': hasPlusOrPro,
         'live-chat': hasLiveChat,
     };
 }
@@ -283,7 +285,8 @@ export function hasFeatureAccess(status, feature) {
     const features = buildFeatureAccess(activeNames);
 
     if (feature === 'core') return features.core;
-    if (feature === 'staff-management') return features['staff-management'];
+    if (feature === 'salary-management') return features['salary-management'];
+    if (feature === 'attendance-management') return features['attendance-management'];
     if (feature === 'live-chat') return features['live-chat'];
     return features.core;
 }

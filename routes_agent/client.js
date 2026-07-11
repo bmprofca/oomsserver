@@ -5,17 +5,10 @@ import { validateAgentSession } from "../middleware/validateAgentSession.js";
 import {
     deleteProfileImage,
     downloadAndUploadProfileImage,
-    getProfileImageAccessUrl,
 } from "../helpers/b2Storage.js";
+import { resolveProfileImageUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
-
-async function resolveProfileImageUrl(image) {
-    if (!image || String(image).trim() === "") {
-        return null;
-    }
-    return getProfileImageAccessUrl(String(image).trim());
-}
 
 async function getTableColumns(tableName) {
     const [rows] = await pool.query(`SHOW COLUMNS FROM \`${tableName}\``);
@@ -136,7 +129,7 @@ async function getAgentClientProfile(username, branch_id) {
 }
 
 async function buildClientDetailsResponse(row) {
-    const image = await resolveProfileImageUrl(row.image);
+    const image = resolveProfileImageUrl(row.image);
 
     return {
         username: row.username,
@@ -296,7 +289,7 @@ router.get("/list", validateAgentSession, async (req, res) => {
             transformedRow.status = formatClientStatus(transformedRow.status);
 
             if (transformedRow.image && String(transformedRow.image).trim() !== "") {
-                transformedRow.image = await resolveProfileImageUrl(transformedRow.image);
+                transformedRow.image = resolveProfileImageUrl(transformedRow.image);
             } else {
                 transformedRow.image = null;
             }

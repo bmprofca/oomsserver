@@ -2,13 +2,16 @@ import express from 'express';
 const router = express.Router();
 
 import { checkSubscription, requirePlan } from "../middleware/auth.js";
-router.use(checkSubscription, requirePlan(['BusinessPlus', 'BusinessPro']));
-
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
 import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
+import { buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
+
+const ALL_PAID_PLANS = ['Business', 'BusinessPlus', 'BusinessPro'];
+
+router.use(checkSubscription, requirePlan(ALL_PAID_PLANS));
 
 // Helper to parse role permissions safely
 function parsePermissions(permissionsAssigned) {
@@ -605,7 +608,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                     gender: element.gender,
                     care_of: element.care_of,
                     guardian_name: element.guardian_name,
-                    image: element.image != "" && element.image != null ? `${BASE_DOMAIN}/media/profile/image/${element.image}` : null,
+                    image: buildProfileImageUrl(element.image),
                     address: {
                         address_line_1: element.address_line_1,
                         address_line_2: element.address_line_2,
@@ -878,9 +881,7 @@ router.get('/search-by-name', auth, async (req, res) => {
 
         // Format the response data
         const formattedData = await Promise.all(rows.map(async (row) => {
-            const profileImage = row.image && row.image !== '' && row.image !== null
-                ? `${BASE_DOMAIN}/media/profile/image/${row.image}`
-                : null;
+            const profileImage = buildProfileImageUrl(row.image);
 
             const branchLogo = row.branch_logo && row.branch_logo !== '' && row.branch_logo !== null
                 ? `${BASE_DOMAIN}/media/branch/logo/${row.branch_logo}`
@@ -1073,9 +1074,7 @@ router.get('/profile/:username', auth, validateBranch, async (req, res) => {
             : null;
 
         // Format profile image URL if exists
-        const profileImage = profile.image && profile.image !== '' && profile.image !== null
-            ? `${BASE_DOMAIN}/media/profile/image/${profile.image}`
-            : null;
+        const profileImage = buildProfileImageUrl(profile.image);
 
         // Prepare the response data with all required fields
         const responseData = [{

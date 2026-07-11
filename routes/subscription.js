@@ -43,8 +43,9 @@ router.post("/create-checkout", auth, validateBranch, async (req, res) => {
         }
 
         const cycle = billingCycle === "yearly" ? "yearly" : "monthly";
-        const amountRupees = getPlanBasePrice(planName, cycle);
-        const amountPaise = amountRupees * 100;
+        const baseAmountRupees = getPlanBasePrice(planName, cycle);
+        const amountRupees = getPlanTotalWithGst(planName, cycle);
+        const amountPaise = Math.round(amountRupees * 100);
 
         const { orderId, keyId } = await createRazorpayOrder({
             amountPaise,
@@ -55,6 +56,8 @@ router.post("/create-checkout", auth, validateBranch, async (req, res) => {
                 billingCycle: cycle,
                 username,
                 branchId,
+                baseAmountRupees: String(baseAmountRupees),
+                gstRate: String(GST_RATE),
             },
         });
 
@@ -73,7 +76,10 @@ router.post("/create-checkout", auth, validateBranch, async (req, res) => {
                 currency: "INR",
                 order_id: orderId,
                 name: "OOMS CRM",
-                description: `${planName} Plan Subscription (${cycle})`,
+                description: `${planName} Plan Subscription (${cycle}, incl. GST)`,
+                base_amount: baseAmountRupees,
+                total_amount: amountRupees,
+                gst_rate: GST_RATE,
             },
         });
     } catch (error) {
@@ -117,7 +123,7 @@ router.post("/verify-payment", auth, validateBranch, async (req, res) => {
         }
 
         const cycle = billingCycle === "yearly" ? "yearly" : "monthly";
-        const amountPaise = (PLAN_PRICING[planName]?.[cycle] || 0) * 100;
+        const amountPaise = Math.round(getPlanTotalWithGst(planName, cycle) * 100);
 
         await pool.query(
             `INSERT INTO razorpay_orders

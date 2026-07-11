@@ -2,7 +2,8 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
-import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from "../helpers/Config.js";
+import { BASE_INVITATION_LINK, APP_NAME } from "../helpers/Config.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { SendMail } from "../helpers/Mail.js";
 
 const router = express.Router();
@@ -609,7 +610,7 @@ router.get("/list", auth, validateBranch, requireBranchAdmin, async (req, res) =
                     guardian_name: element.guardian_name,
                     image:
                         element.image != "" && element.image != null
-                            ? `${BASE_DOMAIN}/media/profile/image/${element.image}`
+                            ? buildProfileImageUrl(element.image)
                             : null,
                     address: {
                         address_line_1: element.address_line_1,

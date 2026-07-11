@@ -3,6 +3,7 @@ import crypto from "crypto";
 import nodemailer from "nodemailer";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
 
@@ -2336,7 +2337,7 @@ router.get("/dynamic-variables/:type/:identifier", auth, validateBranch, async (
                     state: clientProfile.state,
                     address: clientProfile.address_line_1,
                     pincode: clientProfile.pincode,
-                    profile_image: clientProfile.image,
+                    profile_image: buildProfileImageUrl(clientProfile.image),
                     registered_date: clientProfile.create_date,
                     // Firm variables
                     firm_name: clientFirm.firm_name,

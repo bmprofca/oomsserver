@@ -1,5 +1,6 @@
 import pool from "../db.js";
 import xlsx from "xlsx";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import {
     createConfig,
     updateConfig,
@@ -91,7 +92,7 @@ async function resolveDynamicVariables(branch_id, type, identifier) {
                 state: clientProfile.state,
                 address: clientProfile.address_line_1,
                 pincode: clientProfile.pincode,
-                profile_image: clientProfile.image,
+                profile_image: buildProfileImageUrl(clientProfile.image),
                 registered_date: clientProfile.create_date,
                 firm_name: clientFirm.firm_name,
                 firm_type: clientFirm.firm_type,

@@ -210,35 +210,66 @@ async function getProfileDocumentAccessUrl(categoryFolder, filename) {
     return `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}?Authorization=${authorizationToken}`;
 }
 
+async function downloadB2Object(objectKey, retryOnAuth = true) {
+    if (!objectKey) {
+        throw new Error("Object key is required");
+    }
+
+    const auth = await authorizeB2();
+    const bucketId = await getBucketId();
+    const encodedKey = encodeB2ObjectPath(objectKey);
+
+    const downloadAuth = await b2Post("/b2api/v2/b2_get_download_authorization", {
+        bucketId,
+        fileNamePrefix: objectKey,
+        validDurationInSeconds: Math.min(B2_DOWNLOAD_AUTH_TTL_SECONDS, 86400),
+    });
+
+    const authorizationToken = encodeURIComponent(downloadAuth.authorizationToken);
+    const downloadUrl =
+        `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}` +
+        `?Authorization=${authorizationToken}`;
+
+    try {
+        const response = await axios.get(downloadUrl, {
+            responseType: "stream",
+            timeout: 120000,
+            maxRedirects: 5,
+            validateStatus: (status) => status === 200,
+        });
+
+        return {
+            stream: response.data,
+            mimeType: (response.headers["content-type"] || "application/octet-stream")
+                .split(";")[0]
+                .trim(),
+            size: response.headers["content-length"]
+                ? Number(response.headers["content-length"])
+                : null,
+        };
+    } catch (error) {
+        if (retryOnAuth && error.response?.status === 401) {
+            clearB2Cache();
+            return downloadB2Object(objectKey, false);
+        }
+        throw error;
+    }
+}
+
 async function downloadProfileDocument(categoryFolder, filename) {
     if (!filename) {
         throw new Error("Filename is required");
     }
 
-    const key = getProfileDocumentObjectKey(categoryFolder, filename);
-    const auth = await authorizeB2();
-    const encodedKey = encodeB2ObjectPath(key);
+    return downloadB2Object(getProfileDocumentObjectKey(categoryFolder, filename));
+}
 
-    const response = await axios.get(
-        `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}`,
-        {
-            headers: { Authorization: auth.authorizationToken },
-            responseType: "stream",
-            timeout: 120000,
-            maxRedirects: 5,
-            validateStatus: (status) => status === 200,
-        }
-    );
+async function downloadProfileImage(filename) {
+    if (!filename) {
+        throw new Error("Filename is required");
+    }
 
-    return {
-        stream: response.data,
-        mimeType: (response.headers["content-type"] || "application/octet-stream")
-            .split(";")[0]
-            .trim(),
-        size: response.headers["content-length"]
-            ? Number(response.headers["content-length"])
-            : null,
-    };
+    return downloadB2Object(getProfileImageObjectKey(filename));
 }
 
 function getProfileImageObjectKey(filename) {
@@ -476,7 +507,9 @@ export {
     deleteProfileImage,
     downloadAndUploadProfileDocument,
     downloadAndUploadProfileImage,
+    downloadB2Object,
     downloadProfileDocument,
+    downloadProfileImage,
     getProfileDocumentAccessUrl,
     getProfileDocumentObjectKey,
     getProfileImageAccessUrl,

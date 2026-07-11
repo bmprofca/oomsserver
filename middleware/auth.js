@@ -1,5 +1,5 @@
 import pool from "../db.js";
-import { getSubscriptionStatus } from "../services/subscriptionService.js";
+import { getSubscriptionStatus, hasFeatureAccess } from "../services/subscriptionService.js";
 
 async function checkToken(username, token, userType = "user") {
     try {
@@ -230,4 +230,30 @@ function requirePlan(allowedPlans) {
     };
 }
 
-export { auth, checkToken, CheckUserProjectMaping, validateBranch, checkSubscription, requirePlan }
+function requireFeature(featureKey) {
+    return (req, res, next) => {
+        const isSubscribed = req.subscription?.is_subscribed === 'yes';
+
+        if (!isSubscribed) {
+            return res.status(403).json({
+                success: false,
+                message: "Active subscription required. Please subscribe to a plan.",
+                code: "SUBSCRIPTION_REQUIRED",
+            });
+        }
+
+        if (!hasFeatureAccess(req.subscription, featureKey)) {
+            const plan = req.subscription?.subscription_plan || 'None';
+            return res.status(403).json({
+                success: false,
+                message: `This feature is not available in your current plan (${plan}). Please upgrade your plan.`,
+                code: "PLAN_UPGRADE_REQUIRED",
+                feature: featureKey,
+            });
+        }
+
+        next();
+    };
+}
+
+export { auth, checkToken, CheckUserProjectMaping, validateBranch, checkSubscription, requirePlan, requireFeature }
