@@ -1,6 +1,8 @@
-import express from 'express';
-import pool from '../db.js';
-import { updateBroadcastStatusAndCounts } from '../services/smsQueueService.js';
+import express from "express";
+import pool from "../db.js";
+import { updateBroadcastStatusAndCounts } from "../services/smsQueueService.js";
+import { verifyRazorpayWebhookSignature } from "../services/razorpayService.js";
+import { handleRazorpayWebhookPayload } from "../services/razorpayWebhookService.js";
 
 const router = express.Router();
 
@@ -9,10 +11,43 @@ const WEBHOOK_SECRET = "ipvaw1ab0gZy3D3XV9WYn9clYlS2ahgPVOGSj";
 function normalizeMobile(mobile) {
     if (!mobile) return "";
     const clean = String(mobile).replace(/\D/g, "");
-    return clean.slice(-10); // get last 10 digits
+    return clean.slice(-10);
 }
 
-router.post('/sms/fast2sms', async (req, res) => {
+/**
+ * POST /api/v1/webhook/razorpay
+ * Razorpay payment webhook (subscriptions + wallet top-ups).
+ * Configure in Razorpay Dashboard with events: payment.captured, order.paid, payment.failed
+ */
+router.post("/razorpay", async (req, res) => {
+    try {
+        const signature = req.headers["x-razorpay-signature"];
+        const rawBody =
+            req.rawBody?.toString("utf8") ||
+            (typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}));
+
+        if (!verifyRazorpayWebhookSignature({ rawBody, signature })) {
+            console.error("Razorpay webhook signature verification failed.");
+            return res.status(400).json({ success: false, message: "Invalid signature" });
+        }
+
+        const payload = typeof req.body === "object" && req.body !== null && !Buffer.isBuffer(req.body)
+            ? req.body
+            : JSON.parse(rawBody);
+
+        console.log("Razorpay webhook received:", payload?.event);
+        const result = await handleRazorpayWebhookPayload(payload);
+        return res.status(200).json({ success: true, status: "ok", ...result });
+    } catch (error) {
+        console.error("Razorpay webhook error:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Webhook processing failed",
+        });
+    }
+});
+
+router.post("/sms/fast2sms", async (req, res) => {
     try {
         const providedSecret = req.headers["x-webhook-secret"] || req.headers["authorization"] || req.query.secret || req.query.secret_key;
         if (providedSecret !== WEBHOOK_SECRET && providedSecret !== "ipvaw1ab0gZy3D3XV9WYn9clYlS2ah") {
@@ -30,7 +65,6 @@ router.post('/sms/fast2sms', async (req, res) => {
             const deliveryStatuses = report.delivery_status || [];
             if (!deliveryStatuses.length) continue;
 
-            // Fetch recipients for this requestId to obtain broadcast_id and branch_id
             const [recipients] = await pool.query(
                 "SELECT recipient_id, branch_id, broadcast_id, recipient_mobile FROM sms_broadcast_recipients WHERE provider_message_id = ?",
                 [requestId]
@@ -47,7 +81,7 @@ router.post('/sms/fast2sms', async (req, res) => {
                 const statusStr = String(statusItem.status).toLowerCase();
                 const statusDesc = statusItem.status_description || "";
 
-                const targetRecipient = recipients.find(r => normalizeMobile(r.recipient_mobile) === normalizeMobile(mobile));
+                const targetRecipient = recipients.find((r) => normalizeMobile(r.recipient_mobile) === normalizeMobile(mobile));
                 if (!targetRecipient) continue;
 
                 let dbStatus = "pending";
@@ -59,7 +93,6 @@ router.post('/sms/fast2sms', async (req, res) => {
                     dbStatus = "failed";
                     errorMessage = statusDesc || "Delivery failed";
                 } else {
-                    // Other states like Undelivered, Pending, etc.
                     continue;
                 }
 
@@ -76,7 +109,6 @@ router.post('/sms/fast2sms', async (req, res) => {
             }
         }
 
-        // Recalculate status and counts for all affected broadcasts
         for (const broadcastInfoStr of updatedBroadcasts) {
             const { branchId, broadcastId } = JSON.parse(broadcastInfoStr);
             await updateBroadcastStatusAndCounts(broadcastId, branchId);
@@ -90,4 +122,3 @@ router.post('/sms/fast2sms', async (req, res) => {
 });
 
 export default router;
-

@@ -2,6 +2,7 @@
 import express from "express";
 import pool from "../db.js";
 import { RANDOM_STRING } from "../helpers/function.js";
+import { initializeBranchDefaults } from "../services/branchSetupService.js";
 
 const router = express.Router();
 
@@ -266,6 +267,12 @@ router.post("/create", auth, async (req, res) => {
             ]
         );
 
+        const setupSummary = await initializeBranchDefaults({
+            branchId: branch_id,
+            createdBy: creatorUsername,
+            connection: conn,
+        });
+
         await conn.commit();
 
         return res.status(201).json({
@@ -276,6 +283,7 @@ router.post("/create", auth, async (req, res) => {
                 branch_name: name,
                 name,
                 owned: true,
+                setup: setupSummary,
             },
         });
     } catch (err) {

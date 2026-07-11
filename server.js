@@ -39,7 +39,14 @@ app.use((req, res, next) => {
     return next();
 });
 
-app.use(express.json({ strict: false }));
+app.use(express.json({
+    strict: false,
+    verify: (req, _res, buf) => {
+        if (req.originalUrl.includes("/api/v1/webhook/razorpay")) {
+            req.rawBody = buf;
+        }
+    },
+}));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
