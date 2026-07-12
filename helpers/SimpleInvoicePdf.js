@@ -1,11 +1,6 @@
 import PDFDocument from "pdfkit";
 import { pdfTheme } from "./invoicePdfTheme.js";
-
-function money(n) {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return "Rs. 0.00";
-    return `Rs. ${x.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
-}
+import { gRect, gRRect, fitText, fitLine, money } from "./pdfHelpers.js";
 
 /**
  * @param {import("pdfkit")} doc
@@ -22,59 +17,87 @@ function renderSimpleInvoiceLayout(doc, t, {
     const left = doc.page.margins.left;
     const right = doc.page.width - doc.page.margins.right;
     const fullW = right - left;
+    const c1 = t.primary;
+    const c2 = t.primaryEnd;
 
-    doc.rect(left, 24, fullW, 10).fill(t.primary);
-    const headerTop = 44;
-    doc.fillColor(t.primary).font("Helvetica-Bold").fontSize(t.titleSize).text(title, left, headerTop, { width: fullW });
+    if (formatKey === "minimal") {
+        gRect(doc, left, 24, fullW, 4, c1, c2);
+    } else {
+        gRRect(doc, left, 24, fullW, 12, 6, c1, c2);
+    }
+
+    const headerTop = 50;
+    const titleColW = fullW * 0.56;
+    doc.fillColor(c1).font("Helvetica-Bold").fontSize(t.titleSize).text(title, left, headerTop, { width: titleColW, lineBreak: false });
 
     const businessName = issuer?.name || "Business";
-    const contactLine = [issuer?.phone, issuer?.email].filter(Boolean).join(" | ");
-    const leftColY = headerTop + 30;
-    doc.fillColor("#111111").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11).text(businessName, left, leftColY, { width: fullW * 0.56 });
-    doc.font("Helvetica").fontSize(9).fillColor("#4a4a4a");
-    if (issuer?.address) {
-        doc.text(issuer.address, left, doc.y + 2, { width: fullW * 0.56 });
-    }
-    if (contactLine) {
-        doc.text(contactLine, left, doc.y + 2, { width: fullW * 0.56 });
-    }
+    const contactLine = [issuer?.phone, issuer?.email].filter(Boolean).join("  |  ");
+    const leftColY = headerTop + 32;
+    doc.fillColor("#1a1a1a").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11)
+        .text(businessName, left, leftColY, { width: titleColW, lineBreak: false });
 
-    const leftColBottom = doc.y;
+    const addrParts = [issuer?.address, contactLine].filter(Boolean).join("\n");
+    if (addrParts) {
+        fitText(doc, addrParts, left, leftColY + 15, titleColW, 42, {
+            font: "Helvetica", startSize: 9, minSize: 7, color: "#4a4a4a", lineGap: 1.5,
+        });
+    }
+    const leftColBottom = leftColY + 15 + 42;
+
     const cardX = left + fullW * 0.58;
     const cardW = fullW * 0.42;
     const dateValue = invoice.create_date ? new Date(invoice.create_date).toLocaleDateString("en-IN") : "-";
     const txValue = transactionRow?.transaction_date ? new Date(transactionRow.transaction_date).toLocaleDateString("en-IN") : "-";
-    const cardY = headerTop - 4;
-    doc.roundedRect(cardX, cardY, cardW, 76, 6).fill(t.soft);
-    doc.fillColor("#222222").font("Helvetica-Bold").fontSize(9).text("Document No", cardX + 10, cardY + 10);
-    doc.text("Date", cardX + 10, cardY + 26);
-    doc.text("Transaction Date", cardX + 10, cardY + 42);
-    doc.font("Helvetica").text(String(invoice.invoice_no || "-"), cardX + cardW * 0.50, cardY + 10, { width: cardW * 0.46, align: "right" });
-    doc.text(dateValue, cardX + cardW * 0.50, cardY + 26, { width: cardW * 0.46, align: "right" });
-    doc.text(txValue, cardX + cardW * 0.50, cardY + 42, { width: cardW * 0.46, align: "right" });
+    const cardY = headerTop - 10;
 
-    const cardBottom = cardY + 76;
-    let y = Math.max(leftColBottom, cardBottom) + 12;
-    doc.roundedRect(left, y, fullW, 22 + Math.max(0, lines.length) * 24, 6).fill("#f9fafc");
-    y += 10;
+    const metaBg = t.soft;
+    const metaBg2 = t.softEnd;
+    gRRect(doc, cardX, cardY, cardW, 80, 8, metaBg, metaBg2);
 
-    for (let i = 0; i < lines.length; i++) {
-        const row = lines[i];
-        if (!row?.label) continue;
-        doc.font("Helvetica-Bold").fontSize(9).fillColor("#4f4f4f").text(`${row.label}:`, left + 10, y, { width: fullW * 0.25 });
-        doc.font("Helvetica").fontSize(10).fillColor("#111111").text(row.value || "-", left + fullW * 0.27, y, { width: fullW * 0.70 });
-        y += 24;
+    const labelX = cardX + 12;
+    const valW = cardW - 24;
+    doc.fillColor(t.accent).font("Helvetica-Bold").fontSize(8);
+    doc.text("DOCUMENT NO", labelX, cardY + 14);
+    doc.text("DATE", labelX, cardY + 34);
+    doc.text("TRANSACTION", labelX, cardY + 54);
+
+    fitLine(doc, String(invoice.invoice_no || "-"), labelX, valW, cardY + 14, { font: "Helvetica", startSize: 9, minSize: 7, color: "#111111", align: "right" });
+    fitLine(doc, dateValue, labelX, valW, cardY + 34, { font: "Helvetica", startSize: 9, minSize: 7, color: "#111111", align: "right" });
+    fitLine(doc, txValue, labelX, valW, cardY + 54, { font: "Helvetica", startSize: 9, minSize: 7, color: "#111111", align: "right" });
+
+    const cardBottom = cardY + 80;
+    let y = Math.max(leftColBottom, cardBottom) + 20;
+
+    const rowH = 26;
+    const validLines = lines.filter((row) => row?.label);
+    const boxH = rowH + Math.max(0, validLines.length) * rowH;
+    gRRect(doc, left, y, fullW, boxH, 8, metaBg, metaBg2);
+    y += 14;
+
+    const labelColW = fullW * 0.25;
+    const valueColX = left + fullW * 0.28;
+    const valueColW = fullW * 0.68;
+    for (let i = 0; i < validLines.length; i++) {
+        const row = validLines[i];
+        doc.font("Helvetica-Bold").fontSize(9).fillColor(c1).text(`${row.label}:`, left + 14, y, { width: labelColW, lineBreak: false });
+        fitText(doc, row.value || "-", valueColX, y - 1, valueColW - 14, 16, { font: "Helvetica", startSize: 10, minSize: 8, color: "#111111" });
+        y += rowH;
     }
 
-    y += 6;
-    doc.roundedRect(left, y, fullW, 34, 6).fill(t.soft);
-    doc.fillColor(t.primary).font("Helvetica-Bold").fontSize(12).text(`Amount: ${money(invoice.grand_total)}`, left + 12, y + 10, { width: fullW - 24, align: "left" });
+    y += 12;
+    gRRect(doc, left, y, fullW, 44, 8, c1, c2);
+    doc.fillColor(t.onPrimary).font("Helvetica").fontSize(11).text("Total Amount", left + 18, y + 16, { width: fullW * 0.4 });
+    fitLine(doc, money(invoice.grand_total), left + fullW * 0.4, fullW * 0.6 - 18, y + 15, {
+        font: "Helvetica-Bold", startSize: 14, minSize: 9, color: t.onPrimary, align: "right",
+    });
 
     if (transactionRow?.remark) {
-        y += 46;
-        doc.roundedRect(left, y, fullW, 38, 5).strokeColor(t.border).lineWidth(0.8).stroke();
-        doc.font("Helvetica-Bold").fontSize(8).fillColor("#777777").text("Remark", left + 8, y + 4);
-        doc.font("Helvetica").fontSize(9).fillColor("#555555").text(String(transactionRow.remark), left + 8, y + 16, { width: fullW - 16 });
+        y += 56;
+        gRRect(doc, left, y, fullW, 44, 8, metaBg, metaBg2);
+        doc.font("Helvetica-Bold").fontSize(8.5).fillColor(c1).text("REMARKS", left + 14, y + 12);
+        fitText(doc, transactionRow.remark, left + 14, y + 26, fullW - 28, 14, {
+            startSize: 9, minSize: 7, color: "#555555", lineGap: 2,
+        });
     }
 }
 
@@ -107,14 +130,7 @@ export function streamSimpleInvoicePdf(res, {
 
     doc.pipe(res);
 
-    renderSimpleInvoiceLayout(doc, t, {
-        formatKey,
-        title,
-        invoice,
-        transactionRow,
-        lines,
-        issuer,
-    });
+    renderSimpleInvoiceLayout(doc, t, { formatKey, title, invoice, transactionRow, lines, issuer });
 
     doc.end();
 }
@@ -141,14 +157,7 @@ export function buildSimpleInvoicePdfBuffer({
     const chunks = [];
     doc.on("data", (c) => chunks.push(c));
 
-    renderSimpleInvoiceLayout(doc, t, {
-        formatKey,
-        title,
-        invoice,
-        transactionRow,
-        lines,
-        issuer,
-    });
+    renderSimpleInvoiceLayout(doc, t, { formatKey, title, invoice, transactionRow, lines, issuer });
 
     return new Promise((resolve, reject) => {
         doc.on("end", () => resolve(Buffer.concat(chunks)));
