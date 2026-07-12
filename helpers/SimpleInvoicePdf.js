@@ -7,6 +7,21 @@ function money(n) {
     return `Rs. ${x.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
 }
 
+// ─── Helpers for simple layouts ──────────────────────────────────────────────
+function gRect(doc, x, y, w, h, c1, c2) {
+    if (!c2 || c2 === c1) { doc.rect(x, y, w, h).fill(c1); return; }
+    const g = doc.linearGradient(x, y, x + w, y);
+    g.stop(0, c1).stop(1, c2);
+    doc.rect(x, y, w, h).fill(g);
+}
+
+function gRRect(doc, x, y, w, h, r, c1, c2) {
+    if (!c2 || c2 === c1) { doc.roundedRect(x, y, w, h, r).fill(c1); return; }
+    const g = doc.linearGradient(x, y, x + w, y);
+    g.stop(0, c1).stop(1, c2);
+    doc.roundedRect(x, y, w, h, r).fill(g);
+}
+
 /**
  * @param {import("pdfkit")} doc
  * @param {object} t theme from pdfTheme
@@ -22,21 +37,28 @@ function renderSimpleInvoiceLayout(doc, t, {
     const left = doc.page.margins.left;
     const right = doc.page.width - doc.page.margins.right;
     const fullW = right - left;
+    const c1 = t.primary;
+    const c2 = t.primaryEnd || t.primary;
 
-    doc.rect(left, 24, fullW, 10).fill(t.primary);
-    const headerTop = 44;
-    doc.fillColor(t.primary).font("Helvetica-Bold").fontSize(t.titleSize).text(title, left, headerTop, { width: fullW });
+    if (formatKey === "minimal") {
+        gRect(doc, left, 24, fullW, 4, c1, c2);
+    } else {
+        gRRect(doc, left, 24, fullW, 12, 6, c1, c2);
+    }
+
+    const headerTop = 50;
+    doc.fillColor(c1).font("Helvetica-Bold").fontSize(t.titleSize).text(title, left, headerTop, { width: fullW });
 
     const businessName = issuer?.name || "Business";
     const contactLine = [issuer?.phone, issuer?.email].filter(Boolean).join(" | ");
-    const leftColY = headerTop + 30;
-    doc.fillColor("#111111").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11).text(businessName, left, leftColY, { width: fullW * 0.56 });
+    const leftColY = headerTop + 34;
+    doc.fillColor("#222222").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11).text(businessName, left, leftColY, { width: fullW * 0.56 });
     doc.font("Helvetica").fontSize(9).fillColor("#4a4a4a");
     if (issuer?.address) {
-        doc.text(issuer.address, left, doc.y + 2, { width: fullW * 0.56 });
+        doc.text(issuer.address, left, doc.y + 3, { width: fullW * 0.56, lineGap: 1.5 });
     }
     if (contactLine) {
-        doc.text(contactLine, left, doc.y + 2, { width: fullW * 0.56 });
+        doc.text(contactLine, left, doc.y + 3, { width: fullW * 0.56 });
     }
 
     const leftColBottom = doc.y;
@@ -44,37 +66,44 @@ function renderSimpleInvoiceLayout(doc, t, {
     const cardW = fullW * 0.42;
     const dateValue = invoice.create_date ? new Date(invoice.create_date).toLocaleDateString("en-IN") : "-";
     const txValue = transactionRow?.transaction_date ? new Date(transactionRow.transaction_date).toLocaleDateString("en-IN") : "-";
-    const cardY = headerTop - 4;
-    doc.roundedRect(cardX, cardY, cardW, 76, 6).fill(t.soft);
-    doc.fillColor("#222222").font("Helvetica-Bold").fontSize(9).text("Document No", cardX + 10, cardY + 10);
-    doc.text("Date", cardX + 10, cardY + 26);
-    doc.text("Transaction Date", cardX + 10, cardY + 42);
-    doc.font("Helvetica").text(String(invoice.invoice_no || "-"), cardX + cardW * 0.50, cardY + 10, { width: cardW * 0.46, align: "right" });
-    doc.text(dateValue, cardX + cardW * 0.50, cardY + 26, { width: cardW * 0.46, align: "right" });
-    doc.text(txValue, cardX + cardW * 0.50, cardY + 42, { width: cardW * 0.46, align: "right" });
+    const cardY = headerTop - 10;
+    
+    const metaBg = t.soft || "#f8fafc";
+    const metaBg2 = t.softEnd || t.soft;
+    gRRect(doc, cardX, cardY, cardW, 80, 8, metaBg, metaBg2);
+    
+    doc.fillColor(t.accent || "#444444").font("Helvetica-Bold").fontSize(8).text("DOCUMENT NO", cardX + 12, cardY + 14);
+    doc.text("DATE", cardX + 12, cardY + 34);
+    doc.text("TRANSACTION", cardX + 12, cardY + 54);
+    
+    doc.fillColor("#111111").font("Helvetica").fontSize(9).text(String(invoice.invoice_no || "-"), cardX + cardW * 0.50, cardY + 14, { width: cardW * 0.46 - 12, align: "right" });
+    doc.text(dateValue, cardX + cardW * 0.50, cardY + 34, { width: cardW * 0.46 - 12, align: "right" });
+    doc.text(txValue, cardX + cardW * 0.50, cardY + 54, { width: cardW * 0.46 - 12, align: "right" });
 
-    const cardBottom = cardY + 76;
-    let y = Math.max(leftColBottom, cardBottom) + 12;
-    doc.roundedRect(left, y, fullW, 22 + Math.max(0, lines.length) * 24, 6).fill("#f9fafc");
-    y += 10;
+    const cardBottom = cardY + 80;
+    let y = Math.max(leftColBottom, cardBottom) + 20;
+    
+    gRRect(doc, left, y, fullW, 26 + Math.max(0, lines.length) * 26, 8, metaBg, metaBg2);
+    y += 14;
 
     for (let i = 0; i < lines.length; i++) {
         const row = lines[i];
         if (!row?.label) continue;
-        doc.font("Helvetica-Bold").fontSize(9).fillColor("#4f4f4f").text(`${row.label}:`, left + 10, y, { width: fullW * 0.25 });
-        doc.font("Helvetica").fontSize(10).fillColor("#111111").text(row.value || "-", left + fullW * 0.27, y, { width: fullW * 0.70 });
-        y += 24;
+        doc.font("Helvetica-Bold").fontSize(9).fillColor(c1).text(`${row.label}:`, left + 14, y, { width: fullW * 0.25 });
+        doc.font("Helvetica").fontSize(10).fillColor("#111111").text(row.value || "-", left + fullW * 0.28, y - 1, { width: fullW * 0.68 });
+        y += 26;
     }
 
-    y += 6;
-    doc.roundedRect(left, y, fullW, 34, 6).fill(t.soft);
-    doc.fillColor(t.primary).font("Helvetica-Bold").fontSize(12).text(`Amount: ${money(invoice.grand_total)}`, left + 12, y + 10, { width: fullW - 24, align: "left" });
+    y += 12;
+    gRRect(doc, left, y, fullW, 44, 8, c1, c2);
+    doc.fillColor("#ffffff").font("Helvetica").fontSize(11).text("Total Amount", left + 18, y + 16, { width: fullW * 0.4 });
+    doc.font("Helvetica-Bold").fontSize(14).text(money(invoice.grand_total), left + fullW * 0.4, y + 15, { width: fullW * 0.6 - 18, align: "right" });
 
     if (transactionRow?.remark) {
-        y += 46;
-        doc.roundedRect(left, y, fullW, 38, 5).strokeColor(t.border).lineWidth(0.8).stroke();
-        doc.font("Helvetica-Bold").fontSize(8).fillColor("#777777").text("Remark", left + 8, y + 4);
-        doc.font("Helvetica").fontSize(9).fillColor("#555555").text(String(transactionRow.remark), left + 8, y + 16, { width: fullW - 16 });
+        y += 56;
+        gRRect(doc, left, y, fullW, 44, 8, metaBg, metaBg2);
+        doc.font("Helvetica-Bold").fontSize(8.5).fillColor(c1).text("REMARKS", left + 14, y + 12);
+        doc.font("Helvetica").fontSize(9).fillColor("#555555").text(String(transactionRow.remark), left + 14, y + 26, { width: fullW - 28, lineGap: 2 });
     }
 }
 

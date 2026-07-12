@@ -1,114 +1,152 @@
 export function pdfTheme(formatKey) {
-    // Existing themes
+
+    // ── Minimal: clean monochrome with slate accents ──
     if (formatKey === "minimal") {
         return {
-            primary: "#2f2f2f",
-            accent: "#5a5a5a",
-            soft: "#f4f4f4",
-            border: "#dddddd",
-            titleSize: 18,
-            line: 12,
-            tableHead: 9,
+            primary:     "#1e293b",   // slate-800
+            primaryEnd:  "#334155",   // slate-700
+            accent:      "#475569",   // slate-600
+            accentEnd:   "#64748b",   // slate-500
+            soft:        "#f8fafc",
+            softEnd:     "#f1f5f9",
+            border:      "#e2e8f0",
+            rowAlt:      "#f1f5f9",
+            titleSize:   18,
+            line:        12,
+            tableHead:   9,
         };
     }
+
+    // ── Compact: professional teal-blue ──
     if (formatKey === "compact") {
         return {
-            primary: "#0f5fa8",
-            accent: "#2b7fc9",
-            soft: "#eef5fc",
-            border: "#d8e4f2",
-            titleSize: 16,
-            line: 10,
-            tableHead: 8,
+            primary:     "#0e7490",   // cyan-700
+            primaryEnd:  "#0891b2",   // cyan-600
+            accent:      "#06b6d4",   // cyan-500
+            accentEnd:   "#22d3ee",   // cyan-400
+            soft:        "#ecfeff",
+            softEnd:     "#cffafe",
+            border:      "#a5f3fc",
+            rowAlt:      "#f0fdfe",
+            titleSize:   16,
+            line:        10,
+            tableHead:   8,
         };
     }
-    
-    // NEW PREMIUM TEMPLATE THEMES
+
+    // ── Classic: deep navy ──
+    // (default, also returned at bottom)
+
+    // ──────── PREMIUM THEMES ────────
+
+    // Premium Modern: vibrant indigo-violet — gradient from indigo to violet
     if (formatKey === "premium_modern") {
         return {
-            primary: "#1a73e8",
-            accent: "#4285f4",
-            soft: "#e8f0fe",
-            border: "#dadce0",
-            titleSize: 22,
-            line: 12,
-            tableHead: 9,
-            headerBg: "#1a73e8",
-            headerText: "#ffffff",
-            accentGradient: true,
+            primary:     "#4f46e5",   // indigo-600
+            primaryEnd:  "#7c3aed",   // violet-600
+            accent:      "#818cf8",   // indigo-400
+            accentEnd:   "#a78bfa",   // violet-400
+            soft:        "#eef2ff",   // indigo-50
+            softEnd:     "#ede9fe",   // violet-50
+            border:      "#c7d2fe",   // indigo-200
+            rowAlt:      "#f5f3ff",
+            titleSize:   22,
+            line:        12,
+            tableHead:   9,
+            headerText:  "#ffffff",
             borderRadius: 12,
         };
     }
-    
+
+    // Premium Elegant: warm gold & champagne — gradient from amber to rose
     if (formatKey === "premium_elegant") {
         return {
-            primary: "#8b7355",
-            accent: "#a0845c",
-            soft: "#f5f0e8",
-            border: "#d4c5b0",
-            titleSize: 24,
-            line: 12,
-            tableHead: 9,
-            headerBg: "#8b7355",
-            headerText: "#ffffff",
-            fontFamily: "Helvetica",
+            primary:     "#b45309",   // amber-700
+            primaryEnd:  "#c2410c",   // orange-700
+            accent:      "#f59e0b",   // amber-500
+            accentEnd:   "#f97316",   // orange-500
+            soft:        "#fffbeb",   // amber-50
+            softEnd:     "#fff7ed",   // orange-50
+            border:      "#fde68a",   // amber-200
+            rowAlt:      "#fef3c7",
+            titleSize:   24,
+            line:        12,
+            tableHead:   9,
+            headerText:  "#ffffff",
+            fontFamily:  "Helvetica",
             borderRadius: 4,
         };
     }
-    
+
+    // Premium Corporate: royal blue & deep teal — gradient from navy-blue to teal
     if (formatKey === "premium_corporate") {
         return {
-            primary: "#0f2b3d",
-            accent: "#1a4a6f",
-            soft: "#f0f4f8",
-            border: "#cbd5e1",
-            titleSize: 20,
-            line: 12,
-            tableHead: 9,
-            headerBg: "#0f2b3d",
-            headerText: "#ffffff",
+            primary:     "#1d4ed8",   // blue-700
+            primaryEnd:  "#0f766e",   // teal-700
+            accent:      "#3b82f6",   // blue-500
+            accentEnd:   "#14b8a6",   // teal-500
+            soft:        "#eff6ff",   // blue-50
+            softEnd:     "#f0fdfa",   // teal-50
+            border:      "#bfdbfe",   // blue-200
+            rowAlt:      "#e0f2fe",
+            titleSize:   20,
+            line:        12,
+            tableHead:   9,
+            headerText:  "#ffffff",
             showBorderLines: true,
         };
     }
-    
+
+    // Premium Creative: sunset fire — gradient from crimson to orange
     if (formatKey === "premium_creative") {
         return {
-            primary: "#ff6b35",
-            accent: "#ff8c42",
-            soft: "#fff5f0",
-            border: "#ffd6c4",
-            titleSize: 20,
-            line: 12,
-            tableHead: 9,
-            headerBg: "#ff6b35",
-            headerText: "#ffffff",
-            accentColor: "#ff8c42",
+            primary:     "#e11d48",   // rose-600
+            primaryEnd:  "#ea580c",   // orange-600
+            accent:      "#f43f5e",   // rose-500
+            accentEnd:   "#f97316",   // orange-500
+            soft:        "#fff1f2",   // rose-50
+            softEnd:     "#fff7ed",   // orange-50
+            border:      "#fecdd3",   // rose-200
+            rowAlt:      "#ffe4e6",
+            titleSize:   20,
+            line:        12,
+            tableHead:   9,
+            headerText:  "#ffffff",
+            accentColor: "#f97316",
         };
     }
-    
+
+    // Premium Luxury: deep purple & gold — gradient from deep purple to gold
     if (formatKey === "premium_luxury") {
         return {
-            primary: "#1a1a1a",
-            accent: "#c9a96e",
-            soft: "#faf9f7",
-            border: "#e5d5b8",
-            titleSize: 26,
-            line: 12,
-            tableHead: 9,
-            headerBg: "#1a1a1a",
-            headerText: "#c9a96e",
-            goldAccent: true,
+            primary:     "#6d28d9",   // violet-700
+            primaryEnd:  "#a16207",   // yellow-700
+            accent:      "#f59e0b",   // amber-500 (bright gold)
+            accentEnd:   "#d97706",   // amber-600
+            soft:        "#faf5ff",   // violet-50
+            softEnd:     "#fffbeb",   // amber-50
+            border:      "#ddd6fe",   // violet-200
+            rowAlt:      "#f5f3ff",
+            titleSize:   26,
+            line:        12,
+            tableHead:   9,
+            headerText:  "#ffffff",
+            goldAccent:  true,
         };
     }
-    
-    // Default classic
+
+    // ── Default Classic: deep royal navy ──
     return {
-        primary: "#1e3c72",
-        accent: "#2f5ca8",
-        soft: "#eef2fb",
-        border: "#d7deee",
-        titleSize: 20,
-        line: 12,
-        tableHead: 9,
+        primary:     "#1e3a5f",   // deep navy
+        primaryEnd:  "#284b7a",
+        accent:      "#2563eb",   // blue-600
+        accentEnd:   "#3b82f6",   // blue-500
+        soft:        "#eff6ff",   // blue-50
+        softEnd:     "#dbeafe",
+        border:      "#bfdbfe",   // blue-200
+        rowAlt:      "#dbeafe",
+        titleSize:   20,
+        line:        12,
+        tableHead:   9,
     };
 }
