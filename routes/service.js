@@ -59,10 +59,10 @@ function parseIsAddedFilter(value) {
 }
 
 // GET /list - List all global services by type; is_added shows branch mapping
-// Query: { page_no, limit, search, type, is_added } — type must be "general" or "compliance"
+// Query: { page_no, limit, search, type, is_added | added_only } — type must be "general" or "compliance"
 router.get('/list', auth, validateBranch, async (req, res) => {
     try {
-        const { search, page_no, limit, type, is_added } = req.query;
+        const { search, page_no, limit, type, is_added, added_only } = req.query;
         const branch_id = req.branch_id;
 
         const serviceType = type != null ? String(type).trim() : "";
@@ -73,7 +73,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
             });
         }
 
-        const isAddedFilter = parseIsAddedFilter(is_added);
+        const isAddedFilter = parseIsAddedFilter(is_added ?? added_only);
         if (isAddedFilter.error) {
             return res.status(400).json({
                 success: false,

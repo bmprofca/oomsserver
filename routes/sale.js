@@ -108,14 +108,132 @@ async function insertRow(db, tableName, data) {
 
 
 
-router.post("/create/user", auth, validateBranch, async (req, res) => {
+
+const SALE_PARTY_TYPES = ["client", "ca", "staff", "agent", "bank", "capital"];
+
+async function validateAndNormalizeSaleItems(branch_id, items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        const err = new Error("items is required and must be a non-empty array");
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const normalizedItems = [];
+    for (let index = 0; index < items.length; index++) {
+        const item = items[index] || {};
+        const service_id = item?.service_id != null ? String(item.service_id).trim() : "";
+        const feesNum = Number(item?.fees);
+        const itemRemark = item?.remark != null ? String(item.remark).trim() : null;
+
+        if (!service_id) {
+            const err = new Error(`items[${index}].service_id is required`);
+            err.statusCode = 400;
+            throw err;
+        }
+        if (!Number.isFinite(feesNum) || feesNum <= 0) {
+            const err = new Error(`items[${index}].fees must be greater than 0`);
+            err.statusCode = 400;
+            throw err;
+        }
+
+        normalizedItems.push({ service_id, feesNum, itemRemark });
+    }
+
+    const serviceIds = normalizedItems.map((el) => el.service_id);
+    const placeholders = serviceIds.map(() => "?").join(", ");
+    const [serviceRows] = await pool.query(
+        `SELECT service_id FROM branch_services WHERE branch_id = ? AND is_deleted = '0' AND service_id IN (${placeholders})`,
+        [branch_id, ...serviceIds]
+    );
+    const serviceSet = new Set(serviceRows.map((row) => String(row.service_id)));
+
+    for (let index = 0; index < normalizedItems.length; index++) {
+        if (!serviceSet.has(normalizedItems[index].service_id)) {
+            const err = new Error(`Invalid service_id in items[${index}]: ${normalizedItems[index].service_id}`);
+            err.statusCode = 400;
+            throw err;
+        }
+    }
+
+    return normalizedItems;
+}
+
+async function validateSaleParty(db, branch_id, party_type, party_id) {
+    const partyTypeVal = String(party_type).trim().toLowerCase();
+    const partyIdVal = String(party_id).trim();
+
+    if (!SALE_PARTY_TYPES.includes(partyTypeVal)) {
+        const err = new Error(`party_type must be one of: ${SALE_PARTY_TYPES.join(", ")}`);
+        err.statusCode = 400;
+        throw err;
+    }
+    if (!partyIdVal) {
+        const err = new Error("party_id is required");
+        err.statusCode = 400;
+        throw err;
+    }
+
+    if (partyTypeVal === "bank") {
+        const [[row]] = await db.query(
+            "SELECT bank_id FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
+            [branch_id, partyIdVal]
+        );
+        if (!row) {
+            const err = new Error("Invalid bank_id");
+            err.statusCode = 400;
+            throw err;
+        }
+        return { partyTypeVal, partyIdVal };
+    }
+
+    if (partyTypeVal === "capital") {
+        const [[row]] = await db.query(
+            "SELECT capital_id FROM capitals WHERE branch_id = ? AND capital_id = ? LIMIT 1",
+            [branch_id, partyIdVal]
+        );
+        if (!row) {
+            const err = new Error("Invalid capital_id");
+            err.statusCode = 400;
+            throw err;
+        }
+        return { partyTypeVal, partyIdVal };
+    }
+
+    if (partyTypeVal === "staff") {
+        const [[row]] = await db.query(
+            `SELECT username FROM branch_mapping
+             WHERE branch_id = ? AND username = ? AND type = 'staff' AND is_deleted = '0' LIMIT 1`,
+            [branch_id, partyIdVal]
+        );
+        if (!row) {
+            const err = new Error("Invalid staff party_id");
+            err.statusCode = 400;
+            throw err;
+        }
+        return { partyTypeVal, partyIdVal };
+    }
+
+    const [[profile]] = await db.query(
+        "SELECT username FROM profile WHERE username = ? AND status = '1' LIMIT 1",
+        [partyIdVal]
+    );
+    if (!profile) {
+        const err = new Error(`Invalid party_id for party_type ${partyTypeVal}`);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    return { partyTypeVal, partyIdVal };
+}
+
+router.post("/create", auth, validateBranch, async (req, res) => {
     try {
         const username = req.headers["username"] || req.headers["Username"] || "";
         const branch_id = req.branch_id;
 
         const {
-            username: partyUsername,
-            user_type,
+            party_id,
+            party_type,
             firm_id,
             transaction_date,
             remark,
@@ -125,14 +243,14 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             discount_value,
             additional_charge,
             round_off,
-            items
+            items,
         } = req.body || {};
 
-        if (!partyUsername || String(partyUsername).trim() === "") {
-            return res.status(400).json({ success: false, message: "username is required" });
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
         }
-        if (!user_type || String(user_type).trim() === "") {
-            return res.status(400).json({ success: false, message: "user_type is required" });
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
         }
         if (!transaction_date || String(transaction_date).trim() === "") {
             return res.status(400).json({ success: false, message: "transaction_date is required" });
@@ -140,57 +258,44 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
         if (tax_rate == null || String(tax_rate).trim?.() === "") {
             return res.status(400).json({ success: false, message: "tax_rate is required" });
         }
-        if (!Array.isArray(items) || items.length === 0) {
-            return res.status(400).json({ success: false, message: "items is required and must be a non-empty array" });
+
+        let normalizedItems;
+        try {
+            normalizedItems = await validateAndNormalizeSaleItems(branch_id, items);
+        } catch (validationErr) {
+            return res.status(validationErr.statusCode || 400).json({
+                success: false,
+                message: validationErr.message,
+            });
         }
 
-        const party2_id = String(partyUsername).trim();
-        const party2_type = String(user_type).trim();
+        let partyTypeVal;
+        let partyIdVal;
+        try {
+            ({ partyTypeVal, partyIdVal } = await validateSaleParty(pool, branch_id, party_type, party_id));
+        } catch (validationErr) {
+            return res.status(validationErr.statusCode || 400).json({
+                success: false,
+                message: validationErr.message,
+            });
+        }
+
         const txnDate = String(transaction_date).trim();
         const remarkVal = remark != null ? String(remark).trim() : null;
-        const firmId = firm_id != null && String(firm_id).trim() !== "" ? String(firm_id).trim() : null;
+        const firmId =
+            firm_id != null && String(firm_id).trim() !== "" && partyTypeVal === "client"
+                ? String(firm_id).trim()
+                : null;
         const taxRateNum = Number(tax_rate);
 
         if (!Number.isFinite(taxRateNum) || taxRateNum < 0) {
-            return res.status(400).json({ success: false, message: "tax_rate must be a valid number greater than or equal to 0" });
-        }
-
-        const normalizedItems = [];
-        for (let index = 0; index < items.length; index++) {
-            const item = items[index] || {};
-            const service_id = item?.service_id != null ? String(item.service_id).trim() : "";
-            const feesNum = Number(item?.fees);
-            const itemRemark = item?.remark != null ? String(item.remark).trim() : null;
-
-            if (!service_id) {
-                return res.status(400).json({ success: false, message: `items[${index}].service_id is required` });
-            }
-            if (!Number.isFinite(feesNum) || feesNum <= 0) {
-                return res.status(400).json({ success: false, message: `items[${index}].fees must be greater than 0` });
-            }
-
-            normalizedItems.push({ service_id, feesNum, itemRemark });
-        }
-
-        const serviceIds = normalizedItems.map(el => el.service_id);
-        const placeholders = serviceIds.map(() => "?").join(", ");
-        const [serviceRows] = await pool.query(
-            `SELECT service_id FROM branch_services WHERE branch_id = ? AND is_deleted = '0' AND service_id IN (${placeholders})`,
-            [branch_id, ...serviceIds]
-        );
-        const serviceSet = new Set(serviceRows.map(row => String(row.service_id)));
-
-        for (let index = 0; index < normalizedItems.length; index++) {
-            if (!serviceSet.has(normalizedItems[index].service_id)) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Invalid service_id in items[${index}]: ${normalizedItems[index].service_id}`
-                });
-            }
+            return res.status(400).json({
+                success: false,
+                message: "tax_rate must be a valid number greater than or equal to 0",
+            });
         }
 
         const saleItemsToInsert = [];
-
         let amountTotal = 0;
         let itemsTaxTotal = 0;
 
@@ -208,7 +313,7 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                 tax_perc: Number(taxRateNum.toFixed(2)),
                 tax_value: taxValue,
                 total: itemTotal,
-                remark: current.itemRemark
+                remark: current.itemRemark,
             });
         }
 
@@ -223,7 +328,7 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                 discount_perc_rate,
                 discount_value,
                 additional_charge,
-                round_off
+                round_off,
             });
         } catch (validationErr) {
             return res.status(400).json({ success: false, message: validationErr.message });
@@ -252,10 +357,28 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             const serial = Number(invoiceData?.current || 0) + 1;
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
-            const [invoiceInsertResult] = await connection.query(
+            await connection.query(
                 `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [invoice_id, branch_id, invoice_no, username, username, "sale", transaction_id, amountTotal, pricing.discountType, pricing.discountPercRate, pricing.discountValue, effectiveTaxRate, pricing.taxValue, pricing.additionalCharge, pricing.totalBeforeRound, pricing.roundOffValue, pricing.grandTotal]
+                [
+                    invoice_id,
+                    branch_id,
+                    invoice_no,
+                    username,
+                    username,
+                    "sale",
+                    transaction_id,
+                    amountTotal,
+                    pricing.discountType,
+                    pricing.discountPercRate,
+                    pricing.discountValue,
+                    effectiveTaxRate,
+                    pricing.taxValue,
+                    pricing.additionalCharge,
+                    pricing.totalBeforeRound,
+                    pricing.roundOffValue,
+                    pricing.grandTotal,
+                ]
             );
 
             const saleEntriesBranchId = await resolveSaleEntriesBranchId(connection, branch_id);
@@ -272,13 +395,38 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             await connection.query(
                 `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [saleEntriesBranchId, sale_entry_id, invoice_id, party2_id, party2_type, firmId, txnDate, username, username, pricing.grandTotal]
+                [
+                    saleEntriesBranchId,
+                    sale_entry_id,
+                    invoice_id,
+                    partyIdVal,
+                    partyTypeVal,
+                    firmId,
+                    txnDate,
+                    username,
+                    username,
+                    pricing.grandTotal,
+                ]
             );
 
             await connection.query(
                 `INSERT INTO transactions (branch_id, transaction_id, create_by, modify_by, transaction_date, amount, transaction_type, invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remark)
                  VALUES (?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?, ?)`,
-                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, "sale", invoice_id, party2_type, party2_id, remarkVal]
+                [
+                    branch_id,
+                    transaction_id,
+                    username,
+                    username,
+                    txnDate,
+                    pricing.grandTotal,
+                    invoice_id,
+                    invoice_no,
+                    "sale",
+                    invoice_id,
+                    partyTypeVal,
+                    partyIdVal,
+                    remarkVal,
+                ]
             );
 
             for (let index = 0; index < saleItemsToInsert.length; index++) {
@@ -287,7 +435,18 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                 await connection.query(
                     `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [branch_id, item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
+                    [
+                        branch_id,
+                        item_id,
+                        sale_entry_id,
+                        invoice_id,
+                        row.service_id,
+                        row.fees,
+                        row.tax_perc,
+                        row.tax_value,
+                        row.total,
+                        row.remark,
+                    ]
                 );
             }
 
@@ -298,19 +457,19 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             const saleItemsForEmail = await getSaleItems(sale_entry_id);
 
             await notifySaleInvoiceEmail({
-                branch_id: branch_id,
+                branch_id,
                 sale_id: sale_entry_id,
-                invoice_id: invoice_id,
-                invoice_no: invoice_no,
-                party_id: party2_id,
-                party_type: party2_type,
+                invoice_id,
+                invoice_no,
+                party_id: partyIdVal,
+                party_type: partyTypeVal,
                 sale_date: txnDate,
                 grand_total: pricing.grandTotal,
                 items: saleItemsForEmail,
                 subtotal: amountTotal,
                 discount_value: pricing.discountValue,
                 tax_value: pricing.taxValue,
-                total: pricing.totalBeforeRound
+                total: pricing.totalBeforeRound,
             });
 
             return res.status(200).json({
@@ -320,8 +479,8 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                     invoice_id,
                     transaction_id,
                     invoice_no,
-                    username: party2_id,
-                    user_type: party2_type,
+                    party_id: partyIdVal,
+                    party_type: partyTypeVal,
                     firm_id: firmId,
                     transaction_date: txnDate,
                     subtotal: amountTotal,
@@ -336,252 +495,8 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                     grand_total: pricing.grandTotal,
                     remark: remarkVal,
                     items_tax_total: Number(itemsTaxTotal.toFixed(2)),
-                    items: saleItemsToInsert
-                }
-            });
-        } catch (err) {
-            await connection.rollback();
-            throw err;
-        } finally {
-            connection.release();
-        }
-
-    } catch (error) {
-        console.error("Create sale fatal error:", error);
-        return res.status(500).json({ success: false, message: "Failed to create sale", error: error.message });
-    }
-});
-
-router.post("/create/bank", auth, validateBranch, async (req, res) => {
-    try {
-        const username = req.headers["username"] || req.headers["Username"] || "";
-        const branch_id = req.branch_id;
-
-        const {
-            bank_id,
-            transaction_date,
-            remark,
-            tax_rate,
-            discount_type,
-            discount_perc_rate,
-            discount_value,
-            additional_charge,
-            round_off,
-            items
-        } = req.body || {};
-
-        if (!bank_id || String(bank_id).trim() === "") {
-            return res.status(400).json({ success: false, message: "bank_id is required" });
-        }
-        if (!transaction_date || String(transaction_date).trim() === "") {
-            return res.status(400).json({ success: false, message: "transaction_date is required" });
-        }
-        if (tax_rate == null || String(tax_rate).trim?.() === "") {
-            return res.status(400).json({ success: false, message: "tax_rate is required" });
-        }
-        if (!Array.isArray(items) || items.length === 0) {
-            return res.status(400).json({ success: false, message: "items is required and must be a non-empty array" });
-        }
-
-        const party2_id = String(bank_id).trim();
-        const party2_type = "bank";
-        const txnDate = String(transaction_date).trim();
-        const remarkVal = remark != null ? String(remark).trim() : null;
-        const taxRateNum = Number(tax_rate);
-
-        if (!Number.isFinite(taxRateNum) || taxRateNum < 0) {
-            return res.status(400).json({ success: false, message: "tax_rate must be a valid number greater than or equal to 0" });
-        }
-
-        const [[bankRow]] = await pool.query(
-            "SELECT bank_id FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
-            [branch_id, party2_id]
-        );
-        if (!bankRow) {
-            return res.status(400).json({ success: false, message: "Invalid bank_id" });
-        }
-
-        const normalizedItems = [];
-        for (let index = 0; index < items.length; index++) {
-            const item = items[index] || {};
-            const service_id = item?.service_id != null ? String(item.service_id).trim() : "";
-            const feesNum = Number(item?.fees);
-            const itemRemark = item?.remark != null ? String(item.remark).trim() : null;
-
-            if (!service_id) {
-                return res.status(400).json({ success: false, message: `items[${index}].service_id is required` });
-            }
-            if (!Number.isFinite(feesNum) || feesNum <= 0) {
-                return res.status(400).json({ success: false, message: `items[${index}].fees must be greater than 0` });
-            }
-
-            normalizedItems.push({ service_id, feesNum, itemRemark });
-        }
-
-        const serviceIds = normalizedItems.map(el => el.service_id);
-        const placeholders = serviceIds.map(() => "?").join(", ");
-        const [serviceRows] = await pool.query(
-            `SELECT service_id FROM branch_services WHERE branch_id = ? AND is_deleted = '0' AND service_id IN (${placeholders})`,
-            [branch_id, ...serviceIds]
-        );
-        const serviceSet = new Set(serviceRows.map(row => String(row.service_id)));
-
-        for (let index = 0; index < normalizedItems.length; index++) {
-            if (!serviceSet.has(normalizedItems[index].service_id)) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Invalid service_id in items[${index}]: ${normalizedItems[index].service_id}`
-                });
-            }
-        }
-
-        const saleItemsToInsert = [];
-
-        let amountTotal = 0;
-        let itemsTaxTotal = 0;
-
-        for (let index = 0; index < normalizedItems.length; index++) {
-            const current = normalizedItems[index];
-            const taxValue = Number(((current.feesNum * taxRateNum) / 100).toFixed(2));
-            const itemTotal = Number((current.feesNum + taxValue).toFixed(2));
-
-            amountTotal += current.feesNum;
-            itemsTaxTotal += taxValue;
-
-            saleItemsToInsert.push({
-                service_id: current.service_id,
-                fees: Number(current.feesNum.toFixed(2)),
-                tax_perc: Number(taxRateNum.toFixed(2)),
-                tax_value: taxValue,
-                total: itemTotal,
-                remark: current.itemRemark
-            });
-        }
-
-        amountTotal = Number(amountTotal.toFixed(2));
-        const effectiveTaxRate = Number(taxRateNum.toFixed(2));
-        let pricing;
-        try {
-            pricing = normalizeDiscountAndTotals({
-                subtotal: amountTotal,
-                taxRateNum: effectiveTaxRate,
-                discount_type,
-                discount_perc_rate,
-                discount_value,
-                additional_charge,
-                round_off
-            });
-        } catch (validationErr) {
-            return res.status(400).json({ success: false, message: validationErr.message });
-        }
-
-        const connection = await pool.getConnection();
-        try {
-            await connection.beginTransaction();
-
-            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
-
-            const [invoicePrefixRows] = await connection.query(
-                "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
-                [branch_id, "sale", "0", TODAY_DATE(), TODAY_DATE()]
-            );
-
-            if (!invoicePrefixRows || invoicePrefixRows.length === 0) {
-                await connection.rollback();
-                connection.release();
-                return res.status(400).json({ success: false, message: "Invoice prefix not set for sale." });
-            }
-
-            const invoiceData = invoicePrefixRows[0];
-            const invoicePrimaryId = invoiceData?.id;
-            const serial = Number(invoiceData?.current || 0) + 1;
-            const invoice_no = `${invoiceData?.prefix}${serial}`;
-
-            await connection.query(
-                `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [invoice_id, branch_id, invoice_no, username, username, "sale", transaction_id, amountTotal, pricing.discountType, pricing.discountPercRate, pricing.discountValue, effectiveTaxRate, pricing.taxValue, pricing.additionalCharge, pricing.totalBeforeRound, pricing.roundOffValue, pricing.grandTotal]
-            );
-
-            const saleEntriesBranchId = await resolveSaleEntriesBranchId(connection, branch_id);
-            if (saleEntriesBranchId == null) {
-                await connection.rollback();
-                connection.release();
-                return res.status(400).json({
-                    success: false,
-                    message: `Invalid branch_id for sale_entries (branch "${branch_id}" not found in branch_list)`,
-                });
-            }
-
-            const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
-            await connection.query(
-                `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [saleEntriesBranchId, sale_entry_id, invoice_id, party2_id, party2_type, null, txnDate, username, username, pricing.grandTotal]
-            );
-
-            await connection.query(
-                `INSERT INTO transactions (branch_id, transaction_id, create_by, modify_by, transaction_date, amount, transaction_type, invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remark)
-                 VALUES (?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?, ?)`,
-                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, "sale", invoice_id, party2_type, party2_id, remarkVal]
-            );
-
-            for (let index = 0; index < saleItemsToInsert.length; index++) {
-                const row = saleItemsToInsert[index];
-                const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
-                await connection.query(
-                    `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [branch_id, item_id, sale_entry_id, invoice_id, row.service_id, row.fees, row.tax_perc, row.tax_value, row.total, row.remark]
-                );
-            }
-
-            await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
-
-            await connection.commit();
-
-            const saleItemsForEmail = await getSaleItems(sale_entry_id);
-
-            await notifySaleInvoiceEmail({
-                branch_id: branch_id,
-                sale_id: sale_entry_id,
-                invoice_id: invoice_id,
-                invoice_no: invoice_no,
-                party_id: party2_id,
-                party_type: party2_type,
-                sale_date: txnDate,
-                grand_total: pricing.grandTotal,
-                items: saleItemsForEmail,
-                subtotal: amountTotal,
-                discount_value: pricing.discountValue,
-                tax_value: pricing.taxValue,
-                total: pricing.totalBeforeRound
-            });
-
-            return res.status(200).json({
-                success: true,
-                message: "Sale created successfully",
-                data: {
-                    invoice_id,
-                    transaction_id,
-                    invoice_no,
-                    bank_id: party2_id,
-                    transaction_date: txnDate,
-                    subtotal: amountTotal,
-                    discount_type: pricing.discountType,
-                    discount_perc_rate: pricing.discountPercRate,
-                    discount_value: pricing.discountValue,
-                    tax_rate: effectiveTaxRate,
-                    gst_value: pricing.taxValue,
-                    additional_charge: pricing.additionalCharge,
-                    total: pricing.totalBeforeRound,
-                    round_off: pricing.roundOffValue,
-                    grand_total: pricing.grandTotal,
-                    remark: remarkVal,
-                    items_tax_total: Number(itemsTaxTotal.toFixed(2)),
-                    items: saleItemsToInsert
-                }
+                    items: saleItemsToInsert,
+                },
             });
         } catch (err) {
             await connection.rollback();

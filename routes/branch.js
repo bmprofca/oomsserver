@@ -37,8 +37,6 @@ const auth = async (req, res, next) => {
             [username, username]  // Try both username and email
         );
 
-        console.log('User found in database:', users.length > 0);
-
         if (users.length === 0) {
             conn.release();
             return res.status(404).json({
@@ -61,7 +59,6 @@ const auth = async (req, res, next) => {
             [token, dbUsername]  // FIX: Use database username
         );
 
-        console.log('Token valid:', tokens.length > 0);
 
         if (tokens.length === 0) {
             conn.release();
@@ -79,7 +76,6 @@ const auth = async (req, res, next) => {
         req.token = token;
         req.userEmail = users[0].login_id;
 
-        console.log('Auth successful for user:', req.username);
 
         next();
 
