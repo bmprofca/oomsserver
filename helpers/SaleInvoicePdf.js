@@ -1,46 +1,7 @@
 import PDFDocument from "pdfkit";
 import { pdfTheme } from "./invoicePdfTheme.js";
 import { premiumRenderers } from "./SaleInvoicePremiumLayouts.js";
-
-function money(n) {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return "Rs. 0.00";
-    return `Rs. ${x.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
-}
-
-// ─── Helpers for standard layouts ──────────────────────────────────────────
-function gRect(doc, x, y, w, h, c1, c2) {
-    if (!c2 || c2 === c1) { doc.rect(x, y, w, h).fill(c1); return; }
-    const g = doc.linearGradient(x, y, x + w, y);
-    g.stop(0, c1).stop(1, c2);
-    doc.rect(x, y, w, h).fill(g);
-}
-
-function gRRect(doc, x, y, w, h, r, c1, c2) {
-    if (!c2 || c2 === c1) { doc.roundedRect(x, y, w, h, r).fill(c1); return; }
-    const g = doc.linearGradient(x, y, x + w, y);
-    g.stop(0, c1).stop(1, c2);
-    doc.roundedRect(x, y, w, h, r).fill(g);
-}
-
-function totalsRow(doc, label, value, boxX, boxW, y, pad, labelColor, valueColor, fs, isBold = false) {
-    doc.font(isBold ? "Helvetica-Bold" : "Helvetica").fontSize(fs).fillColor(labelColor)
-        .text(label, boxX + pad, y, { lineBreak: false });
-    doc.font("Helvetica-Bold").fontSize(fs).fillColor(valueColor);
-    const vw = doc.widthOfString(value);
-    doc.text(value, boxX + boxW - pad - vw, y, { lineBreak: false });
-}
-
-function overflow(doc, y, h, redrawHeader) {
-    const limit = doc.page.height - doc.page.margins.bottom - 30;
-    if (y + h > limit) {
-        doc.addPage();
-        const newY = doc.page.margins.top;
-        if (typeof redrawHeader === "function") return redrawHeader(newY);
-        return newY;
-    }
-    return y;
-}
+import { gRect, gRRect, overflow, fitText, fitLine, totalsRow, money } from "./pdfHelpers.js";
 
 /**
  * @param {import("pdfkit")} doc
@@ -57,27 +18,18 @@ function renderSaleInvoiceLayout(doc, t, {
     partyName,
     issuer,
 }) {
-    // Check if this is a premium template
+    // Premium templates have their own fully custom renderers.
     if (formatKey && formatKey.startsWith("premium_") && premiumRenderers[formatKey]) {
-        // Use premium renderer for unique premium templates
-        premiumRenderers[formatKey](doc, t, {
-            title,
-            billToLabel,
-            invoice,
-            transactionRow,
-            items,
-            partyName,
-            issuer,
-        });
+        premiumRenderers[formatKey](doc, t, { title, billToLabel, invoice, transactionRow, items, partyName, issuer });
         return;
     }
 
     const left = doc.page.margins.left;
     const right = doc.page.width - doc.page.margins.right;
     const fullW = right - left;
-    
+
     const c1 = t.primary;
-    const c2 = t.primaryEnd || t.primary;
+    const c2 = t.primaryEnd;
 
     // ── Header ──────────────────────────────────────────────────────────────
     if (formatKey === "minimal") {
@@ -87,68 +39,71 @@ function renderSaleInvoiceLayout(doc, t, {
     }
 
     const headerTop = 50;
-    doc.fillColor(c1).font("Helvetica-Bold").fontSize(t.titleSize).text(title, left, headerTop, {
-        align: "left",
-        width: fullW * 0.56,
-    });
-    
+    const titleColW = fullW * 0.56;
+    doc.fillColor(c1).font("Helvetica-Bold").fontSize(t.titleSize)
+        .text(title, left, headerTop, { width: titleColW, lineBreak: false });
+
     const businessName = issuer?.name || "Business";
     const invoiceDate = invoice.create_date ? new Date(invoice.create_date).toLocaleDateString("en-IN") : "-";
     const txDate = transactionRow?.transaction_date ? new Date(transactionRow.transaction_date).toLocaleDateString("en-IN") : "-";
-    const contactLine = [issuer?.phone, issuer?.email].filter(Boolean).join(" | ");
+    const contactLine = [issuer?.phone, issuer?.email].filter(Boolean).join("  |  ");
 
-    const leftColY = headerTop + 34;
-    doc.fillColor("#222222").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11)
-        .text(businessName, left, leftColY, { width: fullW * 0.56 });
-    doc.font("Helvetica").fontSize(formatKey === "compact" ? 8 : 9).fillColor("#4a4a4a");
-    if (issuer?.address) {
-        doc.text(issuer.address, left, doc.y + 3, { width: fullW * 0.56, lineGap: 1.5 });
-    }
-    if (contactLine) {
-        doc.text(contactLine, left, doc.y + 3, { width: fullW * 0.56 });
-    }
+    const leftColY = headerTop + 32;
+    doc.fillColor("#1a1a1a").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11)
+        .text(businessName, left, leftColY, { width: titleColW, lineBreak: false });
 
-    const leftColBottom = doc.y;
-    
+    // Address + contact are bounded to a fixed block so a long address can't
+    // push the rest of the header down unpredictably or run under the meta card.
+    const addrParts = [issuer?.address, contactLine].filter(Boolean).join("\n");
+    if (addrParts) {
+        fitText(doc, addrParts, left, leftColY + 15, titleColW, 42, {
+            font: "Helvetica", startSize: formatKey === "compact" ? 8 : 9, minSize: 7, color: "#4a4a4a", lineGap: 1.5,
+        });
+    }
+    const leftColBottom = leftColY + 15 + 42;
+
     // Metadata card on top right
     const metaX = left + fullW * 0.60;
     const metaW = fullW * 0.40;
-    const metaBg = t.soft || "#f8fafc";
-    const metaBg2 = t.softEnd || t.soft;
-    
+    const metaBg = t.soft;
+    const metaBg2 = t.softEnd;
+
     gRRect(doc, metaX, headerTop - 10, metaW, 76, 8, metaBg, metaBg2);
-    
+
     const metaPad = 12;
     const textStart = metaX + metaPad;
     const valW = metaW - metaPad * 2;
-    
-    doc.fillColor(t.accent || "#444444").font("Helvetica-Bold").fontSize(8)
+
+    doc.fillColor(t.accent).font("Helvetica-Bold").fontSize(8)
         .text("INVOICE NO", textStart, headerTop, { width: valW });
-    doc.fillColor("#111111").font("Helvetica").fontSize(9)
-        .text(String(invoice.invoice_no || "-"), textStart, headerTop, { width: valW, align: "right" });
-        
-    doc.fillColor(t.accent || "#444444").font("Helvetica-Bold").fontSize(8)
+    fitLine(doc, String(invoice.invoice_no || "-"), textStart, valW, headerTop + 12, {
+        font: "Helvetica-Bold", startSize: 9, minSize: 7, color: "#111111", align: "right",
+    });
+
+    doc.fillColor(t.accent).font("Helvetica-Bold").fontSize(8)
         .text("DATE", textStart, headerTop + 20, { width: valW });
     doc.fillColor("#111111").font("Helvetica").fontSize(9)
-        .text(invoiceDate, textStart, headerTop + 20, { width: valW, align: "right" });
-        
-    doc.fillColor(t.accent || "#444444").font("Helvetica-Bold").fontSize(8)
+        .text(invoiceDate, textStart, headerTop + 32, { width: valW, align: "right", lineBreak: false });
+
+    doc.fillColor(t.accent).font("Helvetica-Bold").fontSize(8)
         .text("TRANSACTION", textStart, headerTop + 40, { width: valW });
     doc.fillColor("#111111").font("Helvetica").fontSize(9)
-        .text(txDate, textStart, headerTop + 40, { width: valW, align: "right" });
+        .text(txDate, textStart, headerTop + 52, { width: valW, align: "right", lineBreak: false });
 
     const metaBottom = headerTop - 10 + 76;
-    
+
     // Bill To section
     const billTop = Math.max(leftColBottom, metaBottom) + 20;
     gRRect(doc, left, billTop, fullW, 48, 8, metaBg, metaBg2);
-    
+
     if (formatKey !== "minimal") {
         gRRect(doc, left, billTop, 4, 48, 4, c1, c2); // left accent border
     }
-    
+
     doc.fillColor(c1).font("Helvetica-Bold").fontSize(8).text(billToLabel.toUpperCase(), left + 14, billTop + 10);
-    doc.fillColor("#111111").font("Helvetica-Bold").fontSize(formatKey === "compact" ? 10 : 11).text(partyName || "-", left + 14, billTop + 24, { width: fullW - 28 });
+    fitText(doc, partyName || "-", left + 14, billTop + 23, fullW - 28, 20, {
+        font: "Helvetica-Bold", startSize: formatKey === "compact" ? 10 : 11, minSize: 8, color: "#111111",
+    });
 
     // ── Table ───────────────────────────────────────────────────────────────
     const rowH = formatKey === "compact" ? 22 : 28;
@@ -168,15 +123,15 @@ function renderSaleInvoiceLayout(doc, t, {
         } else {
             gRRect(doc, left, sy, fullW, rowH, 6, c1, c2);
         }
-        
+
         doc.fillColor(cHeadColor).font("Helvetica-Bold").fontSize(t.tableHead);
-        doc.text("Description", colDesc, sy + (rowH - t.tableHead)/2);
-        doc.text("Fees", colFees, sy + (rowH - t.tableHead)/2, { width: colTax - colFees - 4, align: "right" });
-        doc.text("Tax", colTax, sy + (rowH - t.tableHead)/2, { width: colTot - colTax - 4, align: "right" });
-        doc.text("Total", colTot, sy + (rowH - t.tableHead)/2, { width: colTotW, align: "right" });
+        doc.text("Description", colDesc, sy + (rowH - t.tableHead) / 2);
+        doc.text("Fees", colFees, sy + (rowH - t.tableHead) / 2, { width: colTax - colFees - 4, align: "right" });
+        doc.text("Tax", colTax, sy + (rowH - t.tableHead) / 2, { width: colTot - colTax - 4, align: "right" });
+        doc.text("Total", colTot, sy + (rowH - t.tableHead) / 2, { width: colTotW, align: "right" });
         return sy + rowH;
     };
-    
+
     y = drawHead(y);
     doc.fillColor("#222222").font("Helvetica").fontSize(formatKey === "compact" ? 9 : 10);
 
@@ -184,23 +139,24 @@ function renderSaleInvoiceLayout(doc, t, {
         const it = items[i];
         const desc = it.service_name || it.service_id || "Item";
         y = overflow(doc, y, rowH, drawHead);
-        
+
         if (i % 2 === 0 && formatKey !== "minimal") {
-            doc.rect(left, y, fullW, rowH).fill(t.rowAlt || "#f8fafc");
+            doc.rect(left, y, fullW, rowH).fill(t.rowAlt);
         } else {
             doc.rect(left, y, fullW, rowH).fill("#ffffff");
         }
         doc.fillColor("#222222");
-        
-        const my = y + (rowH - (formatKey === "compact" ? 9 : 10))/2;
+
+        const my = y + (rowH - (formatKey === "compact" ? 9 : 10)) / 2;
+        doc.font("Helvetica").fontSize(formatKey === "compact" ? 9 : 10);
         doc.text(desc, colDesc, my, { width: colFees - colDesc - 8, lineBreak: false });
         doc.text(money(it.fees), colFees, my, { width: colTax - colFees - 4, align: "right" });
         doc.text(money(it.tax_value), colTax, my, { width: colTot - colTax - 4, align: "right" });
-        
-        doc.fillColor(c1).font("Helvetica-Bold");
-        doc.text(money(it.total), colTot, my, { width: colTotW, align: "right" });
-        doc.fillColor("#222222").font("Helvetica");
-        
+
+        fitLine(doc, money(it.total), colTot, colTotW, my, {
+            font: "Helvetica-Bold", startSize: formatKey === "compact" ? 9 : 10, minSize: 7, color: c1, align: "right",
+        });
+
         y += rowH;
         if (formatKey === "minimal") {
             doc.moveTo(left, y).lineTo(right, y).strokeColor(t.border).lineWidth(0.5).stroke();
@@ -210,26 +166,26 @@ function renderSaleInvoiceLayout(doc, t, {
     // ── Totals ──────────────────────────────────────────────────────────────
     y = overflow(doc, y, 140);
     y += 12;
-    
+
     const tW = 260;
     const tX = right - tW;
     const tH = 130;
     const pad = 16;
-    
+
     gRRect(doc, tX, y, tW, tH, 8, metaBg, metaBg2);
-    
+
     if (formatKey !== "minimal") {
         gRect(doc, tX, y, tW, 4, c1, c2);
     }
-    
+
     let ty = y + 18;
     totalsRow(doc, "Subtotal", money(invoice.subtotal), tX, tW, ty, pad, "#444444", "#111111", 10); ty += 22;
     totalsRow(doc, `Tax (${Number(invoice.tax_rate || 0).toFixed(2)}%)`, money(invoice.tax_value), tX, tW, ty, pad, "#444444", "#111111", 10); ty += 22;
-    
+
     if (Number(invoice.additional_charge) > 0) {
         totalsRow(doc, "Additional charges", money(invoice.additional_charge), tX, tW, ty, pad, "#444444", "#111111", 10); ty += 22;
     }
-    
+
     doc.moveTo(tX + pad, ty).lineTo(tX + tW - pad, ty).lineWidth(1).stroke(t.border); ty += 12;
     totalsRow(doc, "GRAND TOTAL", money(invoice.grand_total), tX, tW, ty, pad, c1, c2, 13, true);
 
@@ -237,7 +193,9 @@ function renderSaleInvoiceLayout(doc, t, {
         const rW = fullW - tW - 20;
         gRRect(doc, left, y, rW, tH, 8, metaBg, metaBg2);
         doc.font("Helvetica-Bold").fontSize(8.5).fillColor(c1).text("NOTES", left + pad, y + 16);
-        doc.font("Helvetica").fontSize(9).fillColor("#555555").text(String(transactionRow.remark), left + pad, y + 32, { width: rW - pad*2, lineGap: 2 });
+        fitText(doc, transactionRow.remark, left + pad, y + 32, rW - pad * 2, tH - 32 - 14, {
+            startSize: 9, minSize: 7, color: "#555555", lineGap: 2,
+        });
     }
 }
 
@@ -274,14 +232,7 @@ export function streamSaleInvoicePdf(res, {
     doc.pipe(res);
 
     renderSaleInvoiceLayout(doc, t, {
-        formatKey,
-        title,
-        billToLabel,
-        invoice,
-        transactionRow,
-        items,
-        partyName,
-        issuer,
+        formatKey, title, billToLabel, invoice, transactionRow, items, partyName, issuer,
     });
 
     doc.end();
@@ -315,14 +266,7 @@ export function buildSaleInvoicePdfBuffer({
     doc.on("data", (c) => chunks.push(c));
 
     renderSaleInvoiceLayout(doc, t, {
-        formatKey,
-        title,
-        billToLabel,
-        invoice,
-        transactionRow,
-        items,
-        partyName,
-        issuer,
+        formatKey, title, billToLabel, invoice, transactionRow, items, partyName, issuer,
     });
 
     return new Promise((resolve, reject) => {
