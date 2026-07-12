@@ -4,6 +4,7 @@ import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST } from "../helpers/function.js";
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
+import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 
 const router = express.Router();
 
@@ -197,16 +198,16 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
         ]
     );
 
-    const numericBranchId = Number(branch_id);
-    if (!Number.isFinite(numericBranchId)) {
-        const e = new Error("Invalid branch_id for sale_entries");
+    const saleEntriesBranchId = await resolveSaleEntriesBranchId(connection, branch_id);
+    if (saleEntriesBranchId == null) {
+        const e = new Error(`Invalid branch_id for sale_entries (branch "${branch_id}" not found in branch_list)`);
         e.httpStatus = 400;
         throw e;
     }
 
     const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
     await insertRow(connection, "sale_entries", {
-        branch_id: numericBranchId,
+        branch_id: saleEntriesBranchId,
         sale_id: sale_entry_id,
         invoice_id,
         party_id: clientUsername,
@@ -231,8 +232,8 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
             pricing.grandTotal,
             invoice_id,
             invoice_no,
-            null,
-            null,
+            "sale",
+            invoice_id,
             party2_type,
             clientUsername,
             null

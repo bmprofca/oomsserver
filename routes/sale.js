@@ -5,6 +5,7 @@ import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { notifySaleInvoiceEmail, getSaleItems } from "../helpers/saleStaticEmail.js";
+import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 
 const router = express.Router();
 
@@ -257,23 +258,27 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
                 [invoice_id, branch_id, invoice_no, username, username, "sale", transaction_id, amountTotal, pricing.discountType, pricing.discountPercRate, pricing.discountValue, effectiveTaxRate, pricing.taxValue, pricing.additionalCharge, pricing.totalBeforeRound, pricing.roundOffValue, pricing.grandTotal]
             );
 
-            const numericBranchId = Number(branch_id);
-            if (!Number.isFinite(numericBranchId)) {
+            const saleEntriesBranchId = await resolveSaleEntriesBranchId(connection, branch_id);
+            if (saleEntriesBranchId == null) {
                 await connection.rollback();
-                return res.status(400).json({ success: false, message: "Invalid branch_id for sale_entries" });
+                connection.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid branch_id for sale_entries (branch "${branch_id}" not found in branch_list)`,
+                });
             }
 
             const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
             await connection.query(
                 `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [numericBranchId, sale_entry_id, invoice_id, party2_id, party2_type, firmId, txnDate, username, username, pricing.grandTotal]
+                [saleEntriesBranchId, sale_entry_id, invoice_id, party2_id, party2_type, firmId, txnDate, username, username, pricing.grandTotal]
             );
 
             await connection.query(
                 `INSERT INTO transactions (branch_id, transaction_id, create_by, modify_by, transaction_date, amount, transaction_type, invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remark)
                  VALUES (?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?, ?)`,
-                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, null, null, party2_type, party2_id, remarkVal]
+                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, "sale", invoice_id, party2_type, party2_id, remarkVal]
             );
 
             for (let index = 0; index < saleItemsToInsert.length; index++) {
@@ -289,12 +294,9 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
 
             await connection.commit();
-            // After connection.commit() and before return res.status(200)...
 
-            // Get sale items for email
             const saleItemsForEmail = await getSaleItems(sale_entry_id);
 
-            // Send invoice email
             await notifySaleInvoiceEmail({
                 branch_id: branch_id,
                 sale_id: sale_entry_id,
@@ -496,29 +498,33 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
             const serial = Number(invoiceData?.current || 0) + 1;
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
-            const [invoiceInsertResult] = await connection.query(
+            await connection.query(
                 `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [invoice_id, branch_id, invoice_no, username, username, "sale", transaction_id, amountTotal, pricing.discountType, pricing.discountPercRate, pricing.discountValue, effectiveTaxRate, pricing.taxValue, pricing.additionalCharge, pricing.totalBeforeRound, pricing.roundOffValue, pricing.grandTotal]
             );
 
-            const numericBranchId = Number(branch_id);
-            if (!Number.isFinite(numericBranchId)) {
+            const saleEntriesBranchId = await resolveSaleEntriesBranchId(connection, branch_id);
+            if (saleEntriesBranchId == null) {
                 await connection.rollback();
-                return res.status(400).json({ success: false, message: "Invalid branch_id for sale_entries" });
+                connection.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid branch_id for sale_entries (branch "${branch_id}" not found in branch_list)`,
+                });
             }
 
             const sale_entry_id = await UNIQUE_RANDOM_STRING("sale_entries", "sale_id", { length: ID_LENGTH, conn: connection });
             await connection.query(
                 `INSERT INTO sale_entries (branch_id, sale_id, invoice_id, party_id, party_type, firm_id, sale_date, create_by, modify_by, total)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [numericBranchId, sale_entry_id, invoice_id, party2_id, party2_type, null, txnDate, username, username, pricing.grandTotal]
+                [saleEntriesBranchId, sale_entry_id, invoice_id, party2_id, party2_type, null, txnDate, username, username, pricing.grandTotal]
             );
 
             await connection.query(
                 `INSERT INTO transactions (branch_id, transaction_id, create_by, modify_by, transaction_date, amount, transaction_type, invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remark)
                  VALUES (?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?, ?)`,
-                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, null, null, party2_type, party2_id, remarkVal]
+                [branch_id, transaction_id, username, username, txnDate, pricing.grandTotal, invoice_id, invoice_no, "sale", invoice_id, party2_type, party2_id, remarkVal]
             );
 
             for (let index = 0; index < saleItemsToInsert.length; index++) {
@@ -534,12 +540,9 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
             await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
 
             await connection.commit();
-            // After connection.commit() and before return res.status(200)...
 
-            // Get sale items for email
             const saleItemsForEmail = await getSaleItems(sale_entry_id);
 
-            // Send invoice email
             await notifySaleInvoiceEmail({
                 branch_id: branch_id,
                 sale_id: sale_entry_id,
@@ -595,6 +598,13 @@ router.post("/create/bank", auth, validateBranch, async (req, res) => {
 router.get("/list", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
+        const saleEntriesBranchId = await resolveSaleEntriesBranchId(pool, branch_id);
+        if (saleEntriesBranchId == null) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid branch context for sales"
+            });
+        }
 
         const page_no = Math.max(1, Number(req.query?.page_no) || 1);
         const limit = Math.min(100, Math.max(1, Number(req.query?.limit) || 10));
@@ -683,7 +693,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                         OR EXISTS (
                             SELECT 1 FROM firms f
                             WHERE f.username = COALESCE(transactions.party2_id, se.party_id)
-                                AND CAST(f.branch_id AS CHAR) = CAST(se.branch_id AS CHAR)
+                                AND f.branch_id = ?
                                 AND (f.is_deleted = '0' OR f.is_deleted = 0)
                                 AND (
                                     IFNULL(f.firm_name, '') LIKE ?
@@ -705,10 +715,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             searchFilterParams.push(sp, sp);
             for (let i = 0; i < 3; i++) searchFilterParams.push(sp);
             for (let i = 0; i < 14; i++) searchFilterParams.push(sp);
+            searchFilterParams.push(branch_id);
             for (let i = 0; i < 11; i++) searchFilterParams.push(sp);
         }
 
-        const whereClause = `CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)
+        const whereClause = `se.branch_id = ?
             AND invoice.invoice_id = se.invoice_id
             AND invoice.branch_id = ?
             AND invoice.type = ?
@@ -716,6 +727,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             ${usernameFilterSql}
             ${searchFilterSql}`;
         const params = [
+            saleEntriesBranchId,
             branch_id,
             branch_id,
             "sale",

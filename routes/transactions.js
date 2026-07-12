@@ -241,6 +241,273 @@ async function getOppositePartySnippet(branch_id, party_type, party_id) {
     return {};
 }
 
+const SEARCH_PARTY_TYPES = ["client", "ca", "agent", "staff", "bank", "capital", "expense", "admin"];
+
+function normalizeSearchPartyTypes(party_types) {
+    if (!Array.isArray(party_types)) return [];
+    const normalized = new Set();
+    for (const rawType of party_types) {
+        const type = String(rawType || "").trim().toLowerCase();
+        if (SEARCH_PARTY_TYPES.includes(type)) normalized.add(type);
+    }
+    return [...normalized];
+}
+
+async function searchClientLikeParties(branch_id, party_type, searchPattern) {
+    const [rows] = await pool.query(
+        `SELECT c.username, COALESCE(p.name, c.username) AS sort_key
+         FROM clients c
+         LEFT JOIN profile p ON c.username = p.username
+             AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username)
+         WHERE c.branch_id = ?
+           AND c.user_type = ?
+           AND c.is_deleted = '0'
+           AND (
+                p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ?
+                OR p.pan_number LIKE ? OR c.username LIKE ?
+           )
+         ORDER BY sort_key ASC, c.username ASC`,
+        [branch_id, party_type, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern]
+    );
+    return (rows || []).map((row) => ({
+        party_type,
+        party_id: row.username,
+        sort_key: row.sort_key,
+    }));
+}
+
+async function searchBranchMappingParties(branch_id, party_type, searchPattern) {
+    const [rows] = await pool.query(
+        `SELECT bm.username, COALESCE(p.name, bm.username) AS sort_key
+         FROM branch_mapping bm
+         INNER JOIN profile p ON bm.username = p.username
+         INNER JOIN users u ON bm.username = u.username
+         WHERE bm.branch_id = ?
+           AND bm.type = ?
+           AND bm.is_deleted = '0'
+           AND u.status = '1'
+           AND (
+                p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ?
+                OR IFNULL(bm.designation, '') LIKE ? OR bm.username LIKE ?
+           )
+         ORDER BY sort_key ASC, bm.username ASC`,
+        [branch_id, party_type, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern]
+    );
+    return (rows || []).map((row) => ({
+        party_type,
+        party_id: row.username,
+        sort_key: row.sort_key,
+    }));
+}
+
+async function searchBankParties(branch_id, searchPattern) {
+    const whereClause = buildBankSearchWhere();
+    const params = [branch_id, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern];
+    const [rows] = await pool.query(
+        `SELECT bank_id, COALESCE(NULLIF(holder, ''), NULLIF(bank, ''), bank_id) AS sort_key
+         FROM banks
+         WHERE ${whereClause}
+         ORDER BY sort_key ASC, bank_id ASC`,
+        params
+    );
+    return (rows || []).map((row) => ({
+        party_type: "bank",
+        party_id: row.bank_id,
+        sort_key: row.sort_key,
+    }));
+}
+
+async function searchCapitalParties(branch_id, searchPattern) {
+    const whereClause = `branch_id = ?
+        AND IFNULL(is_deleted, '0') = '0'
+        AND (capital_id LIKE ? OR name LIKE ? OR IFNULL(remark, '') LIKE ?)`;
+    const [rows] = await pool.query(
+        `SELECT capital_id, COALESCE(name, capital_id) AS sort_key
+         FROM capitals
+         WHERE ${whereClause}
+         ORDER BY sort_key ASC, capital_id ASC`,
+        [branch_id, searchPattern, searchPattern, searchPattern]
+    );
+    return (rows || []).map((row) => ({
+        party_type: "capital",
+        party_id: row.capital_id,
+        sort_key: row.sort_key,
+    }));
+}
+
+async function searchExpenseParties(branch_id, searchPattern) {
+    const [rows] = await pool.query(
+        `SELECT item_id, COALESCE(name, item_id) AS sort_key
+         FROM expense_items
+         WHERE branch_id = ?
+           AND is_deleted = '0'
+           AND (name LIKE ? OR type LIKE ? OR IFNULL(remark, '') LIKE ? OR item_id LIKE ?)
+         ORDER BY sort_key ASC, item_id ASC`,
+        [branch_id, searchPattern, searchPattern, searchPattern, searchPattern]
+    );
+    return (rows || []).map((row) => ({
+        party_type: "expense",
+        party_id: row.item_id,
+        sort_key: row.sort_key,
+    }));
+}
+
+async function enrichSearchPartyItem(branch_id, item) {
+    let result;
+    const base = {
+        party_type: item.party_type,
+        party_id: item.party_id,
+    };
+
+    if (item.party_type === "client" || item.party_type === "ca" || item.party_type === "agent") {
+        const profile = await USER_SNIPPED_DATA(item.party_id);
+        result = { ...base, [item.party_type]: profile || null };
+    } else if (item.party_type === "staff" || item.party_type === "admin") {
+        const [rows] = await pool.query(
+            `SELECT bm.username, bm.designation, bm.status, p.name, p.email, p.mobile, p.country_code
+             FROM branch_mapping bm
+             INNER JOIN profile p ON bm.username = p.username
+             WHERE bm.branch_id = ?
+               AND bm.username = ?
+               AND bm.type = ?
+               AND bm.is_deleted = '0'
+             LIMIT 1`,
+            [branch_id, item.party_id, item.party_type]
+        );
+        const row = rows?.[0];
+        result = {
+            ...base,
+            [item.party_type]: row
+                ? {
+                    username: row.username,
+                    name: row.name ?? null,
+                    email: row.email ?? null,
+                    mobile: row.mobile ?? null,
+                    country_code: row.country_code ?? null,
+                    designation: row.designation ?? null,
+                    status: row.status == "1",
+                }
+                : null,
+        };
+    } else if (item.party_type === "bank") {
+        const bank = await BANK_SNIPPED_DATA(item.party_id);
+        result = { ...base, bank: bank || null };
+    } else if (item.party_type === "capital") {
+        const capital = await CAPITAL_SNIPPED_DATA(item.party_id);
+        result = { ...base, capital: capital || null };
+    } else if (item.party_type === "expense") {
+        const [rows] = await pool.query(
+            `SELECT item_id, name, type, remark
+             FROM expense_items
+             WHERE branch_id = ? AND item_id = ? AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id, item.party_id]
+        );
+        const row = rows?.[0];
+        result = {
+            ...base,
+            expense: row
+                ? {
+                    item_id: row.item_id,
+                    name: row.name,
+                    type: row.type,
+                    remark: row.remark ?? null,
+                }
+                : null,
+        };
+    } else {
+        result = base;
+    }
+
+    try {
+        const { balance } = await GET_BALANCE({
+            branch_id,
+            party_type: item.party_type,
+            party_id: item.party_id,
+        });
+        result.balance = Number(balance) || 0;
+    } catch {
+        result.balance = 0;
+    }
+
+    return result;
+}
+
+router.post("/search-party", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const {
+            search = "",
+            party_types = [],
+            page_no = 1,
+            limit: limitParam = 10,
+        } = req.body || {};
+
+        const normalizedTypes = normalizeSearchPartyTypes(party_types);
+        if (normalizedTypes.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: `party_types must be a non-empty array of: ${SEARCH_PARTY_TYPES.join(", ")}`,
+            });
+        }
+
+        const searchTerm = String(search || "").trim();
+        const searchPattern = `%${searchTerm}%`;
+        const pageNum = Math.max(1, Number(page_no) || 1);
+        const limitNum = Math.min(100, Math.max(1, Number(limitParam) || 10));
+        const offset = (pageNum - 1) * limitNum;
+
+        const searchTasks = [];
+        for (const partyType of normalizedTypes) {
+            if (partyType === "client" || partyType === "ca" || partyType === "agent") {
+                searchTasks.push(searchClientLikeParties(branch_id, partyType, searchPattern));
+            } else if (partyType === "staff" || partyType === "admin") {
+                searchTasks.push(searchBranchMappingParties(branch_id, partyType, searchPattern));
+            } else if (partyType === "bank") {
+                searchTasks.push(searchBankParties(branch_id, searchPattern));
+            } else if (partyType === "capital") {
+                searchTasks.push(searchCapitalParties(branch_id, searchPattern));
+            } else if (partyType === "expense") {
+                searchTasks.push(searchExpenseParties(branch_id, searchPattern));
+            }
+        }
+
+        const merged = (await Promise.all(searchTasks)).flat();
+        merged.sort((a, b) =>
+            String(a.sort_key || a.party_id || "").localeCompare(
+                String(b.sort_key || b.party_id || ""),
+                undefined,
+                { sensitivity: "base" }
+            )
+        );
+
+        const total = merged.length;
+        const pageSlice = merged.slice(offset, offset + limitNum);
+        const data = await Promise.all(pageSlice.map((item) => enrichSearchPartyItem(branch_id, item)));
+
+        return res.status(200).json({
+            success: true,
+            data,
+            meta: {
+                page_no: pageNum,
+                limit: limitNum,
+                total,
+                count: data.length,
+                is_last_page: offset + data.length >= total,
+                party_types: normalizedTypes,
+                search: searchTerm,
+            },
+        });
+    } catch (error) {
+        console.error("Search party error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to search parties",
+            error: error.message,
+        });
+    }
+});
+
 router.post("/bank/create", auth, validateBranch, async (req, res) => {
     try {
         const username = req.headers["username"] || req.headers["Username"] || "";
@@ -724,11 +991,12 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
         const shouldNotifyWhatsapp = notification?.whatsapp !== false;
         const shouldNotifySms = notification?.sms === true;
 
+        let transaction_id;
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
 
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
             const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
@@ -863,11 +1131,12 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
         const shouldNotifyEmail = notification?.email !== false;
         const shouldNotifySms = notification?.sms === true;
 
+        let transaction_id;
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
 
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
             const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(

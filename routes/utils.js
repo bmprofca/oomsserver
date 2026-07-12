@@ -1,5 +1,5 @@
 import express from "express";
-import pool from "../db.js";
+import { poolQuery } from "../db.js";
 import { readFileSync } from "fs";
 import { auth, validateBranch } from "../middleware/auth.js";
 
@@ -43,7 +43,7 @@ function channelResult(available, reason = "") {
 
 async function checkSmsAvailability(branch_id, notificationType) {
     try {
-        const [[activeConfig]] = await pool.query(
+        const [[activeConfig]] = await poolQuery(
             `SELECT config_id
              FROM sms_configs
              WHERE branch_id = ? AND status = 'active'
@@ -55,7 +55,7 @@ async function checkSmsAvailability(branch_id, notificationType) {
             return channelResult(false, "SMS config is not active");
         }
 
-        const [[activeTemplate]] = await pool.query(
+        const [[activeTemplate]] = await poolQuery(
             `SELECT template_id
              FROM sms_templates
              WHERE branch_id = ?
@@ -78,7 +78,7 @@ async function checkSmsAvailability(branch_id, notificationType) {
 
 async function checkEmailAvailability(branch_id, notificationType) {
     try {
-        const [[activeConfig]] = await pool.query(
+        const [[activeConfig]] = await poolQuery(
             `SELECT config_id
              FROM email_configs
              WHERE branch_id = ? AND status = 'active'
@@ -90,7 +90,7 @@ async function checkEmailAvailability(branch_id, notificationType) {
             return channelResult(false, "Email config is not active");
         }
 
-        const [[activeTemplate]] = await pool.query(
+        const [[activeTemplate]] = await poolQuery(
             `SELECT template_id
              FROM email_static_templates
              WHERE branch_id = ?
@@ -113,7 +113,7 @@ async function checkEmailAvailability(branch_id, notificationType) {
 
 async function checkWhatsappAvailability(branch_id, notificationType) {
     try {
-        const [[branchRow]] = await pool.query(
+        const [[branchRow]] = await poolQuery(
             `SELECT whatsapp_channel, onechatting_developer_token
              FROM branch_list
              WHERE branch_id = ?
@@ -140,7 +140,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
                 return channelResult(false, "OneChatting developer token is not configured");
             }
 
-            const [[userTokenRow]] = await pool.query(
+            const [[userTokenRow]] = await poolQuery(
                 `SELECT map_id
                  FROM branch_mapping
                  WHERE branch_id = ?
@@ -155,7 +155,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
                 return channelResult(false, "No enabled OneChatting user token found");
             }
 
-            const [[mapping]] = await pool.query(
+            const [[mapping]] = await poolQuery(
                 `SELECT map_id
                  FROM onechatting_template_mapping
                  WHERE branch_id = ?
@@ -173,7 +173,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
         }
 
         if (channel === "ooms web") {
-            const [[templateRow]] = await pool.query(
+            const [[templateRow]] = await poolQuery(
                 `SELECT template_id
                  FROM whatsappweb_template_mapping
                  WHERE branch_id = ?
@@ -191,7 +191,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
         }
 
         if (channel === "ooms system") {
-            const [[mapping]] = await pool.query(
+            const [[mapping]] = await poolQuery(
                 `SELECT map_id
                  FROM wp_system_template_mapping
                  WHERE branch_id = ?
@@ -282,11 +282,9 @@ router.get("/notification-availability", auth, validateBranch, async (req, res) 
             });
         }
 
-        const [sms, whatsapp, email] = await Promise.all([
-            checkSmsAvailability(branch_id, notificationType),
-            checkWhatsappAvailability(branch_id, notificationType),
-            checkEmailAvailability(branch_id, notificationType),
-        ]);
+        const sms = await checkSmsAvailability(branch_id, notificationType);
+        const whatsapp = await checkWhatsappAvailability(branch_id, notificationType);
+        const email = await checkEmailAvailability(branch_id, notificationType);
 
         const channels = { sms, whatsapp, email };
         const available = sms.available || whatsapp.available || email.available;

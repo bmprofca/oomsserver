@@ -79,14 +79,12 @@ const fetchDiscountRowById = async (branch_id, discountIdVal) => {
             de.discount_id, de.discount_date, de.party_type, de.party_id, de.amount,
             de.invoice_id, de.invoice_no, de.transaction_id,
             de.create_by, de.modify_by, de.create_date, de.modify_date,
-            ee.expense_id, ee.item_id, ee.remark AS expense_remark,
+            ee.expense_id, ee.remark AS expense_remark,
             t.remark, t.transaction_date
          FROM discount_entries de
          INNER JOIN expense_entries ee
             ON ee.branch_id = de.branch_id
             AND ee.transaction_id = de.transaction_id
-            AND IFNULL(ee.is_reserved, 0) = 1
-            AND ee.reserved = 'discount'
          LEFT JOIN transactions t
             ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
          WHERE de.branch_id = ? AND de.discount_id = ?
@@ -96,6 +94,97 @@ const fetchDiscountRowById = async (branch_id, discountIdVal) => {
     return rows?.[0] || null;
 };
 
+const mapExpenseEntryItemRow = (row) => ({
+    item_id: row.item_id,
+    amount: Number(row.amount) || 0,
+    remark: row.remark ?? null,
+    item: {
+        item_id: row.item_id,
+        name: row.item_name ?? null,
+        type: row.item_type ?? null,
+    },
+});
+
+const fetchExpenseItemsByExpenseIds = async (branch_id, expenseIds) => {
+    const itemsByExpenseId = new Map();
+    if (!expenseIds?.length) return itemsByExpenseId;
+
+    const placeholders = expenseIds.map(() => "?").join(", ");
+    const [rows] = await pool.query(
+        `SELECT
+            eei.expense_id, eei.item_id, eei.amount, eei.remark,
+            ei.name AS item_name, ei.type AS item_type
+         FROM expense_entries_items eei
+         LEFT JOIN expense_items ei
+            ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
+         WHERE eei.branch_id = ? AND eei.expense_id IN (${placeholders})
+         ORDER BY eei.id ASC`,
+        [branch_id, ...expenseIds]
+    );
+
+    for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        const expenseId = row.expense_id;
+        if (!itemsByExpenseId.has(expenseId)) itemsByExpenseId.set(expenseId, []);
+        itemsByExpenseId.get(expenseId).push(mapExpenseEntryItemRow(row));
+    }
+
+    return itemsByExpenseId;
+};
+
+const normalizeExpenseEntryItems = (items) => {
+    if (!Array.isArray(items) || items.length === 0) {
+        const err = new Error("items is required and must be a non-empty array");
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const normalizedItems = [];
+    for (let index = 0; index < items.length; index++) {
+        const item = items[index] || {};
+        const item_id = item?.item_id != null ? String(item.item_id).trim() : "";
+        const amountNum = Math.abs(Number(item?.amount));
+        const itemRemark = item?.remark != null ? String(item.remark).trim() : null;
+
+        if (!item_id) {
+            const err = new Error(`items[${index}].item_id is required`);
+            err.statusCode = 400;
+            throw err;
+        }
+        if (!Number.isFinite(amountNum) || amountNum <= 0) {
+            const err = new Error(`items[${index}].amount must be greater than 0`);
+            err.statusCode = 400;
+            throw err;
+        }
+
+        normalizedItems.push({
+            item_id,
+            amount: Number(amountNum.toFixed(2)),
+            remark: itemRemark,
+        });
+    }
+
+    return normalizedItems;
+};
+
+const validateExpenseEntryItemsExist = async (db, branch_id, normalizedItems) => {
+    const itemIds = normalizedItems.map((row) => row.item_id);
+    const placeholders = itemIds.map(() => "?").join(", ");
+    const [itemRows] = await db.query(
+        `SELECT item_id FROM expense_items
+         WHERE branch_id = ? AND is_deleted = '0' AND item_id IN (${placeholders})`,
+        [branch_id, ...itemIds]
+    );
+    const itemSet = new Set(itemRows.map((row) => String(row.item_id)));
+    for (let index = 0; index < normalizedItems.length; index++) {
+        if (!itemSet.has(normalizedItems[index].item_id)) {
+            const err = new Error(`Invalid item_id in items[${index}]: ${normalizedItems[index].item_id}`);
+            err.statusCode = 404;
+            throw err;
+        }
+    }
+};
+
 const mapExpenseItemRow = async (element, expenseEntryCount = null) => {
     const create_by_user = await USER_DATA(element?.create_by);
     const modify_by_user = await USER_DATA(element?.modify_by);
@@ -103,6 +192,7 @@ const mapExpenseItemRow = async (element, expenseEntryCount = null) => {
         expenseEntryCount != null
             ? Number(expenseEntryCount) || 0
             : Number(element?.expense_entry_count) || 0;
+    const isReserved = String(element?.is_reserved ?? '0') === '1';
 
     return {
         item_id: element.item_id,
@@ -121,14 +211,27 @@ const mapExpenseItemRow = async (element, expenseEntryCount = null) => {
         name: element.name,
         type: element.type,
         remark: element.remark,
+        is_reserved: isReserved,
         create_date: element.create_date,
         modify_date: element.modify_date,
         expense_entry_count: entryCount,
-        can_delete: entryCount === 0,
+        can_delete: !isReserved && entryCount === 0,
     };
 };
 
+const parseIncludeReserved = (value) => {
+    if (value === true || value === 1 || value === '1') return true;
+    if (value === false || value === 0 || value === '0') return false;
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (normalized === 'true' || normalized === 'yes') return true;
+    return false;
+};
+
 const getExpenseItemListFilters = (req) => {
+    const branch_id = req.branch_id;
+    const include_reserved = parseIncludeReserved(
+        req.query?.include_reserved ?? req.body?.include_reserved
+    );
     const search = req.query?.search || "";
     const searchSql = `%${String(search).trim()}%`;
     const typeVal =
@@ -143,14 +246,18 @@ const getExpenseItemListFilters = (req) => {
         throw err;
     }
 
-    const whereClause = `ei.branch_id = ? AND ei.is_deleted = '0'
+    const scopeClause = include_reserved
+        ? `(ei.branch_id = ? OR (IFNULL(ei.is_reserved, '0') = '1' AND ei.branch_id IS NULL))`
+        : `ei.branch_id = ?`;
+
+    const whereClause = `${scopeClause} AND ei.is_deleted = '0'
         AND (ei.name LIKE ? OR ei.type LIKE ? OR ei.remark LIKE ?)
         ${hasType ? "AND ei.type = ?" : ""}`;
 
-    const params = [req.branch_id, searchSql, searchSql, searchSql];
+    const params = [branch_id, searchSql, searchSql, searchSql];
     if (hasType) params.push(typeVal);
 
-    return { whereClause, params };
+    return { whereClause, params, include_reserved };
 };
 
 router.post("/item/create", auth, validateBranch, async (req, res) => {
@@ -281,7 +388,7 @@ router.get("/item/list", auth, validateBranch, async (req, res) => {
             throw filterErr;
         }
 
-        const { whereClause, params } = filters;
+        const { whereClause, params, include_reserved } = filters;
 
         const countWhere = whereClause;
         const [[{ total: totalRows }]] = await pool.query(
@@ -293,17 +400,18 @@ router.get("/item/list", auth, validateBranch, async (req, res) => {
         const [rows] = await pool.query(
             `SELECT
                 ei.id, ei.branch_id, ei.item_id, ei.create_by, ei.modify_by,
-                ei.name, ei.type, ei.remark, ei.create_date, ei.modify_date,
+                ei.name, ei.type, ei.remark, ei.is_reserved, ei.create_date, ei.modify_date,
                 (
                     SELECT COUNT(*)
-                    FROM expense_entries ee
-                    WHERE ee.branch_id = ei.branch_id AND ee.item_id = ei.item_id
+                    FROM expense_entries_items eei
+                    WHERE eei.item_id = ei.item_id
+                      AND eei.branch_id = COALESCE(ei.branch_id, ?)
                 ) AS expense_entry_count
              FROM expense_items ei
              WHERE ${whereClause}
-             ORDER BY ei.id DESC
+             ORDER BY ei.is_reserved DESC, ei.id DESC
              LIMIT ? OFFSET ?`,
-            [...params, limit, offset]
+            [branch_id, ...params, limit, offset]
         );
 
         const data = [];
@@ -319,7 +427,8 @@ router.get("/item/list", auth, validateBranch, async (req, res) => {
                 limit,
                 total,
                 count: data.length,
-                is_last_page: offset + rows.length >= total
+                is_last_page: offset + rows.length >= total,
+                include_reserved,
             }
         });
     } catch (error) {
@@ -345,8 +454,8 @@ router.get("/item/details", auth, validateBranch, async (req, res) => {
                 ei.name, ei.type, ei.remark, ei.create_date, ei.modify_date,
                 (
                     SELECT COUNT(*)
-                    FROM expense_entries ee
-                    WHERE ee.branch_id = ei.branch_id AND ee.item_id = ei.item_id
+                    FROM expense_entries_items eei
+                    WHERE eei.branch_id = ei.branch_id AND eei.item_id = ei.item_id
                 ) AS expense_entry_count
              FROM expense_items ei
              WHERE ei.branch_id = ? AND ei.item_id = ? AND ei.is_deleted = '0'
@@ -393,7 +502,7 @@ router.delete("/item/delete", auth, validateBranch, async (req, res) => {
 
         const [[{ usage_count: usageCount }]] = await pool.query(
             `SELECT COUNT(*) AS usage_count
-             FROM expense_entries
+             FROM expense_entries_items
              WHERE branch_id = ? AND item_id = ?`,
             [branch_id, itemIdVal]
         );
@@ -425,20 +534,15 @@ router.delete("/item/delete", auth, validateBranch, async (req, res) => {
 router.post("/entry/create", auth, validateBranch, async (req, res) => {
     try {
         const {
-            item_id,
+            items,
             remark,
-            amount,
             transaction_date,
             party_id,
-            party_type
+            party_type,
         } = req.body || {};
 
         const username = req.headers["username"] || req.headers["Username"] || "";
         const branch_id = req.branch_id;
-
-        if (!item_id || String(item_id).trim() === "") {
-            return res.status(400).json({ success: false, message: "item_id is required" });
-        }
 
         if (!party_id || String(party_id).trim() === "") {
             return res.status(400).json({ success: false, message: "party_id is required" });
@@ -452,43 +556,54 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "transaction_date is required" });
         }
 
-        if (!amount || Number(amount) <= 0) {
-            return res.status(400).json({ success: false, message: "Valid amount is required" });
-        }
-
         const partyTypeVal = String(party_type).trim().toLowerCase();
         const allowedPartyTypes = ["bank", "capital"];
         if (!allowedPartyTypes.includes(partyTypeVal)) {
             return res.status(400).json({
                 success: false,
-                message: `party_type must be one of: ${allowedPartyTypes.join(", ")}`
+                message: `party_type must be one of: ${allowedPartyTypes.join(", ")}`,
             });
         }
 
-        const itemIdVal = String(item_id).trim();
+        let normalizedItems;
+        try {
+            normalizedItems = normalizeExpenseEntryItems(items);
+        } catch (validationErr) {
+            if (validationErr.statusCode === 400) {
+                return res.status(400).json({ success: false, message: validationErr.message });
+            }
+            throw validationErr;
+        }
+
         const partyIdVal = String(party_id).trim();
         const txnDate = String(transaction_date).trim();
         const expenseDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
-        const amountNum = Math.abs(Number(amount));
         const remarkVal = remark != null ? String(remark).trim() : null;
-
-        const [itemRows] = await pool.query(
-            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
-            [branch_id, itemIdVal]
+        const amountTotal = Number(
+            normalizedItems.reduce((sum, row) => sum + row.amount, 0).toFixed(2)
         );
-        if (!itemRows || itemRows.length === 0) {
-            return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
+
+        try {
+            await validateExpenseEntryItemsExist(pool, branch_id, normalizedItems);
+        } catch (validationErr) {
+            if (validationErr.statusCode === 404) {
+                return res.status(404).json({ success: false, message: validationErr.message });
+            }
+            throw validationErr;
         }
 
         let invoice_no = "";
+        let transaction_id;
+        let invoice_id;
+        let expense_id;
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
 
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
-            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
-            const expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
+            transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",
@@ -521,63 +636,81 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
                     username,
                     "expense",
                     transaction_id,
-                    amountNum,
+                    amountTotal,
                     "not applicable",
                     0,
                     0,
                     0,
                     0,
                     0,
-                    amountNum,
+                    amountTotal,
                     0,
-                    amountNum
+                    amountTotal,
                 ]
             );
 
-            // Party goes on party1 columns in transactions.
             await connection.query(
                 `INSERT INTO transactions (
                     branch_id, transaction_id, create_by, modify_by, transaction_date,
                     amount, transaction_type, invoice_id, invoice_no,
-                    party1_type, party1_id, remark
+                    party1_type, party1_id, party2_type, party2_id, remark
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, 'expense', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, 'expense', ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     transaction_id,
                     username,
                     username,
                     txnDate,
-                    amountNum,
+                    amountTotal,
                     invoice_id,
                     invoice_no,
                     partyTypeVal,
                     partyIdVal,
-                    remarkVal
+                    "expense",
+                    invoice_id,
+                    remarkVal,
                 ]
             );
 
             await connection.query(
                 `INSERT INTO expense_entries (
-                    branch_id, expense_id, item_id, create_by, modify_by, expense_date,
+                    branch_id, expense_id, create_by, modify_by, expense_date,
                     party_type, party_id, amount, invoice_id, invoice_no, transaction_id
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     expense_id,
-                    itemIdVal,
                     username,
                     username,
                     expenseDate,
                     partyTypeVal,
                     partyIdVal,
-                    amountNum,
+                    amountTotal,
                     invoice_id,
                     invoice_no,
-                    transaction_id
+                    transaction_id,
                 ]
             );
+
+            for (let index = 0; index < normalizedItems.length; index++) {
+                const row = normalizedItems[index];
+                await connection.query(
+                    `INSERT INTO expense_entries_items (
+                        branch_id, item_id, expense_id, invoice_id, amount, remark
+                     )
+                     VALUES (?, ?, ?, ?, ?, ?)`,
+                    [
+                        branch_id,
+                        row.item_id,
+                        expense_id,
+                        invoice_id,
+                        row.amount,
+                        row.remark,
+                    ]
+                );
+            }
 
             await connection.query(
                 "UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?",
@@ -592,6 +725,12 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
             connection.release();
         }
 
+        const responseItems = normalizedItems.map((row) => ({
+            item_id: row.item_id,
+            amount: row.amount,
+            remark: row.remark,
+        }));
+
         return res.status(200).json({
             success: true,
             message: "Expense entry created successfully",
@@ -600,13 +739,13 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
                 transaction_id,
                 invoice_id,
                 invoice_no,
-                item_id: itemIdVal,
                 party_type: partyTypeVal,
                 party_id: partyIdVal,
-                amount: amountNum,
+                amount: amountTotal,
                 transaction_date: expenseDate,
-                remark: remarkVal
-            }
+                remark: remarkVal,
+                items: responseItems,
+            },
         });
     } catch (error) {
         console.error("Create expense entry error:", error);
@@ -620,9 +759,8 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
         const branch_id = req.branch_id;
         const {
             expense_id,
-            item_id,
+            items,
             remark,
-            amount,
             transaction_date,
             party_id,
             party_type,
@@ -630,9 +768,6 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
 
         if (!expense_id || String(expense_id).trim() === "") {
             return res.status(400).json({ success: false, message: "expense_id is required" });
-        }
-        if (!item_id || String(item_id).trim() === "") {
-            return res.status(400).json({ success: false, message: "item_id is required" });
         }
         if (!party_id || String(party_id).trim() === "") {
             return res.status(400).json({ success: false, message: "party_id is required" });
@@ -642,9 +777,6 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
         }
         if (!transaction_date || String(transaction_date).trim() === "") {
             return res.status(400).json({ success: false, message: "transaction_date is required" });
-        }
-        if (!amount || Number(amount) <= 0) {
-            return res.status(400).json({ success: false, message: "Valid amount is required" });
         }
 
         const partyTypeVal = String(party_type).trim().toLowerCase();
@@ -656,20 +788,32 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
             });
         }
 
+        let normalizedItems;
+        try {
+            normalizedItems = normalizeExpenseEntryItems(items);
+        } catch (validationErr) {
+            if (validationErr.statusCode === 400) {
+                return res.status(400).json({ success: false, message: validationErr.message });
+            }
+            throw validationErr;
+        }
+
         const expenseIdVal = String(expense_id).trim();
-        const itemIdVal = String(item_id).trim();
         const partyIdVal = String(party_id).trim();
         const txnDate = String(transaction_date).trim().slice(0, 10);
         const expenseDate = txnDate;
-        const amountNum = Math.abs(Number(amount));
         const remarkVal = remark != null ? String(remark).trim() : null;
-
-        const [itemRows] = await pool.query(
-            "SELECT item_id FROM expense_items WHERE branch_id = ? AND item_id = ? AND is_deleted = '0' LIMIT 1",
-            [branch_id, itemIdVal]
+        const amountTotal = Number(
+            normalizedItems.reduce((sum, row) => sum + row.amount, 0).toFixed(2)
         );
-        if (!itemRows?.length) {
-            return res.status(404).json({ success: false, message: "Expense item not found for this branch" });
+
+        try {
+            await validateExpenseEntryItemsExist(pool, branch_id, normalizedItems);
+        } catch (validationErr) {
+            if (validationErr.statusCode === 404) {
+                return res.status(404).json({ success: false, message: validationErr.message });
+            }
+            throw validationErr;
         }
 
         const [expenseRows] = await pool.query(
@@ -690,23 +834,46 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
 
             await connection.query(
                 `UPDATE expense_entries
-                 SET modify_by = ?, item_id = ?, expense_date = ?, party_type = ?, party_id = ?, amount = ?
+                 SET modify_by = ?, expense_date = ?, party_type = ?, party_id = ?, amount = ?
                  WHERE branch_id = ? AND expense_id = ?`,
-                [username, itemIdVal, expenseDate, partyTypeVal, partyIdVal, amountNum, branch_id, expenseIdVal]
+                [username, expenseDate, partyTypeVal, partyIdVal, amountTotal, branch_id, expenseIdVal]
             );
+
+            await connection.query(
+                `DELETE FROM expense_entries_items WHERE branch_id = ? AND expense_id = ?`,
+                [branch_id, expenseIdVal]
+            );
+
+            for (let index = 0; index < normalizedItems.length; index++) {
+                const row = normalizedItems[index];
+                await connection.query(
+                    `INSERT INTO expense_entries_items (
+                        branch_id, item_id, expense_id, invoice_id, amount, remark
+                     )
+                     VALUES (?, ?, ?, ?, ?, ?)`,
+                    [
+                        branch_id,
+                        row.item_id,
+                        expenseIdVal,
+                        invoice_id,
+                        row.amount,
+                        row.remark,
+                    ]
+                );
+            }
 
             await connection.query(
                 `UPDATE transactions
                  SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?, party1_type = ?, party1_id = ?
                  WHERE branch_id = ? AND transaction_id = ?`,
-                [username, txnDate, amountNum, remarkVal, partyTypeVal, partyIdVal, branch_id, transaction_id]
+                [username, txnDate, amountTotal, remarkVal, partyTypeVal, partyIdVal, branch_id, transaction_id]
             );
 
             await connection.query(
                 `UPDATE invoice
                  SET modify_by = ?, subtotal = ?, total = ?, grand_total = ?
                  WHERE branch_id = ? AND invoice_id = ?`,
-                [username, amountNum, amountNum, amountNum, branch_id, invoice_id]
+                [username, amountTotal, amountTotal, amountTotal, branch_id, invoice_id]
             );
 
             await connection.commit();
@@ -717,6 +884,12 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
             connection.release();
         }
 
+        const responseItems = normalizedItems.map((row) => ({
+            item_id: row.item_id,
+            amount: row.amount,
+            remark: row.remark,
+        }));
+
         return res.status(200).json({
             success: true,
             message: "Expense entry updated successfully",
@@ -724,12 +897,12 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
                 expense_id: expenseIdVal,
                 transaction_id,
                 invoice_id,
-                item_id: itemIdVal,
                 party_type: partyTypeVal,
                 party_id: partyIdVal,
-                amount: amountNum,
+                amount: amountTotal,
                 transaction_date: expenseDate,
                 remark: remarkVal,
+                items: responseItems,
             },
         });
     } catch (error) {
@@ -769,23 +942,55 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             }
         }
 
+        const itemFilterClause = hasItemId
+            ? `AND EXISTS (
+                SELECT 1 FROM expense_entries_items eei
+                WHERE eei.branch_id = ee.branch_id
+                  AND eei.expense_id = ee.expense_id
+                  AND eei.item_id = ?
+            )`
+            : "";
+
+        const typeFilterClause = hasType
+            ? `AND EXISTS (
+                SELECT 1 FROM expense_entries_items eei
+                INNER JOIN expense_items ei
+                    ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
+                WHERE eei.branch_id = ee.branch_id
+                  AND eei.expense_id = ee.expense_id
+                  AND ei.type = ?
+            )`
+            : "";
+
         const searchClause = hasSearch
             ? `AND (
-                ei.name LIKE ?
-                OR IFNULL(ei.remark, '') LIKE ?
+                EXISTS (
+                    SELECT 1 FROM expense_entries_items eei
+                    INNER JOIN expense_items ei
+                        ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
+                    WHERE eei.branch_id = ee.branch_id
+                      AND eei.expense_id = ee.expense_id
+                      AND (
+                        ei.name LIKE ?
+                        OR IFNULL(ei.remark, '') LIKE ?
+                        OR ei.type LIKE ?
+                        OR CONCAT(ei.type, ' expense') LIKE ?
+                      )
+                )
                 OR IFNULL(t.remark, '') LIKE ?
-                OR ei.type LIKE ?
-                OR CONCAT(ei.type, ' expense') LIKE ?
                 OR ee.invoice_no LIKE ?
                 OR CAST(ee.amount AS CHAR) LIKE ?
             )`
             : "";
 
         const whereClause = `ee.branch_id = ?
-            AND IFNULL(ee.is_reserved, 0) = 0
+            AND NOT EXISTS (
+                SELECT 1 FROM discount_entries de
+                WHERE de.branch_id = ee.branch_id AND de.transaction_id = ee.transaction_id
+            )
             AND (ee.expense_date >= ? AND ee.expense_date <= ?)
-            ${hasItemId ? "AND ee.item_id = ?" : ""}
-            ${hasType ? "AND ei.type = ?" : ""}
+            ${itemFilterClause}
+            ${typeFilterClause}
             ${searchClause}`;
 
         const params = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
@@ -805,12 +1010,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const [rows] = await pool.query(
             `SELECT
-                ee.expense_id, ee.expense_date, ee.party_type, ee.party_id, ee.amount, ee.item_id, ee.invoice_id, ee.invoice_no, ee.transaction_id,
+                ee.expense_id, ee.expense_date, ee.party_type, ee.party_id, ee.amount,
+                ee.invoice_id, ee.invoice_no, ee.transaction_id,
                 ee.create_by, ee.modify_by, ee.create_date, ee.modify_date,
-                ei.name AS item_name, ei.type AS item_type,
                 t.remark, t.transaction_date
              FROM expense_entries ee
-             LEFT JOIN expense_items ei ON ee.item_id = ei.item_id AND ee.branch_id = ei.branch_id
              LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
              WHERE ${whereClause}
              ORDER BY ee.expense_date DESC, ee.id DESC
@@ -821,7 +1025,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[{ total: totalRows }]] = await pool.query(
             `SELECT COUNT(*) AS total
              FROM expense_entries ee
-             LEFT JOIN expense_items ei ON ee.item_id = ei.item_id AND ee.branch_id = ei.branch_id
              LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
              WHERE ${whereClause}`,
             params
@@ -831,12 +1034,14 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[{ total_amount: totalAmountRows }]] = await pool.query(
             `SELECT COALESCE(SUM(ee.amount), 0) AS total_amount
              FROM expense_entries ee
-             LEFT JOIN expense_items ei ON ee.item_id = ei.item_id AND ee.branch_id = ei.branch_id
              LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
              WHERE ${whereClause}`,
             params
         );
         const total_amount = Number(totalAmountRows) || 0;
+
+        const expenseIds = rows.map((row) => row.expense_id).filter(Boolean);
+        const itemsByExpenseId = await fetchExpenseItemsByExpenseIds(branch_id, expenseIds);
 
         const data = [];
         for (let index = 0; index < rows.length; index++) {
@@ -850,6 +1055,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             const create_by = await USER_SNIPPED_DATA(row.create_by);
             const modify_by = await USER_SNIPPED_DATA(row.modify_by);
+            const entryItems = itemsByExpenseId.get(row.expense_id) || [];
+            const primaryItem = entryItems[0]?.item || null;
 
             data.push({
                 expense_id: row.expense_id,
@@ -860,19 +1067,16 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 remark: row.remark ?? null,
                 invoice_id: row.invoice_id,
                 invoice_no: row.invoice_no,
-                item: {
-                    item_id: row.item_id,
-                    name: row.item_name,
-                    type: row.item_type
-                },
+                items: entryItems,
+                item: primaryItem,
                 expense_party: {
                     type: row.party_type,
-                    details: party
+                    details: party,
                 },
                 create_by,
                 modify_by,
                 create_date: row.create_date,
-                modify_date: row.modify_date
+                modify_date: row.modify_date,
             });
         }
 
@@ -931,15 +1135,19 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
         const remarkVal = remark != null ? String(remark).trim() : null;
 
         let invoice_no = "";
+        let transaction_id;
+        let invoice_id;
+        let expense_id;
+        let discount_id;
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
 
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
-            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
-            const expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
-            const discount_id = await UNIQUE_RANDOM_STRING("discount_entries", "discount_id", { length: ID_LENGTH, conn: connection });
+            transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            expense_id = await UNIQUE_RANDOM_STRING("expense_entries", "expense_id", { length: ID_LENGTH, conn: connection });
+            discount_id = await UNIQUE_RANDOM_STRING("discount_entries", "discount_id", { length: ID_LENGTH, conn: connection });
 
             const itemIdVal = await ensureDiscountExpenseItem(connection, branch_id, username);
 
@@ -1011,15 +1219,13 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
 
             await connection.query(
                 `INSERT INTO expense_entries (
-                    branch_id, expense_id, item_id, create_by, modify_by, expense_date,
-                    party_type, party_id, amount, invoice_id, invoice_no, transaction_id,
-                    is_reserved, reserved, remark
+                    branch_id, expense_id, create_by, modify_by, expense_date,
+                    party_type, party_id, amount, invoice_id, invoice_no, transaction_id, remark
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'discount', ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     expense_id,
-                    itemIdVal,
                     username,
                     username,
                     discountDate,
@@ -1029,6 +1235,21 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
                     invoice_id,
                     invoice_no,
                     transaction_id,
+                    remarkVal,
+                ]
+            );
+
+            await connection.query(
+                `INSERT INTO expense_entries_items (
+                    branch_id, item_id, expense_id, invoice_id, amount, remark
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                    branch_id,
+                    itemIdVal,
+                    expense_id,
+                    invoice_id,
+                    amountNum,
                     remarkVal,
                 ]
             );
@@ -1158,6 +1379,13 @@ router.put("/discount/edit", auth, validateBranch, async (req, res) => {
             );
 
             await connection.query(
+                `UPDATE expense_entries_items
+                 SET amount = ?, remark = ?
+                 WHERE branch_id = ? AND expense_id = ?`,
+                [amountNum, remarkVal, branch_id, expense_id]
+            );
+
+            await connection.query(
                 `UPDATE transactions
                  SET modify_by = ?, transaction_date = ?, amount = ?, remark = ?, party1_type = ?, party1_id = ?
                  WHERE branch_id = ? AND transaction_id = ?`,
@@ -1272,8 +1500,6 @@ router.get("/discount/list", auth, validateBranch, async (req, res) => {
              INNER JOIN expense_entries ee
                 ON ee.branch_id = de.branch_id
                 AND ee.transaction_id = de.transaction_id
-                AND IFNULL(ee.is_reserved, 0) = 1
-                AND ee.reserved = 'discount'
              LEFT JOIN transactions t
                 ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
              WHERE ${whereClause}
@@ -1288,8 +1514,6 @@ router.get("/discount/list", auth, validateBranch, async (req, res) => {
              INNER JOIN expense_entries ee
                 ON ee.branch_id = de.branch_id
                 AND ee.transaction_id = de.transaction_id
-                AND IFNULL(ee.is_reserved, 0) = 1
-                AND ee.reserved = 'discount'
              LEFT JOIN transactions t
                 ON t.branch_id = de.branch_id AND t.transaction_id = de.transaction_id
              WHERE ${whereClause}`,
@@ -1306,8 +1530,6 @@ router.get("/discount/list", auth, validateBranch, async (req, res) => {
              INNER JOIN expense_entries ee
                 ON ee.branch_id = de.branch_id
                 AND ee.transaction_id = de.transaction_id
-                AND IFNULL(ee.is_reserved, 0) = 1
-                AND ee.reserved = 'discount'
              WHERE ${statsWhereClause}`,
             statsParams
         );
@@ -1318,8 +1540,6 @@ router.get("/discount/list", auth, validateBranch, async (req, res) => {
              INNER JOIN expense_entries ee
                 ON ee.branch_id = de.branch_id
                 AND ee.transaction_id = de.transaction_id
-                AND IFNULL(ee.is_reserved, 0) = 1
-                AND ee.reserved = 'discount'
              WHERE ${statsWhereClause}`,
             statsParams
         );
