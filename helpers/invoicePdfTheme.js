@@ -103,20 +103,22 @@ export function pdfTheme(formatKey) {
         };
     }
 
-    // Premium Corporate: blue → teal, cool and structured
+    // Premium Corporate: deep navy → steel blue, a single crisp accent —
+    // a restrained "letterhead" palette (executive/report feel) rather than
+    // a bright multi-hue gradient, so it reads as corporate, not tech/SaaS.
     if (formatKey === "premium_corporate") {
         return {
-            primary:     "#1d4ed8",   // blue-700
-            primaryEnd:  "#0f766e",   // teal-700
-            accent:      "#3b82f6",   // blue-500
-            accentEnd:   "#2dd4bf",   // teal-400
-            soft:        "#eff6ff",   // blue-50
-            softEnd:     "#f0fdfa",   // teal-50
-            border:      "#bfdbfe",   // blue-200
-            rowAlt:      "#e0f2fe",
+            primary:     "#0b2545",   // near-navy-950
+            primaryEnd:  "#1c4b82",   // deep steel blue — narrow gradient spread
+            accent:      "#2563eb",   // blue-600, crisp single accent for rules/totals
+            accentEnd:   "#0ea5e9",   // sky-500, used sparingly for emphasis text
+            soft:        "#f8fafc",   // near-neutral paper tint, not blue-tinted
+            softEnd:     "#eef2f7",
+            border:      "#dbe3ee",
+            rowAlt:      "#f8fafc",
             onPrimary:       "#ffffff",
-            onPrimarySubtle: "rgba(255,255,255,0.78)",
-            titleSize:   20,
+            onPrimarySubtle: "rgba(255,255,255,0.72)",
+            titleSize:   22,
             line:        12,
             tableHead:   9,
         };
