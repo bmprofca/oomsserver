@@ -1,32 +1,34 @@
 import fs from "fs/promises";
 import path from "path";
-import { fileURLToPath } from "url";
-import {
-    FORMAT_VARIANT_IDS,
-    INVOICE_FORMAT_COLUMNS,
-    getFormatSampleDirKeyFromApiType,
-} from "./invoiceFormats.js";
-import { buildSaleInvoicePdfBuffer } from "./SaleInvoicePdf.js";
-import { buildSimpleInvoicePdfBuffer } from "./SimpleInvoicePdf.js";
-import { SIMPLE_SAMPLE_TITLE_BY_FORMAT_COLUMN } from "./invoiceSimpleDocTitles.js";
+import { BASE_DOMAIN } from "./Config.js";
+import { renderHtmlTemplate, htmlToPdfBufferBatch } from "./invoiceTemplateEngine.js";
+import { buildTemplateData } from "./invoiceDataBuilder.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MEDIA_FORMAT_ROOT = path.join(__dirname, "..", "media", "format");
+const FORMAT_VARIANT_IDS = [
+    "classic", 
+    "compact", 
+    "minimal",
+    "premium_modern",    
+    "premium_elegant",   
+    "premium_corporate", 
+    "premium_creative",  
+    "premium_luxury"     
+];
 
-/** Sale/purchase demo rows (line-item PDFs). */
+const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
+
 const SAMPLE_INVOICE = {
     invoice_id: "format-sample",
     invoice_no: "SAMPLE-001",
-    create_date: new Date("2026-01-15T12:00:00.000Z"),
-    subtotal: 10000,
-    tax_rate: 18,
-    tax_value: 1800,
-    additional_charge: 250,
-    grand_total: 12050,
+    created_at: new Date("2026-01-15T12:00:00.000Z"),
+    amount: 12050,
+    tax_amount: 1800,
+    remark: "This is a sample document for previewing invoice layout only.",
 };
 
 const SAMPLE_TRANSACTION = {
-    transaction_date: new Date("2026-01-15T12:00:00.000Z"),
+    payment_method: "Bank Transfer",
+    reference_no: "TXN-884729104",
     remark: "This is a sample document for previewing invoice layout only.",
 };
 
@@ -34,25 +36,19 @@ const SAMPLE_ITEMS = [
     {
         service_name: "Professional services (sample)",
         fees: 6000,
-        tax_value: 1080,
-        total: 7080,
+        rate: 6000,
+        quantity: 1,
+        description: "Quarterly software development support",
     },
     {
         service_name: "Consulting — quarterly (sample)",
         fees: 4000,
-        tax_value: 720,
-        total: 4720,
+        rate: 4000,
+        quantity: 1,
+        description: "IT architecture consultation",
     },
 ];
 
-const SAMPLE_SIMPLE_INVOICE = {
-    invoice_id: "format-sample",
-    invoice_no: "SAMPLE-DOC-001",
-    create_date: new Date("2026-01-15T12:00:00.000Z"),
-    grand_total: 25750.5,
-};
-
-/** Demo party lines for simple vouchers (no DB). */
 const SAMPLE_LINES_BY_FORMAT_COLUMN = {
     payment: [
         { label: "From", value: "Sample Bank (A/c ···4521)" },
@@ -76,107 +72,136 @@ const SAMPLE_LINES_BY_FORMAT_COLUMN = {
     ],
 };
 
-function dirForColumnKey(columnKey) {
-    return path.join(MEDIA_FORMAT_ROOT, columnKey);
-}
+const SAMPLE_ISSUER = {
+    name: "Sample Corporation Ltd.",
+    phone: "+91 99999 88888",
+    email: "info@samplecorp.com",
+    address: "101, Business Tower, Tech Park, Sector 62, Noida, UP, 201301",
+};
 
-function filePathFor(columnKey, formatKey) {
-    return path.join(dirForColumnKey(columnKey), `${formatKey}.pdf`);
-}
-
-async function writeSalePurchaseVariant(columnKey, formatKey) {
-    const isSale = columnKey === "sale";
-    const buf = await buildSaleInvoicePdfBuffer({
-        formatKey,
-        title: isSale ? "TAX INVOICE" : "PURCHASE INVOICE",
-        pdfSubject: isSale ? "Sale invoice (sample)" : "Purchase invoice (sample)",
-        billToLabel: isSale ? "Bill to" : "Supplier",
-        invoice: SAMPLE_INVOICE,
-        transactionRow: SAMPLE_TRANSACTION,
-        items: SAMPLE_ITEMS,
-        partyName: isSale ? "Sample Client Pvt. Ltd." : "Sample Supplier & Co.",
-    });
-    await fs.mkdir(dirForColumnKey(columnKey), { recursive: true });
-    await fs.writeFile(filePathFor(columnKey, formatKey), buf);
-}
-
-async function writeSimpleVariant(columnKey, formatKey) {
-    const title = SIMPLE_SAMPLE_TITLE_BY_FORMAT_COLUMN[columnKey];
-    const lines = SAMPLE_LINES_BY_FORMAT_COLUMN[columnKey] || [];
-    const buf = await buildSimpleInvoicePdfBuffer({
-        formatKey,
-        title,
-        pdfSubject: `${title} (sample)`,
-        invoice: SAMPLE_SIMPLE_INVOICE,
-        transactionRow: SAMPLE_TRANSACTION,
-        lines,
-    });
-    await fs.mkdir(dirForColumnKey(columnKey), { recursive: true });
-    await fs.writeFile(filePathFor(columnKey, formatKey), buf);
-}
-
-async function writeOneCell(columnKey, formatKey) {
-    if (columnKey === "sale" || columnKey === "purchase") {
-        await writeSalePurchaseVariant(columnKey, formatKey);
-    } else {
-        await writeSimpleVariant(columnKey, formatKey);
-    }
+function mapFormatKeyToTemplateName(key) {
+    const k = String(key || "classic").trim().toLowerCase();
+    if (k.startsWith("premium")) return "premium";
+    if (k === "modern") return "modern";
+    if (k === "compact" || k === "minimal") return "modern";
+    return "classic"; 
 }
 
 /**
- * Writes classic / compact / minimal PDFs under `media/format/<column>/` for every `invoice_formats` column.
+ * Build the compiled HTML string for one sample (no PDF yet).
  */
-export async function writeAllFormatSamplePdfsToDisk() {
-    for (let ci = 0; ci < INVOICE_FORMAT_COLUMNS.length; ci++) {
-        const columnKey = INVOICE_FORMAT_COLUMNS[ci];
-        for (let vi = 0; vi < FORMAT_VARIANT_IDS.length; vi++) {
-            const formatKey = FORMAT_VARIANT_IDS[vi];
-            await writeOneCell(columnKey, formatKey);
-        }
-    }
+async function buildOneSampleHtml(columnKey, formatKey) {
+    const activeTemplate = mapFormatKeyToTemplateName(formatKey);
+    const isSale = columnKey === "sale";
+    const isPurchase = columnKey === "purchase";
+    
+    let partyName = "Sample Client Pvt. Ltd.";
+    if (isPurchase) partyName = "Sample Supplier & Co.";
+    else if (columnKey === "payment") partyName = "Sample Vendor";
+    else if (columnKey === "receive") partyName = "Sample Client";
+    else if (columnKey === "expense") partyName = "Office Expenses";
+
+    const lines = SAMPLE_LINES_BY_FORMAT_COLUMN[columnKey] || [];
+
+    const templateData = buildTemplateData({
+        type: columnKey,
+        invoice: SAMPLE_INVOICE,
+        transactionRow: SAMPLE_TRANSACTION,
+        items: (isSale || isPurchase) ? SAMPLE_ITEMS : [],
+        partyName,
+        issuer: SAMPLE_ISSUER,
+        lines,
+    });
+
+    return renderHtmlTemplate(columnKey, activeTemplate, templateData);
 }
 
-async function fileExists(p) {
+async function fileExists(filePath) {
     try {
-        await fs.access(p);
+        await fs.access(filePath);
         return true;
     } catch {
         return false;
     }
 }
 
-async function ensureFormatSamplesExist() {
-    for (let ci = 0; ci < INVOICE_FORMAT_COLUMNS.length; ci++) {
-        for (let vi = 0; vi < FORMAT_VARIANT_IDS.length; vi++) {
-            const p = filePathFor(INVOICE_FORMAT_COLUMNS[ci], FORMAT_VARIANT_IDS[vi]);
-            if (!(await fileExists(p))) {
-                await writeAllFormatSamplePdfsToDisk();
-                return;
+/**
+ * Checks if the 8 PDFs for a specific type (e.g. "sale") already exist.
+ * If any are missing, it batch-generates all 8 in ~2 seconds.
+ */
+async function ensureTypeFormatSamples(columnKey) {
+    const dir = path.join(process.cwd(), "media", "format", columnKey);
+    await fs.mkdir(dir, { recursive: true });
+
+    // Check if ALL variants already exist
+    let allExist = true;
+    for (const formatKey of FORMAT_VARIANT_IDS) {
+        if (!(await fileExists(path.join(dir, `${formatKey}.pdf`)))) {
+            allExist = false;
+            break;
+        }
+    }
+
+    if (allExist) {
+        return; // Already generated, instantly return
+    }
+
+    const startTime = Date.now();
+    console.log(`[InvoiceFormats] Missing PDFs for '${columnKey}'. Generating now...`);
+
+    const jobs = [];
+    for (const formatKey of FORMAT_VARIANT_IDS) {
+        try {
+            const html = await buildOneSampleHtml(columnKey, formatKey);
+            jobs.push({ formatKey, html });
+        } catch (err) {
+            console.error(`[InvoiceFormats] Template error ${columnKey}/${formatKey}:`, err.message);
+        }
+    }
+
+    if (jobs.length === 0) return;
+
+    try {
+        const buffers = await htmlToPdfBufferBatch(jobs.map(j => j.html));
+        for (let i = 0; i < jobs.length; i++) {
+            const buf = buffers[i];
+            if (buf && buf.length > 0) {
+                await fs.writeFile(path.join(dir, `${jobs[i].formatKey}.pdf`), buf);
             }
         }
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[InvoiceFormats] Done — ${jobs.length} PDFs generated for '${columnKey}' in ${elapsed}s`);
+    } catch (err) {
+        console.error(`[InvoiceFormats] Batch PDF render failed for '${columnKey}':`, err.message);
     }
 }
 
-/**
- * Returns `[{ format_id, data: base64 }, ...]` for the given API `type`
- * (e.g. sale, purchase, receive, payment receive, expense).
- */
 export async function getFormatSamplePdfsBase64(invoiceTypeInput) {
-    const dirKey = getFormatSampleDirKeyFromApiType(invoiceTypeInput);
+    const map = {
+        sale: "sale",
+        purchase: "purchase",
+        payment: "payment",
+        receive: "receive",
+        "payment receive": "receive",
+        journal: "journal",
+        contra: "contra",
+        expense: "expense",
+    };
+    const dirKey = map[String(invoiceTypeInput).trim().toLowerCase()];
     if (!dirKey || !INVOICE_FORMAT_COLUMNS.includes(dirKey)) {
-        throw new Error(
-            "Invalid type for format samples. Use: sale, purchase, payment, receive, contra, journal, expense (or payment receive)"
-        );
+        throw new Error("Invalid type for format samples");
     }
-    await ensureFormatSamplesExist();
 
+    // Lazy load: ensure the PDFs for THIS SPECIFIC TYPE exist before returning URLs
+    await ensureTypeFormatSamples(dirKey);
+
+    const base = String(BASE_DOMAIN || "").replace(/\/$/, "");
     const out = [];
     for (let i = 0; i < FORMAT_VARIANT_IDS.length; i++) {
         const formatKey = FORMAT_VARIANT_IDS[i];
-        const buf = await fs.readFile(filePathFor(dirKey, formatKey));
         out.push({
             format_id: formatKey,
-            data: buf.toString("base64"),
+            url: `${base}/media/format/${dirKey}/${formatKey}.pdf`,
         });
     }
     return out;
