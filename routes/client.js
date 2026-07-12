@@ -101,6 +101,71 @@ async function insertRow(tableName, data) {
     return result;
 }
 
+router.get("/check-pan", auth, validateBranch, async (req, res) => {
+    try {
+        const { pan } = req.query || {};
+        const { branch_id } = req;
+
+        if (!pan || String(pan).trim() === "") {
+            return res.status(400).json({
+                success: false,
+                message: "pan query parameter is required"
+            });
+        }
+
+        const pan_number = String(pan).trim().toUpperCase();
+        const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
+        if (!panRegex.test(pan_number)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid PAN format"
+            });
+        }
+
+        const [rows] = await pool.query(
+            `SELECT p.username, p.name, p.mobile, p.email, p.care_of, p.guardian_name, p.image
+             FROM profile p
+             JOIN clients c ON p.username = c.username
+             WHERE p.pan_number = ?
+               AND c.user_type = 'client'
+               AND c.is_deleted = '0'
+               AND c.branch_id = ?
+               AND p.status = '1'
+             ORDER BY p.id DESC
+             LIMIT 1`,
+            [pan_number, branch_id]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.status(200).json({
+                success: true,
+                exist: false
+            });
+        }
+
+        const client = rows[0];
+        return res.status(200).json({
+            success: true,
+            exist: {
+                username: client.username,
+                name: client.name,
+                mobile: client.mobile,
+                email: client.email,
+                care_of: client.care_of || null,
+                guardian_name: client.guardian_name || null,
+                image: resolveProfileImageUrl(client.image) || null
+            }
+        });
+    } catch (error) {
+        console.error("Check PAN error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to check PAN",
+            error: error.message
+        });
+    }
+});
+
 router.post("/create", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
     let savedImageFilename = null; // Declare outside try block for cleanup
@@ -184,19 +249,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     });
                 }
             }
-        }
-
-        // Check if client with same mobile already exists
-        const [existingMobile] = await pool.query(
-            "SELECT p.username FROM profile p JOIN clients c ON p.username = c.username WHERE p.mobile = ? AND c.user_type = 'client' AND c.is_deleted = '0'",
-            [mobile]
-        );
-
-        if (existingMobile.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "A Client with this mobile number already exists"
-            });
         }
 
         // Check if client with same email already exists
@@ -3420,12 +3472,12 @@ router.post("/import", auth, validateBranch, (req, res) => {
                             // Check if any of them is an exact match (same mobile, name, address)
                             const isExactMatch = existingClients.some(ec => {
                                 return normalizeStr(ec.name) === normalizeStr(name) &&
-                                       normalizeStr(ec.mobile) === normalizeStr(mobile) &&
-                                       normalizeStr(ec.address_line_1) === normalizeStr(address_line_1) &&
-                                       normalizeStr(ec.address_line_2) === normalizeStr(address_line_2) &&
-                                       normalizeStr(ec.city) === normalizeStr(city) &&
-                                       normalizeStr(ec.state) === normalizeStr(state) &&
-                                       normalizeStr(ec.pincode) === normalizeStr(pincode);
+                                    normalizeStr(ec.mobile) === normalizeStr(mobile) &&
+                                    normalizeStr(ec.address_line_1) === normalizeStr(address_line_1) &&
+                                    normalizeStr(ec.address_line_2) === normalizeStr(address_line_2) &&
+                                    normalizeStr(ec.city) === normalizeStr(city) &&
+                                    normalizeStr(ec.state) === normalizeStr(state) &&
+                                    normalizeStr(ec.pincode) === normalizeStr(pincode);
                             });
 
                             if (isExactMatch) {
@@ -3447,20 +3499,20 @@ router.post("/import", auth, validateBranch, (req, res) => {
                         // Also check duplicate within the uploaded spreadsheet
                         if (rowErrors.length === 0 && !isDuplicateOfExistingInBranch) {
                             const isDupInFile = parsedClients.some(c => {
-                                return normalizeStr(c.mobile) === normalizeStr(mobile) || 
-                                       normalizeStr(c.email) === normalizeStr(email);
+                                return normalizeStr(c.mobile) === normalizeStr(mobile) ||
+                                    normalizeStr(c.email) === normalizeStr(email);
                             });
 
                             if (isDupInFile) {
                                 // Check if there is an exact match in the file already parsed
                                 const exactMatchInFile = parsedClients.find(c => {
                                     return normalizeStr(c.name) === normalizeStr(name) &&
-                                           normalizeStr(c.mobile) === normalizeStr(mobile) &&
-                                           normalizeStr(c.address_line_1) === normalizeStr(address_line_1) &&
-                                           normalizeStr(c.address_line_2) === normalizeStr(address_line_2) &&
-                                           normalizeStr(c.city) === normalizeStr(city) &&
-                                           normalizeStr(c.state) === normalizeStr(state) &&
-                                           normalizeStr(c.pincode) === normalizeStr(pincode);
+                                        normalizeStr(c.mobile) === normalizeStr(mobile) &&
+                                        normalizeStr(c.address_line_1) === normalizeStr(address_line_1) &&
+                                        normalizeStr(c.address_line_2) === normalizeStr(address_line_2) &&
+                                        normalizeStr(c.city) === normalizeStr(city) &&
+                                        normalizeStr(c.state) === normalizeStr(state) &&
+                                        normalizeStr(c.pincode) === normalizeStr(pincode);
                                 });
 
                                 if (exactMatchInFile) {

@@ -43,15 +43,18 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         const p1_type = String(party1_type).trim();
         const p2_type = String(party2_type).trim();
         const remarkVal = remark != null ? String(remark).trim() : null;
+        let journal_id;
+        let transaction_id;
+        let invoice_id;
         let invoice_no = "";
 
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
 
-            const transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
-            const journal_id = await UNIQUE_RANDOM_STRING("journal_entries", "journal_id", { length: ID_LENGTH, conn: connection });
-            const invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
+            transaction_id = await UNIQUE_RANDOM_STRING("transactions", "transaction_id", { length: ID_LENGTH, conn: connection });
+            journal_id = await UNIQUE_RANDOM_STRING("journal_entries", "journal_id", { length: ID_LENGTH, conn: connection });
+            invoice_id = await UNIQUE_RANDOM_STRING("invoice", "invoice_id", { length: ID_LENGTH, conn: connection });
 
             const [invoicePrefixRows] = await connection.query(
                 "SELECT * FROM `invoice_prefix` WHERE `branch_id` = ? AND `type` = ? AND `is_deleted` = ? AND `issue_date` <= ? AND `expire_date` >= ?",

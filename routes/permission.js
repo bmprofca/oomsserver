@@ -1,7 +1,7 @@
 import express from 'express';
 const router = express.Router();
 
-import pool from "../db.js";
+import pool, { poolQuery } from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
 
@@ -701,23 +701,27 @@ const TASK_GET_IN_PERMISSION = {
 
 async function ensureDefaultPermissionOptions() {
     try {
-        const [existing] = await pool.query(
+        const [existing] = await poolQuery(
             "SELECT id FROM permission_option WHERE p_option_id = ? LIMIT 1",
-            [TASK_GET_IN_PERMISSION.p_option_id]
+            [TASK_GET_IN_PERMISSION.p_option_id],
+            { retries: 3, delayMs: 1000 }
         );
 
         if (!existing.length) {
-            await pool.query(
+            await poolQuery(
                 "INSERT INTO permission_option (p_option_id, name, status) VALUES (?, ?, '1')",
-                [TASK_GET_IN_PERMISSION.p_option_id, TASK_GET_IN_PERMISSION.name]
+                [TASK_GET_IN_PERMISSION.p_option_id, TASK_GET_IN_PERMISSION.name],
+                { retries: 3, delayMs: 1000 }
             );
         }
     } catch (error) {
-        console.error("Error ensuring default permission options:", error);
+        console.error("Error ensuring default permission options:", error.message || error);
     }
 }
 
-ensureDefaultPermissionOptions();
+setTimeout(() => {
+    ensureDefaultPermissionOptions();
+}, 3000);
 
 // 9. POST /option/create - Register a new permission option (admin only)
 router.post("/option/create", auth, validateBranch, async (req, res) => {

@@ -20,11 +20,6 @@ const auth = async (req, res, next) => {
             req.headers['token'] ||
             req.headers['authorization']?.replace('Bearer ', '');
 
-        console.log('=== AUTH MIDDLEWARE ===');
-        console.log('All headers:', JSON.stringify(req.headers, null, 2));
-        console.log('Username from header:', username);
-        console.log('Token from header:', token ? 'Present' : 'Missing');
-
         if (!username || !token) {
             return res.status(401).json({
                 success: false,

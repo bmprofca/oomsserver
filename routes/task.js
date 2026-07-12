@@ -11,6 +11,7 @@ import {
     downloadAndUploadProfileDocument,
     getProfileDocumentAccessUrl,
 } from "../helpers/b2Storage.js";
+import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 
 const router = express.Router();
 
@@ -1306,7 +1307,10 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             await conn.query("UPDATE tasks SET fees = ?, tax_rate = ?, tax_value = ?, total = ? WHERE task_id = ? AND branch_id = ?", [fees, tax_rate, tax_value, total, task_id, branch_id]);
 
             if (PrevTaskBillingStatus == "1") {
-                await conn.query("UPDATE sale_entries SET total = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, branch_id]);
+                const saleEntriesBranchId = await resolveSaleEntriesBranchId(conn, branch_id);
+                if (saleEntriesBranchId != null) {
+                    await conn.query("UPDATE sale_entries SET total = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, saleEntriesBranchId]);
+                }
 
                 await conn.query("UPDATE transactions SET amount = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, branch_id]);
 
@@ -1802,6 +1806,25 @@ router.post("/details/note/create", auth, validateBranch, async (req, res) => {
 
 /** subtask.status — DB enum `pending` | `complete` | `cancel` (database-context.json) */
 const SUBTASK_STATUS_VALUES = ["pending", "complete", "cancel"];
+const SUBTASK_TERMINAL_STATUSES = ["complete", "cancel"];
+
+async function findTasksWithIncompleteSubtasks(conn, branch_id, taskIds) {
+    if (!Array.isArray(taskIds) || taskIds.length === 0) return [];
+
+    const placeholders = taskIds.map(() => "?").join(",");
+    const [rows] = await conn.query(
+        `SELECT s.task_id, COUNT(*) AS incomplete_subtask_count
+         FROM subtask s
+         WHERE s.branch_id = ?
+           AND s.task_id IN (${placeholders})
+           AND (s.is_deleted = '0' OR s.is_deleted = 0)
+           AND LOWER(s.status) NOT IN (${SUBTASK_TERMINAL_STATUSES.map(() => "?").join(", ")})
+         GROUP BY s.task_id`,
+        [branch_id, ...taskIds, ...SUBTASK_TERMINAL_STATUSES]
+    );
+
+    return rows || [];
+}
 
 // Create single task subtask
 router.post("/details/subtask/create", auth, validateBranch, async (req, res) => {
@@ -3134,15 +3157,38 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const changedTaskIds = (rows || []).filter((r) => r.status !== statusVal).map((r) => r.task_id);
+        let targetIds = ids;
+        let blockedBySubtasks = [];
+
+        if (statusVal === "complete") {
+            blockedBySubtasks = await findTasksWithIncompleteSubtasks(conn, branch_id, ids);
+            const blockedTaskIdSet = new Set(blockedBySubtasks.map((row) => String(row.task_id)));
+            targetIds = ids.filter((id) => !blockedTaskIdSet.has(String(id)));
+
+            if (targetIds.length === 0) {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Cannot mark task(s) as complete until all subtasks are complete or canceled",
+                    blocked_task_ids: ids,
+                    subtask_blockers: blockedBySubtasks
+                });
+            }
+        }
+
+        const targetPlaceholders = targetIds.map(() => "?").join(",");
+        const changedTaskIds = (rows || [])
+            .filter((r) => targetIds.includes(String(r.task_id)) && r.status !== statusVal)
+            .map((r) => r.task_id);
 
         if (statusVal === "complete") {
             await conn.query(
-                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ? WHERE branch_id = ? AND task_id IN (${placeholders})`,
-                [statusVal, new Date(), username || null, branch_id, ...ids]
+                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ? WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                [statusVal, new Date(), username || null, branch_id, ...targetIds]
             );
 
-            for (const taskId of ids) {
+            for (const taskId of targetIds) {
                 try {
                     notifyTaskCompletedEmail({
                         branch_id: branch_id,
@@ -3160,11 +3206,11 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             }
         } else if (statusVal === "cancel") {
             await conn.query(
-                `UPDATE tasks SET status = ?, cancelled_date = ?, cancelled_by = ? WHERE branch_id = ? AND task_id IN (${placeholders})`,
-                [statusVal, new Date(), username || null, branch_id, ...ids]
+                `UPDATE tasks SET status = ?, cancelled_date = ?, cancelled_by = ? WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                [statusVal, new Date(), username || null, branch_id, ...targetIds]
             );
 
-            for (const taskId of ids) {
+            for (const taskId of targetIds) {
                 try {
                     await notifyTaskCanceledEmail({
                         branch_id: branch_id,
@@ -3178,8 +3224,8 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             }
         } else {
             await conn.query(
-                `UPDATE tasks SET status = ? WHERE branch_id = ? AND task_id IN (${placeholders})`,
-                [statusVal, branch_id, ...ids]
+                `UPDATE tasks SET status = ? WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                [statusVal, branch_id, ...targetIds]
             );
         }
 
@@ -3196,12 +3242,20 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
         await conn.commit();
         conn.release();
 
+        const blockedTaskIds = blockedBySubtasks.map((row) => String(row.task_id));
+        const successMessage = blockedTaskIds.length > 0
+            ? `${targetIds.length} task(s) updated. ${blockedTaskIds.length} task(s) could not be completed because subtasks are still pending.`
+            : "Task status updated successfully";
+
         return res.status(200).json({
             success: true,
-            message: "Task status updated successfully",
+            message: successMessage,
             data: {
-                task_ids: ids,
-                status: statusVal
+                task_ids: targetIds,
+                status: statusVal,
+                ...(blockedTaskIds.length > 0
+                    ? { blocked_task_ids: blockedTaskIds, subtask_blockers: blockedBySubtasks }
+                    : {})
             }
         });
     } catch (error) {
