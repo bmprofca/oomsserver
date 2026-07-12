@@ -3,6 +3,14 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { USER_SNIPPED_DATA, TODAY_DATE } from "../helpers/function.js";
+import {
+    clientBalanceCountParams,
+    clientBalanceCountSql,
+    clientBalanceListParams,
+    clientBalanceListSql,
+    clientBalanceTotalParams,
+    clientBalanceTotalSql,
+} from "../helpers/clientBalanceSql.js";
 import { filterSchedulesByRecurringRules } from "../helpers/recurringTaskHelper.js";
 
 const router = express.Router();
@@ -2145,76 +2153,16 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
      AND billing_status IN (0, '0')`,
             [branch_id]
         );
-        // Creditors: UNIQUE clients with negative net balance (we owe them money) - Show as NEGATIVE
+        // Creditors: clients with negative net balance (GET_BALANCE rules)
         const [creditors] = await pool.query(
-            `SELECT 
-                COUNT(DISTINCT client_username) AS total_count,
-                COALESCE(SUM(net_balance), 0) AS total_amount
-             FROM (
-                SELECT 
-                    client_username,
-                    SUM(net_amount) AS net_balance
-                FROM (
-                    SELECT 
-                        party2_id AS client_username,
-                        amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party2_type = 'client'
-                        AND party2_id IS NOT NULL
-                        AND party2_id NOT REGEXP '^[0-9]+$'
-                    
-                    UNION ALL
-                    
-                    SELECT 
-                        party1_id AS client_username,
-                        -amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party1_type = 'client'
-                        AND party1_id IS NOT NULL
-                        AND party1_id NOT REGEXP '^[0-9]+$'
-                ) AS all_transactions
-                GROUP BY client_username
-                HAVING SUM(net_amount) < 0
-             ) AS creditor_clients`,
-            [branch_id, branch_id]
+            clientBalanceCountSql("creditor"),
+            clientBalanceCountParams(branch_id)
         );
 
-        // Debtors: UNIQUE clients with positive net balance (they owe us money) - Show as POSITIVE
+        // Debtors: clients with positive net balance (GET_BALANCE rules)
         const [debtors] = await pool.query(
-            `SELECT 
-                COUNT(DISTINCT client_username) AS total_count,
-                COALESCE(SUM(net_balance), 0) AS total_amount
-             FROM (
-                SELECT 
-                    client_username,
-                    SUM(net_amount) AS net_balance
-                FROM (
-                    SELECT 
-                        party2_id AS client_username,
-                        amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party2_type = 'client'
-                        AND party2_id IS NOT NULL
-                        AND party2_id NOT REGEXP '^[0-9]+$'
-                    
-                    UNION ALL
-                    
-                    SELECT 
-                        party1_id AS client_username,
-                        -amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party1_type = 'client'
-                        AND party1_id IS NOT NULL
-                        AND party1_id NOT REGEXP '^[0-9]+$'
-                ) AS all_transactions
-                GROUP BY client_username
-                HAVING SUM(net_amount) > 0
-             ) AS debtor_clients`,
-            [branch_id, branch_id]
+            clientBalanceCountSql("debtor"),
+            clientBalanceCountParams(branch_id)
         );
 
         // Today Received: transaction_type = 'receive' or 'sale' or 'received'
@@ -2372,8 +2320,11 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
         const {
             page_no = 1,
             limit = 10,
-            type = "all"
+            type = "all",
+            search = ""
         } = req.query || {};
+
+        const searchTerm = String(search || "").trim();
 
         const pageNum = Math.max(1, Number(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
@@ -2423,51 +2374,10 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                 total = totalPending[0]?.total || 0;
                 break;
 
-            case "creditors":
-                // Creditors: UNIQUE clients with NEGATIVE net balance (we owe them money) - Show as NEGATIVE
+            case "creditors": {
                 const [creditorDetails] = await pool.query(
-                    `SELECT 
-                        t.client_username AS username,
-                        MAX(p.name) AS name,
-                        MAX(p.guardian_name) AS guardian_name,
-                        MAX(p.care_of) AS care_of,
-                        MAX(p.mobile) AS mobile,
-                        MAX(p.email) AS email,
-                        MAX(p.country_code) AS country_code,
-                        MAX(f.firm_name) AS firm_name,
-                        MAX(f.firm_id) AS firm_id,
-                        MAX(f.gst_no) AS gst_no,
-                        MAX(f.pan_no) AS pan_no,
-                        SUM(t.net_amount) AS total_balance
-                    FROM (
-                        SELECT 
-                            party2_id AS client_username,
-                            amount AS net_amount
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party2_type = 'client'
-                            AND party2_id IS NOT NULL
-                            AND party2_id NOT REGEXP '^[0-9]+$'
-                        
-                        UNION ALL
-                        
-                        SELECT 
-                            party1_id AS client_username,
-                            -amount AS net_amount
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party1_type = 'client'
-                            AND party1_id IS NOT NULL
-                            AND party1_id NOT REGEXP '^[0-9]+$'
-                    ) t
-                    LEFT JOIN profile p ON p.username = t.client_username
-                    LEFT JOIN firms f ON f.username = t.client_username
-                    WHERE t.client_username IS NOT NULL
-                    GROUP BY t.client_username
-                    HAVING SUM(t.net_amount) < 0
-                    ORDER BY SUM(t.net_amount) ASC
-                    LIMIT ? OFFSET ?`,
-                    [branch_id, branch_id, limitNum, offset]
+                    clientBalanceListSql("creditor", searchTerm),
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "creditor")
                 );
 
                 const formattedCreditors = creditorDetails.map(creditor => ({
@@ -2489,102 +2399,19 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                 }));
 
                 const [totalCreditors] = await pool.query(
-                    `SELECT COUNT(DISTINCT client_username) AS total
-                    FROM (
-                        SELECT 
-                            CASE 
-                                WHEN party2_type = 'client' THEN party2_id
-                                WHEN party1_type = 'client' THEN party1_id
-                            END AS client_username
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND amount != 0
-                            AND (party2_type = 'client' OR party1_type = 'client')
-                            AND (
-                                (party2_type = 'client' AND party2_id NOT REGEXP '^[0-9]+$') OR
-                                (party1_type = 'client' AND party1_id NOT REGEXP '^[0-9]+$')
-                            )
-                    ) AS all_clients
-                    WHERE client_username IN (
-                        SELECT client_username FROM (
-                            SELECT 
-                                party2_id AS client_username,
-                                amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party2_type = 'client'
-                            UNION ALL
-                            SELECT 
-                                party1_id AS client_username,
-                                -amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party1_type = 'client'
-                        ) AS balances
-                        GROUP BY client_username
-                        HAVING SUM(net_amount) < 0
-                    )`,
-                    [branch_id, branch_id, branch_id]
+                    clientBalanceTotalSql("creditor", searchTerm),
+                    clientBalanceTotalParams(branch_id, searchTerm)
                 );
 
                 data = formattedCreditors;
                 total = totalCreditors[0]?.total || 0;
                 break;
+            }
 
-            case "debtors":
-                // Debtors: UNIQUE clients with POSITIVE net balance (they owe us money) - Show as POSITIVE
+            case "debtors": {
                 const [debtorDetails] = await pool.query(
-                    `SELECT 
-                        t.client_username AS username,
-                        MAX(p.name) AS name,
-                        MAX(p.guardian_name) AS guardian_name,
-                        MAX(p.care_of) AS care_of,
-                        MAX(p.mobile) AS mobile,
-                        MAX(p.email) AS email,
-                        MAX(p.country_code) AS country_code,
-                        MAX(f.firm_name) AS firm_name,
-                        MAX(f.firm_id) AS firm_id,
-                        MAX(f.gst_no) AS gst_no,
-                        MAX(f.pan_no) AS pan_no,
-                        SUM(t.net_amount) AS total_balance,
-                        MAX(t.transaction_date) AS last_transaction_date,
-                        DATEDIFF(CURDATE(), MAX(t.transaction_date)) AS days_since_last_payment,
-                        CASE 
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 1 THEN 'Today'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 7 THEN 'Last 7 days'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 30 THEN 'Last 30 days'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 90 THEN 'Last 90 days'
-                            ELSE '90+ days'
-                        END AS last_received_in
-                    FROM (
-                        SELECT 
-                            party2_id AS client_username,
-                            amount AS net_amount,
-                            transaction_date
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party2_type = 'client'
-                            AND party2_id IS NOT NULL
-                            AND party2_id NOT REGEXP '^[0-9]+$'
-                        
-                        UNION ALL
-                        
-                        SELECT 
-                            party1_id AS client_username,
-                            -amount AS net_amount,
-                            transaction_date
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party1_type = 'client'
-                            AND party1_id IS NOT NULL
-                            AND party1_id NOT REGEXP '^[0-9]+$'
-                    ) t
-                    LEFT JOIN profile p ON p.username = t.client_username
-                    LEFT JOIN firms f ON f.username = t.client_username
-                    WHERE t.client_username IS NOT NULL
-                    GROUP BY t.client_username
-                    HAVING SUM(t.net_amount) > 0
-                    ORDER BY days_since_last_payment DESC, SUM(t.net_amount) DESC
-                    LIMIT ? OFFSET ?`,
-                    [branch_id, branch_id, limitNum, offset]
+                    clientBalanceListSql("debtor", searchTerm),
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "debtor")
                 );
 
                 const formattedDebtors = debtorDetails.map(debtor => ({
@@ -2611,45 +2438,14 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                 }));
 
                 const [totalDebtors] = await pool.query(
-                    `SELECT COUNT(DISTINCT client_username) AS total
-                    FROM (
-                        SELECT 
-                            CASE 
-                                WHEN party2_type = 'client' THEN party2_id
-                                WHEN party1_type = 'client' THEN party1_id
-                            END AS client_username
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND amount != 0
-                            AND (party2_type = 'client' OR party1_type = 'client')
-                            AND (
-                                (party2_type = 'client' AND party2_id NOT REGEXP '^[0-9]+$') OR
-                                (party1_type = 'client' AND party1_id NOT REGEXP '^[0-9]+$')
-                            )
-                    ) AS all_clients
-                    WHERE client_username IN (
-                        SELECT client_username FROM (
-                            SELECT 
-                                party2_id AS client_username,
-                                amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party2_type = 'client'
-                            UNION ALL
-                            SELECT 
-                                party1_id AS client_username,
-                                -amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party1_type = 'client'
-                        ) AS balances
-                        GROUP BY client_username
-                        HAVING SUM(net_amount) > 0
-                    )`,
-                    [branch_id, branch_id, branch_id]
+                    clientBalanceTotalSql("debtor", searchTerm),
+                    clientBalanceTotalParams(branch_id, searchTerm)
                 );
 
                 data = formattedDebtors;
                 total = totalDebtors[0]?.total || 0;
                 break;
+            }
 
             case "today_received":
                 // Today Received: DISTINCT transactions by transaction_id to avoid duplicates

@@ -1540,6 +1540,24 @@ router.get("/report/payment", auth, validateBranch, async (req, res) => {
         );
         const total = Number(totalRows) || 0;
 
+        // Date-range totals (not paginated; search does not affect stats)
+        const statsDateFrom = from_date || '1970-01-01';
+        const statsDateTo = to_date || '2099-12-31';
+        const [[statsRow]] = await pool.query(
+            `SELECT
+                COUNT(*) AS count,
+                COALESCE(SUM(transactions.amount), 0) AS amount
+             FROM invoice
+             INNER JOIN transactions ON invoice.transaction_id = transactions.transaction_id
+             WHERE invoice.branch_id = ? AND invoice.type = ?
+               AND transactions.transaction_date >= ? AND transactions.transaction_date <= ?`,
+            [branch_id, 'payment', statsDateFrom, statsDateTo]
+        );
+        const stats = {
+            count: Number(statsRow?.count) || 0,
+            amount: Number(Number(statsRow?.amount ?? 0).toFixed(2)),
+        };
+
         const data = [];
 
         for (let index = 0; index < rows.length; index++) {
@@ -1573,6 +1591,8 @@ router.get("/report/payment", auth, validateBranch, async (req, res) => {
                 remark,
                 create_by,
                 modify_by,
+                create_date: row.create_date,
+                modify_date: row.modify_date,
                 invoice_no,
                 invoice_id,
                 payment_from: {
@@ -1589,6 +1609,7 @@ router.get("/report/payment", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             data,
+            stats,
             meta: {
                 page_no,
                 limit,
@@ -1728,10 +1749,10 @@ router.get("/report/receive", auth, validateBranch, async (req, res) => {
         const searchPattern = search && String(search).trim() !== "" ? `%${String(search).trim()}%` : null;
         const hasSearch = searchPattern != null;
 
-        const whereClause = `invoice.branch_id = ? AND invoice.type = ?
+        const whereClause = `invoice.branch_id = ? AND invoice.type IN ('payment receive', 'receive')
             AND (transactions.transaction_date >= ? AND transactions.transaction_date <= ?)
             ${hasSearch ? "AND (invoice.invoice_no LIKE ? OR transactions.remark LIKE ?)" : ""}`;
-        const params = [branch_id, "payment receive", from_date || "1970-01-01", to_date || "2099-12-31"];
+        const params = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
         if (hasSearch) params.push(searchPattern, searchPattern);
         const listParams = [...params, limit, offset];
 
@@ -1753,14 +1774,14 @@ router.get("/report/receive", auth, validateBranch, async (req, res) => {
         );
         const total = Number(totalRows) || 0;
 
-        const statsParams = [branch_id, "payment receive", from_date || "1970-01-01", to_date || "2099-12-31"];
+        const statsParams = [branch_id, from_date || "1970-01-01", to_date || "2099-12-31"];
         const [[statsRow]] = await pool.query(
             `SELECT
                 COUNT(*) AS count,
                 COALESCE(SUM(transactions.amount), 0) AS amount
              FROM invoice
              LEFT JOIN transactions ON invoice.transaction_id = transactions.transaction_id
-             WHERE invoice.branch_id = ? AND invoice.type = ?
+             WHERE invoice.branch_id = ? AND invoice.type IN ('payment receive', 'receive')
                AND (transactions.transaction_date >= ? AND transactions.transaction_date <= ?)`,
             statsParams
         );
