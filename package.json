@@ -16,6 +16,8 @@
     "migrate:v3:dedupe-invoices": "node database/scripts/migrate-v3/dedupe-branch-invoices.js",
     "migrate:v3:snapshot": "node database/scripts/migrate-v3/backup-branch-snapshot.js",
     "migrate:v3:finance-reset": "node database/scripts/migrate-v3/finance-reset.js",
+    "migrate:v3:fix-party-types": "node database/scripts/migrate-v3/fix-party-types.js",
+    "migrate:v3:fix-opening-balances": "node database/scripts/migrate-v3/fix-opening-balances.js",
     "migrate:v3:diagnose-debtors": "node database/scripts/migrate-v3/diagnose-debtors.js",
     "invoice-format-samples": "node scripts/generate-invoice-format-samples.js",
     "worker": "node workers/email-broadcast-worker.js",

@@ -6,9 +6,13 @@ import {
     fetchAllClientBalances,
     fetchAllClientBalancesFromStagingLedger,
     fetchLegacyDashboardBalances,
+    fetchPartyBalances,
+    fetchStagingLedgerBalancesForUsernames,
     loadStagingClientUsernameSet,
+    loadStagingPartyTypeByUsername,
     queryBranchRows,
     sumClientBalanceFromTransactions,
+    sumPartyBalanceFromTransactions,
 } from "./utils.js";
 import {
     clientBalanceCountParams,
@@ -55,6 +59,8 @@ async function buildExpectedTransactions(staging) {
     }
     const journalByPayment = new Map(journals.map((j) => [j.journal_id, j]));
     const clientUsernameSet = await loadStagingClientUsernameSet(staging);
+    const partyTypeByUsername = await loadStagingPartyTypeByUsername(staging);
+    const partyOptions = { clientUsernameSet, partyTypeByUsername };
 
     return invoices.map((inv) => {
         const paymentId = inv.payment_id || inv.invoice_id;
@@ -62,7 +68,7 @@ async function buildExpectedTransactions(staging) {
             inv,
             ledgerByPayment.get(paymentId) || [],
             journalByPayment.get(paymentId),
-            { clientUsernameSet }
+            partyOptions
         );
     });
 }
@@ -172,7 +178,7 @@ export async function runVerification({ staging, target, logger }) {
     // Spot-check Jahed Ali opening balance
     const JAHEB = "APP2025_BRN2025_1745485392223_16046819";
     const obTxn = expectedTxns.find(
-        (t) => t.transaction_type === "opening balance" && t.party1_id === JAHEB
+        (t) => t.transaction_type === "opening balance" && (t.party1_id === JAHEB || t.party2_id === JAHEB)
     );
     logger.stat("verify.jahed_opening_balance_present", obTxn ? 1 : 0);
     if (obTxn) {
@@ -180,9 +186,10 @@ export async function runVerification({ staging, target, logger }) {
     }
 
     const [jahedObRows] = await target.query(
-        `SELECT transaction_id, amount FROM transactions
-         WHERE branch_id = ? AND transaction_type = 'opening balance' AND party1_id = ? LIMIT 1`,
-        [NEW_BRANCH_ID, JAHEB]
+        `SELECT transaction_id, amount, party1_type, party1_id, party2_type, party2_id FROM transactions
+         WHERE branch_id = ? AND transaction_type = 'opening balance'
+           AND (party1_id = ? OR party2_id = ?) LIMIT 1`,
+        [NEW_BRANCH_ID, JAHEB, JAHEB]
     );
     if (jahedObRows.length) {
         logger.info("Jahed Ali opening balance (target)", jahedObRows[0]);
@@ -290,6 +297,43 @@ export async function runVerification({ staging, target, logger }) {
             get_balance_clients: getBalanceDebtorsClientsOnly.count,
             dashboard_fixed: Number(dashboardDebtorRow?.total_count) || 0,
         });
+    }
+
+    const [cas] = await target.query(
+        `SELECT username FROM clients WHERE branch_id = ? AND user_type = 'ca' AND is_deleted = '0'`,
+        [NEW_BRANCH_ID]
+    );
+    const caUsernames = cas.map((r) => r.username);
+    const stagingCaBalances = await fetchStagingLedgerBalancesForUsernames(staging, caUsernames);
+    const actualCaBalances = await fetchPartyBalances(target, NEW_BRANCH_ID, "ca");
+
+    let caMismatchCount = 0;
+    const caSampleMismatches = [];
+    for (const ca of cas) {
+        const expected = sumPartyBalanceFromTransactions(expectedTxns, ca.username, "ca");
+        const stagingLedger = stagingCaBalances.get(ca.username) ?? 0;
+        const actual = actualCaBalances.get(ca.username) ?? 0;
+        const diffExpected = Math.abs(Number(expected.toFixed(2)) - Number(actual.toFixed(2)));
+        const diffStaging = Math.abs(Number(stagingLedger.toFixed(2)) - Number(actual.toFixed(2)));
+        if (diffExpected > 0.02 || (Math.abs(stagingLedger) > 0.02 && Math.abs(actual) <= 0.02)) {
+            caMismatchCount++;
+            if (caSampleMismatches.length < 10) {
+                caSampleMismatches.push({
+                    username: ca.username,
+                    expected_from_txns: Number(expected.toFixed(2)),
+                    staging_ledger: Number(stagingLedger.toFixed(2)),
+                    actual: Number(actual.toFixed(2)),
+                });
+            }
+        }
+    }
+
+    logger.stat("verify.ca_balance_mismatches", caMismatchCount);
+    logger.stat("verify.ca_balance_checked", cas.length);
+    if (caSampleMismatches.length) {
+        logger.warn("CA balance mismatches (sample up to 10)", caSampleMismatches);
+    } else if (cas.length) {
+        logger.info("All CA balances match expected values");
     }
 
     logger.info("Verification complete");

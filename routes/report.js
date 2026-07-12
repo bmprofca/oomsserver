@@ -2269,7 +2269,7 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
                 },
                 creditors: {
                     count: Number(creditors[0]?.total_count) || 0,
-                    total_amount: -Number(creditors[0]?.total_amount) || 0  // NEGATIVE balance
+                    total_amount: Number(creditors[0]?.total_amount) || 0
                 },
                 debtors: {
                     count: Number(debtors[0]?.total_count) || 0,
@@ -2306,6 +2306,53 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
     }
 });
 
+async function getFirmsMapForUsernames(branchId, usernames) {
+    const firmsByUsername = {};
+    if (!usernames.length) return firmsByUsername;
+
+    const firmPlaceholders = usernames.map(() => "?").join(", ");
+    const [firmRows] = await pool.query(
+        `SELECT firm_id, username, firm_name, firm_type, pan_no, gst_no, tan_no, vat_no, cin_no, file_no,
+                status, create_date, modify_date, address_line_1, address_line_2, city, state, pincode, country
+         FROM firms
+         WHERE branch_id = ?
+           AND username IN (${firmPlaceholders})
+           AND (is_deleted = '0' OR is_deleted = 0)
+         ORDER BY COALESCE(modify_date, create_date) DESC`,
+        [branchId, ...usernames]
+    );
+
+    for (const row of firmRows) {
+        if (!firmsByUsername[row.username]) {
+            firmsByUsername[row.username] = [];
+        }
+        firmsByUsername[row.username].push({
+            firm_id: row.firm_id || "",
+            firm_name: row.firm_name || "",
+            firm_type: row.firm_type || "",
+            gst_no: row.gst_no || "",
+            pan_no: row.pan_no || "",
+            tan_no: row.tan_no || "",
+            vat_no: row.vat_no || "",
+            cin_no: row.cin_no || "",
+            file_no: row.file_no || "",
+            status: row.status === "1",
+            create_date: row.create_date,
+            modify_date: row.modify_date,
+            address: {
+                address_line_1: row.address_line_1 || "",
+                address_line_2: row.address_line_2 || "",
+                city: row.city || "",
+                state: row.state || "",
+                pincode: row.pincode || "",
+                country: row.country || "",
+            },
+        });
+    }
+
+    return firmsByUsername;
+}
+
 router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -2321,10 +2368,12 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
             page_no = 1,
             limit = 10,
             type = "all",
-            search = ""
+            search = "",
+            balance_after = 0
         } = req.query || {};
 
         const searchTerm = String(search || "").trim();
+        const balanceAfter = Math.max(0, Number(balance_after) || 0);
 
         const pageNum = Math.max(1, Number(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
@@ -2332,6 +2381,8 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
 
         let data = [];
         let total = 0;
+        let debtorMeta = null;
+        let creditorMeta = null;
 
         switch (type) {
             case "pending_billing":
@@ -2377,44 +2428,67 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
             case "creditors": {
                 const [creditorDetails] = await pool.query(
                     clientBalanceListSql("creditor", searchTerm),
-                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "creditor")
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "creditor", 0)
                 );
 
-                const formattedCreditors = creditorDetails.map(creditor => ({
-                    username: creditor.username,
-                    name: creditor.name || creditor.username,
-                    guardian_name: creditor.guardian_name || '',
-                    care_of: creditor.care_of || '',
-                    mobile: creditor.mobile || '',
-                    email: creditor.email || '',
-                    country_code: creditor.country_code || '',
-                    firm: {
-                        firm_id: creditor.firm_id || '',
-                        firm_name: creditor.firm_name || '',
-                        gst_no: creditor.gst_no || '',
-                        pan_no: creditor.pan_no || ''
-                    },
-                    balance: -Number(Math.abs(creditor.total_balance)),
-                    balance_type: "creditor"
-                }));
+                const creditorUsernames = creditorDetails.map((c) => c.username).filter(Boolean);
+                const creditorFirmsMap = await getFirmsMapForUsernames(branch_id, creditorUsernames);
+
+                const formattedCreditors = creditorDetails.map(creditor => {
+                    const firms = creditorFirmsMap[creditor.username] || [];
+                    const primaryFirm = firms[0] || null;
+                    return {
+                        username: creditor.username,
+                        name: creditor.name || creditor.username,
+                        guardian_name: creditor.guardian_name || '',
+                        care_of: creditor.care_of || '',
+                        mobile: creditor.mobile || '',
+                        email: creditor.email || '',
+                        country_code: creditor.country_code || '',
+                        firms,
+                        firm: primaryFirm ? {
+                            firm_id: primaryFirm.firm_id || '',
+                            firm_name: primaryFirm.firm_name || '',
+                            gst_no: primaryFirm.gst_no || '',
+                            pan_no: primaryFirm.pan_no || ''
+                        } : {
+                            firm_id: creditor.firm_id || '',
+                            firm_name: creditor.firm_name || '',
+                            gst_no: creditor.gst_no || '',
+                            pan_no: creditor.pan_no || ''
+                        },
+                        balance: -Number(Math.abs(creditor.total_balance)),
+                        balance_type: "creditor"
+                    };
+                });
 
                 const [totalCreditors] = await pool.query(
                     clientBalanceTotalSql("creditor", searchTerm),
-                    clientBalanceTotalParams(branch_id, searchTerm)
+                    clientBalanceTotalParams(branch_id, searchTerm, "creditor", 0)
                 );
 
                 data = formattedCreditors;
                 total = totalCreditors[0]?.total || 0;
+                creditorMeta = {
+                    creditor_count: Number(totalCreditors[0]?.total) || 0,
+                    creditor_balance: Math.abs(Number(totalCreditors[0]?.balance_sum) || 0)
+                };
                 break;
             }
 
             case "debtors": {
                 const [debtorDetails] = await pool.query(
-                    clientBalanceListSql("debtor", searchTerm),
-                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "debtor")
+                    clientBalanceListSql("debtor", searchTerm, balanceAfter),
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "debtor", balanceAfter)
                 );
 
-                const formattedDebtors = debtorDetails.map(debtor => ({
+                const debtorUsernames = debtorDetails.map((d) => d.username).filter(Boolean);
+                const firmsByUsername = await getFirmsMapForUsernames(branch_id, debtorUsernames);
+
+                const formattedDebtors = debtorDetails.map(debtor => {
+                    const firms = firmsByUsername[debtor.username] || [];
+                    const primaryFirm = firms[0] || null;
+                    return {
                     username: debtor.username,
                     name: debtor.name || debtor.username,
                     guardian_name: debtor.guardian_name || '',
@@ -2422,7 +2496,13 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                     mobile: debtor.mobile || '',
                     email: debtor.email || '',
                     country_code: debtor.country_code || '',
-                    firm: {
+                    firms,
+                    firm: primaryFirm ? {
+                        firm_id: primaryFirm.firm_id || '',
+                        firm_name: primaryFirm.firm_name || '',
+                        gst_no: primaryFirm.gst_no || '',
+                        pan_no: primaryFirm.pan_no || ''
+                    } : {
                         firm_id: debtor.firm_id || '',
                         firm_name: debtor.firm_name || '',
                         gst_no: debtor.gst_no || '',
@@ -2435,15 +2515,20 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                         days_ago: debtor.days_since_last_payment,
                         period: debtor.last_received_in
                     }
-                }));
+                };
+                });
 
                 const [totalDebtors] = await pool.query(
-                    clientBalanceTotalSql("debtor", searchTerm),
-                    clientBalanceTotalParams(branch_id, searchTerm)
+                    clientBalanceTotalSql("debtor", searchTerm, balanceAfter),
+                    clientBalanceTotalParams(branch_id, searchTerm, "debtor", balanceAfter)
                 );
 
                 data = formattedDebtors;
                 total = totalDebtors[0]?.total || 0;
+                debtorMeta = {
+                    debtor_count: Number(totalDebtors[0]?.total) || 0,
+                    debtor_balance: Number(totalDebtors[0]?.balance_sum) || 0
+                };
                 break;
             }
 
@@ -2686,7 +2771,9 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                     total: total,
                     total_pages: Math.ceil(total / limitNum),
                     is_last_page: offset + (Array.isArray(data) ? data.length : 0) >= total
-                }
+                },
+                ...(debtorMeta ? { meta: debtorMeta } : {}),
+                ...(creditorMeta ? { meta: creditorMeta } : {})
             }
         });
 

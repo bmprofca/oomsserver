@@ -4,11 +4,13 @@ import {
     buildInvoiceRow,
     buildTransactionFromInvoice,
     loadStagingClientUsernameSet,
+    loadStagingPartyTypeByUsername,
     mapTransactionType,
     queryBranchRows,
     resolveClientId,
     resolvePurchaseParty,
     resolveSaleEntriesBranchId,
+    resolveUsernamePartyType,
     safeDate,
 } from "../utils.js";
 
@@ -51,6 +53,8 @@ export async function runPhaseD(ctx) {
     }
 
     const clientUsernameSet = await loadStagingClientUsernameSet(staging);
+    const partyTypeByUsername = await loadStagingPartyTypeByUsername(staging);
+    const partyOptions = { clientUsernameSet, partyTypeByUsername };
 
     // Pass 1: invoice + transactions
     const invoiceRows = [];
@@ -65,7 +69,7 @@ export async function runPhaseD(ctx) {
         invoiceRows.push(buildInvoiceRow(inv));
 
         try {
-            txnRows.push(buildTransactionFromInvoice(inv, led, journal, { clientUsernameSet }));
+            txnRows.push(buildTransactionFromInvoice(inv, led, journal, partyOptions));
         } catch (err) {
             skipped++;
             if (skipped <= 10) {
@@ -119,7 +123,7 @@ export async function runPhaseD(ctx) {
             sale_id,
             invoice_id: inv.invoice_id,
             party_id: clientId,
-            party_type: "client",
+            party_type: clientId ? resolveUsernamePartyType(clientId, partyOptions) : "client",
             firm_id: inv.firm_id || null,
             sale_date: safeDate(inv.date) || inv.create_date,
             create_by: inv.create_by,
@@ -180,7 +184,7 @@ export async function runPhaseD(ctx) {
         const purchase_id = inv.payment_id || inv.invoice_id;
         const paymentId = inv.payment_id || inv.invoice_id;
         const led = ledgerByPayment.get(paymentId) || [];
-        const party = resolvePurchaseParty(inv, led, clientUsernameSet);
+        const party = resolvePurchaseParty(inv, led, partyOptions);
 
         purchaseEntryRows.push({
             branch_id: NEW_BRANCH_ID,
@@ -236,9 +240,9 @@ export async function runPhaseD(ctx) {
         invoice_no: j.invoice_no,
         transaction_id: j.journal_id,
         transaction_date: safeDate(j.date) || j.create_date,
-        party1_type: "client",
+        party1_type: j.from_username ? resolveUsernamePartyType(j.from_username, partyOptions) : "client",
         party1_id: j.from_username || null,
-        party2_type: "client",
+        party2_type: j.to_username ? resolveUsernamePartyType(j.to_username, partyOptions) : "client",
         party2_id: j.to_username || null,
         amount: Number(j.amount) || 0,
         modify_by: j.modify_by || j.create_by,
@@ -267,6 +271,7 @@ export async function runPhaseD(ctx) {
         if (mapTransactionType(inv.type) !== "expense") continue;
         const invExpenses = expensesByInvoice.get(inv.invoice_id) || [];
         if (!invExpenses.length) {
+            const partyId = inv.create_by;
             expenseEntryRows.push({
                 branch_id: NEW_BRANCH_ID,
                 expense_id: inv.payment_id || inv.invoice_id,
@@ -275,8 +280,8 @@ export async function runPhaseD(ctx) {
                 create_date: inv.create_date,
                 modify_date: inv.modify_date || inv.create_date,
                 expense_date: safeDate(inv.date) || safeDate(inv.create_date),
-                party_type: "staff",
-                party_id: inv.create_by,
+                party_type: partyId ? resolveUsernamePartyType(partyId, partyOptions) : "staff",
+                party_id: partyId,
                 amount: Number(inv.grand_total) || 0,
                 remark: "",
                 invoice_id: inv.invoice_id,
@@ -288,6 +293,7 @@ export async function runPhaseD(ctx) {
         for (const ex of invExpenses) {
             if (seenExpenseIds.has(ex.expense_id)) continue;
             seenExpenseIds.add(ex.expense_id);
+            const partyId = ex.username || ex.create_by;
             expenseEntryRows.push({
                 branch_id: NEW_BRANCH_ID,
                 expense_id: ex.expense_id,
@@ -296,8 +302,8 @@ export async function runPhaseD(ctx) {
                 create_date: ex.create_date,
                 modify_date: ex.modify_date || ex.create_date,
                 expense_date: safeDate(ex.approved_date) || safeDate(ex.create_date),
-                party_type: ex.username ? "staff" : "staff",
-                party_id: ex.username || ex.create_by,
+                party_type: partyId ? resolveUsernamePartyType(partyId, partyOptions) : "staff",
+                party_id: partyId,
                 amount: Number(ex.amount) || Number(inv.grand_total) || 0,
                 remark: ex.remark || "",
                 invoice_id: ex.invoice_id || inv.invoice_id,

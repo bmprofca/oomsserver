@@ -8,6 +8,7 @@ import {
     fetchAllClientBalancesFromStagingLedger,
     fetchLegacyDashboardBalances,
     loadStagingClientUsernameSet,
+    loadStagingPartyTypeByUsername,
     queryBranchRows,
     sumClientBalanceFromTransactions,
 } from "./utils.js";
@@ -26,6 +27,8 @@ async function buildExpectedTransactions(staging) {
     }
     const journalByPayment = new Map(journals.map((j) => [j.journal_id, j]));
     const clientUsernameSet = await loadStagingClientUsernameSet(staging);
+    const partyTypeByUsername = await loadStagingPartyTypeByUsername(staging);
+    const partyOptions = { clientUsernameSet, partyTypeByUsername };
 
     return invoices.map((inv) => {
         const paymentId = inv.payment_id || inv.invoice_id;
@@ -33,7 +36,7 @@ async function buildExpectedTransactions(staging) {
             inv,
             ledgerByPayment.get(paymentId) || [],
             journalByPayment.get(paymentId),
-            { clientUsernameSet }
+            partyOptions
         );
     });
 }

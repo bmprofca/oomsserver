@@ -1,13 +1,12 @@
 /**
  * Client balance effect rules (matches GET_BALANCE in function.js).
- * party1=sender (effect=-amount unless party2 is null i.e. opening balance),
- * party2=receiver (effect=+amount).
+ * balance = sum(party2 amounts) - sum(party1 amounts).
  */
 
 /** Per-row client balance effects from transactions (includes transaction_date). */
 export const CLIENT_BALANCE_EFFECTS_SQL = `
     SELECT party1_id AS party_id,
-           CASE WHEN party2_id IS NULL THEN amount ELSE -amount END AS effect,
+           -ABS(amount) AS effect,
            transaction_date
     FROM transactions
     WHERE branch_id = ?
@@ -16,7 +15,7 @@ export const CLIENT_BALANCE_EFFECTS_SQL = `
       AND party1_id != ''
     UNION ALL
     SELECT party2_id AS party_id,
-           amount AS effect,
+           ABS(amount) AS effect,
            transaction_date
     FROM transactions
     WHERE branch_id = ?
@@ -87,12 +86,23 @@ function clientBalanceSearchHaving(search) {
     };
 }
 
+function clientBalanceHavingClause(side, balanceAfter = 0) {
+    if (side === "debtor") {
+        const min = Math.max(0, Number(balanceAfter) || 0);
+        if (min > 0) {
+            return { sql: "HAVING balance >= ?", params: [min] };
+        }
+        return { sql: "HAVING balance > 0.02", params: [] };
+    }
+    return { sql: "HAVING balance < -0.02", params: [] };
+}
+
 /**
  * Count clients with balance on debtor/creditor side.
  * @param {'debtor'|'creditor'} side
  */
 export function clientBalanceCountSql(side) {
-    const having = side === "debtor" ? "HAVING balance > 0.02" : "HAVING balance < -0.02";
+    const { sql: balanceHaving } = clientBalanceHavingClause(side, 0);
     return `
         SELECT COUNT(*) AS total_count,
                COALESCE(SUM(balance), 0) AS total_amount
@@ -101,12 +111,12 @@ export function clientBalanceCountSql(side) {
             FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
             ${CLIENT_JOIN_SQL}
             GROUP BY b.party_id
-            ${having}
+            ${balanceHaving}
         ) counted
     `;
 }
 
-/** Params: branchId x4 (effects x2, join x1, and branchId repeated in subquery structure) */
+/** Params: branchId x3 (effects x2, join x1) */
 export function clientBalanceCountParams(branchId) {
     return [branchId, branchId, branchId];
 }
@@ -115,8 +125,8 @@ export function clientBalanceCountParams(branchId) {
  * Paginated debtor/creditor list with profile/firm joins.
  * @param {'debtor'|'creditor'} side
  */
-export function clientBalanceListSql(side, search = "") {
-    const having = side === "debtor" ? "HAVING balance > 0.02" : "HAVING balance < -0.02";
+export function clientBalanceListSql(side, search = "", balanceAfter = 0) {
+    const { sql: balanceHaving } = clientBalanceHavingClause(side, balanceAfter);
     const lastPaymentJoin = side === "debtor"
         ? `LEFT JOIN (${CLIENT_LAST_PAYMENT_SQL}) lp ON lp.party_id = b.party_id`
         : "";
@@ -160,7 +170,7 @@ export function clientBalanceListSql(side, search = "") {
             ${CLIENT_JOIN_SQL}
             ${lastPaymentJoin}
             GROUP BY b.party_id
-            ${having}
+            ${balanceHaving}
         ) agg
         INNER JOIN profile p ON p.username = agg.username
           AND LOWER(TRIM(p.user_type)) = 'client'
@@ -172,25 +182,27 @@ export function clientBalanceListSql(side, search = "") {
     `;
 }
 
-export function clientBalanceListParams(branchId, limit, offset, search = "", side = "debtor") {
+export function clientBalanceListParams(branchId, limit, offset, search = "", side = "debtor", balanceAfter = 0) {
     const { params: searchParams } = clientBalanceSearchHaving(search);
     const lastPaymentParam = side === "debtor" ? [branchId] : [];
-    return [branchId, branchId, branchId, ...lastPaymentParam, branchId, ...searchParams, limit, offset];
+    const { params: balanceParams } = clientBalanceHavingClause(side, balanceAfter);
+    return [branchId, branchId, branchId, ...lastPaymentParam, ...balanceParams, branchId, ...searchParams, limit, offset];
 }
 
-export function clientBalanceTotalSql(side, search = "") {
-    const having = side === "debtor" ? "HAVING balance > 0.02" : "HAVING balance < -0.02";
+export function clientBalanceTotalSql(side, search = "", balanceAfter = 0) {
+    const { sql: balanceHaving } = clientBalanceHavingClause(side, balanceAfter);
     const { sql: searchHaving } = clientBalanceSearchHaving(search);
     return `
-        SELECT COUNT(*) AS total
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(total_balance), 0) AS balance_sum
         FROM (
-            SELECT agg.username
+            SELECT agg.username, MAX(agg.balance) AS total_balance
             FROM (
                 SELECT b.party_id AS username, SUM(b.effect) AS balance
                 FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
                 ${CLIENT_JOIN_SQL}
                 GROUP BY b.party_id
-                ${having}
+                ${balanceHaving}
             ) agg
             INNER JOIN profile p ON p.username = agg.username
               AND LOWER(TRIM(p.user_type)) = 'client'
@@ -201,7 +213,8 @@ export function clientBalanceTotalSql(side, search = "") {
     `;
 }
 
-export function clientBalanceTotalParams(branchId, search = "") {
+export function clientBalanceTotalParams(branchId, search = "", side = "debtor", balanceAfter = 0) {
     const { params: searchParams } = clientBalanceSearchHaving(search);
-    return [branchId, branchId, branchId, branchId, ...searchParams];
+    const { params: balanceParams } = clientBalanceHavingClause(side, balanceAfter);
+    return [branchId, branchId, branchId, ...balanceParams, branchId, ...searchParams];
 }
