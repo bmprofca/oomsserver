@@ -82,7 +82,18 @@ router.get("/formats", auth, validateBranch, async (req, res) => {
         const rawType = req.query?.type;
         const bodyType = normInvoiceType(rawType || "sale");
         const active_format = await getActiveFormatKeyForInvoiceType(branch_id, bodyType);
-        const samples = await getFormatSamplePdfsBase64(bodyType);
+        
+        let samples = [];
+        try {
+            samples = await getFormatSamplePdfsBase64(bodyType);
+        } catch (err) {
+            // If the type is not supported for formats (e.g., "opening balance"), return empty array
+            if (err.message && err.message.includes("Invalid type")) {
+                samples = [];
+            } else {
+                throw err;
+            }
+        }
         
         return res.status(200).json({
             success: true,
