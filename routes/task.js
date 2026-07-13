@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../db.js";
+import { fetchPermissionRoleById } from "../helpers/permissionRole.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
@@ -88,12 +89,9 @@ async function checkUserPermission(username, branchId, permissionKey) {
         }
 
         if (userMap.permission_role_id) {
-            const [roleRows] = await pool.query(
-                "SELECT permissions_assigned FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                [userMap.permission_role_id, branchId]
-            );
-            if (roleRows.length) {
-                const rolePerms = parseUserPermissions(roleRows[0].permissions_assigned);
+            const role = await fetchPermissionRoleById(pool, userMap.permission_role_id, branchId);
+            if (role) {
+                const rolePerms = parseUserPermissions(role.permissions_assigned);
                 if (rolePerms.includes(permissionKey)) return true;
             }
         }

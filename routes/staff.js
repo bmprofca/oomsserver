@@ -501,7 +501,13 @@ router.post('/create', auth, validateBranch, async (req, res) => {
 router.get('/list', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { search = "", page = 1, limit = 20 } = req.query;
+        const {
+            search = "",
+            page = 1,
+            limit = 20,
+            status = "",
+            permission_role_id = "",
+        } = req.query;
 
         const pageNum = Number(page) || 1;
         const limitNum = Number(limit) || 20;
@@ -509,14 +515,31 @@ router.get('/list', auth, validateBranch, async (req, res) => {
 
         const searchPattern = `%${search}%`;
 
+        let filterSql = "";
+        const filterParams = [];
+
+        const normalizedStatus = String(status || "").trim().toLowerCase();
+        if (normalizedStatus === "active") {
+            filterSql += " AND bm.status = '1'";
+        } else if (normalizedStatus === "inactive") {
+            filterSql += " AND bm.status != '1'";
+        }
+
+        const roleFilter = String(permission_role_id || "").trim();
+        if (roleFilter) {
+            filterSql += " AND bm.permission_role_id = ?";
+            filterParams.push(roleFilter);
+        }
+
         const baseWhere = `
             bm.branch_id = ?
             AND bm.is_deleted = '0'
             AND (p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR bm.designation LIKE ?)
             AND u.status = '1'
             AND bm.type = 'staff'
+            ${filterSql}
         `;
-        const baseParams = [branch_id, searchPattern, searchPattern, searchPattern, searchPattern];
+        const baseParams = [branch_id, searchPattern, searchPattern, searchPattern, searchPattern, ...filterParams];
 
         const [[{ total }]] = await pool.query(
             `SELECT COUNT(*) AS total

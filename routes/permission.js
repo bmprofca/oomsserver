@@ -5,6 +5,11 @@ import pool, { poolQuery } from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
 import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
+import {
+    DEFAULT_GLOBAL_ROLES,
+    DEFAULT_PERMISSION_OPTIONS,
+} from "../helpers/permissionDefaults.js";
+import { fetchPermissionRoleById, parsePermissions } from "../helpers/permissionRole.js";
 
 // Helper to check if a user is an admin in the branch
 async function isBranchAdmin(username, branchId) {
@@ -47,6 +52,37 @@ async function resolveTargetMapping(identifier, branchId) {
     return null;
 }
 
+async function applyPermissionAssignment({
+    branch_id,
+    current_username,
+    targetMapping,
+    permission_role_id,
+    custom_permissions,
+}) {
+    let finalRoleVal = permission_role_id || null;
+    let finalCustomVal = custom_permissions !== undefined && custom_permissions !== null
+        ? JSON.stringify(custom_permissions)
+        : null;
+    let typeVal = targetMapping.type;
+
+    if (permission_role_id === 'admin') {
+        typeVal = 'admin';
+        finalRoleVal = null;
+        finalCustomVal = null;
+    } else if (targetMapping.type === 'admin') {
+        typeVal = 'staff';
+    }
+
+    await pool.query(
+        `UPDATE branch_mapping 
+         SET type = ?, permission_role_id = ?, custom_permissions = ?, modify_by = ? 
+         WHERE username = ? AND branch_id = ? AND is_deleted = '0'`,
+        [typeVal, finalRoleVal, finalCustomVal, current_username, targetMapping.username, branch_id]
+    );
+
+    return targetMapping.username;
+}
+
 
 // 1. GET /options - Retrieve all available permission options (global)
 router.get('/options', auth, async (req, res) => {
@@ -54,7 +90,7 @@ router.get('/options', auth, async (req, res) => {
         const [rows] = await pool.query(
             "SELECT id, p_option_id, name, status FROM permission_option WHERE status = '1' ORDER BY name ASC"
         );
-        
+
         res.status(200).json({
             success: true,
             message: 'Permission options retrieved successfully',
@@ -76,34 +112,19 @@ router.get('/options', auth, async (req, res) => {
     }
 });
 
-// Helper to parse role permissions safely
-function parsePermissions(permissionsAssigned) {
-    if (!permissionsAssigned) return [];
-    try {
-        const parsed = typeof permissionsAssigned === 'string'
-            ? JSON.parse(permissionsAssigned)
-            : permissionsAssigned;
-        if (parsed && parsed.permissions && Array.isArray(parsed.permissions)) {
-            return parsed.permissions;
-        } else if (Array.isArray(parsed)) {
-            return parsed;
-        }
-    } catch (e) {
-        console.warn("Failed to parse permissions string:", e);
-    }
-    return [];
-}
+// Helper to parse role permissions safely — see helpers/permissionRole.js
 
-// 2. GET /list - Retrieve all roles for a branch
+// 2. GET /list - Retrieve branch roles plus global default roles (branch_id IS NULL)
 const listRolesHandler = async (req, res) => {
     try {
         const branch_id = req.branch_id;
         
         const [rows] = await pool.query(
-            `SELECT permission_role_id, name, permissions_assigned, remark, create_date, create_by, modify_date, modify_by 
+            `SELECT permission_role_id, name, permissions_assigned, remark, branch_id,
+                    create_date, create_by, modify_date, modify_by 
              FROM permission_role 
-             WHERE branch_id = ? 
-             ORDER BY name ASC`,
+             WHERE branch_id = ? OR branch_id IS NULL
+             ORDER BY branch_id IS NULL DESC, name ASC`,
             [branch_id]
         );
         
@@ -111,13 +132,15 @@ const listRolesHandler = async (req, res) => {
             permission_role_id: role.permission_role_id,
             name: role.name,
             permissions: parsePermissions(role.permissions_assigned),
+            branch_id: role.branch_id,
+            is_global: role.branch_id === null,
             remark: role.remark,
             create_date: role.create_date,
             create_by: role.create_by,
             modify_date: role.modify_date,
             modify_by: role.modify_by
         }));
-        
+
         res.status(200).json({
             success: true,
             message: 'Permission roles retrieved successfully',
@@ -142,7 +165,7 @@ router.post('/role/create', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const current_username = req.headers["username"] || req.headers["Username"] || '';
-        
+
         // Authorization check: Must be a branch admin
         const isAdmin = await isBranchAdmin(current_username, branch_id);
         if (!isAdmin) {
@@ -153,7 +176,7 @@ router.post('/role/create', auth, validateBranch, async (req, res) => {
         }
 
         const { name, permissions, remark } = req.body || {};
-        
+
         if (!name || String(name).trim() === '') {
             return res.status(400).json({
                 success: false,
@@ -205,7 +228,7 @@ router.put('/role/update', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const current_username = req.headers["username"] || req.headers["Username"] || '';
-        
+
         // Authorization check: Must be a branch admin
         const isAdmin = await isBranchAdmin(current_username, branch_id);
         if (!isAdmin) {
@@ -224,13 +247,20 @@ router.put('/role/update', auth, validateBranch, async (req, res) => {
             });
         }
 
-        // Verify role exists in the branch
+        // Verify role exists in the branch (branch-owned roles only; global roles are read-only)
         const [existing] = await pool.query(
-            "SELECT id FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
+            "SELECT id, branch_id FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
             [permission_role_id, branch_id]
         );
 
         if (existing.length === 0) {
+            const globalRole = await fetchPermissionRoleById(pool, permission_role_id, branch_id);
+            if (globalRole?.branch_id === null) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Global default roles cannot be modified'
+                });
+            }
             return res.status(404).json({
                 success: false,
                 message: 'Permission role not found'
@@ -294,7 +324,7 @@ router.delete('/role/delete', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const current_username = req.headers["username"] || req.headers["Username"] || '';
-        
+
         // Authorization check: Must be a branch admin
         const isAdmin = await isBranchAdmin(current_username, branch_id);
         if (!isAdmin) {
@@ -313,13 +343,20 @@ router.delete('/role/delete', auth, validateBranch, async (req, res) => {
             });
         }
 
-        // Verify role exists in the branch
+        // Verify role exists in the branch (branch-owned roles only; global roles are read-only)
         const [existing] = await pool.query(
-            "SELECT id FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
+            "SELECT id, branch_id FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
             [permission_role_id, branch_id]
         );
 
         if (existing.length === 0) {
+            const globalRole = await fetchPermissionRoleById(pool, permission_role_id, branch_id);
+            if (globalRole?.branch_id === null) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Global default roles cannot be deleted'
+                });
+            }
             return res.status(404).json({
                 success: false,
                 message: 'Permission role not found'
@@ -401,11 +438,8 @@ router.post('/assign', auth, validateBranch, async (req, res) => {
 
         // Verify permission_role_id if provided (and not 'admin')
         if (permission_role_id && permission_role_id !== 'admin') {
-            const [roleCheck] = await pool.query(
-                "SELECT id FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                [permission_role_id, branch_id]
-            );
-            if (roleCheck.length === 0) {
+            const role = await fetchPermissionRoleById(pool, permission_role_id, branch_id);
+            if (!role) {
                 return res.status(404).json({
                     success: false,
                     message: 'Assigned permission role not found'
@@ -423,24 +457,13 @@ router.post('/assign', auth, validateBranch, async (req, res) => {
             }
         }
 
-        let finalRoleVal = permission_role_id || null;
-        let finalCustomVal = custom_permissions ? JSON.stringify(custom_permissions) : null;
-        let typeVal = targetMapping.type;
-
-        if (permission_role_id === 'admin') {
-            typeVal = 'admin';
-            finalRoleVal = null;
-            finalCustomVal = null;
-        } else if (targetMapping.type === 'admin') {
-            typeVal = 'staff';
-        }
-
-        await pool.query(
-            `UPDATE branch_mapping 
-             SET type = ?, permission_role_id = ?, custom_permissions = ?, modify_by = ? 
-             WHERE username = ? AND branch_id = ? AND is_deleted = '0'`,
-            [typeVal, finalRoleVal, finalCustomVal, current_username, targetMapping.username, branch_id]
-        );
+        await applyPermissionAssignment({
+            branch_id,
+            current_username,
+            targetMapping,
+            permission_role_id,
+            custom_permissions,
+        });
 
         res.status(200).json({
             success: true,
@@ -456,12 +479,112 @@ router.post('/assign', auth, validateBranch, async (req, res) => {
     }
 });
 
+// 6b. POST /assign/bulk - Assign the same permission role to multiple users
+router.post('/assign/bulk', auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const current_username = req.headers["username"] || req.headers["Username"] || '';
+
+        const isAdmin = await isBranchAdmin(current_username, branch_id);
+        if (!isAdmin) {
+            return res.status(403).json({
+                success: false,
+                message: 'Unauthorized: Only branch administrators can assign user permissions'
+            });
+        }
+
+        const { usernames, permission_role_id, custom_permissions } = req.body || {};
+
+        if (!usernames || !Array.isArray(usernames) || usernames.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing or invalid parameter: usernames must be a non-empty array'
+            });
+        }
+
+        if (usernames.length > 100) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot update more than 100 users at once'
+            });
+        }
+
+        if (permission_role_id && permission_role_id !== 'admin') {
+            const role = await fetchPermissionRoleById(pool, permission_role_id, branch_id);
+            if (!role) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Assigned permission role not found'
+                });
+            }
+        }
+
+        if (custom_permissions !== undefined && custom_permissions !== null && !Array.isArray(custom_permissions)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid parameter: custom_permissions must be an array of strings'
+            });
+        }
+
+        const updated = [];
+        const failed = [];
+
+        for (const rawUsername of usernames) {
+            const identifier = String(rawUsername || '').trim();
+            if (!identifier) {
+                failed.push({ username: rawUsername, reason: 'Empty username' });
+                continue;
+            }
+
+            const targetMapping = await resolveTargetMapping(identifier, branch_id);
+            if (!targetMapping) {
+                failed.push({ username: identifier, reason: 'User is not mapped to this branch' });
+                continue;
+            }
+
+            try {
+                const appliedUsername = await applyPermissionAssignment({
+                    branch_id,
+                    current_username,
+                    targetMapping,
+                    permission_role_id: permission_role_id || null,
+                    custom_permissions: custom_permissions ?? [],
+                });
+                updated.push(appliedUsername);
+            } catch (assignError) {
+                failed.push({
+                    username: identifier,
+                    reason: assignError.message || 'Assignment failed',
+                });
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: `Permissions updated for ${updated.length} staff member(s)`,
+            data: {
+                updated,
+                failed,
+                updated_count: updated.length,
+                failed_count: failed.length,
+            },
+        });
+    } catch (error) {
+        console.error('Error bulk assigning user permissions:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to bulk assign user permissions',
+            error: error.message,
+        });
+    }
+});
+
 // 7. GET /user-permissions - Resolve and fetch active permissions of a user in a branch
 router.get('/user-permissions', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const current_username = req.headers["username"] || req.headers["Username"] || '';
-        
+
         // If username is supplied in query, use it; otherwise use the current user
         const targetUsername = req.query.username ? String(req.query.username).trim() : current_username;
 
@@ -495,14 +618,11 @@ router.get('/user-permissions', auth, validateBranch, async (req, res) => {
                 resolvedPermissions.add('office_assistance_access');
             }
 
-            // 1. Merge permissions from their assigned role
+            // 1. Merge permissions from their assigned role (branch or global)
             if (effectiveRoleId) {
-                const [roleRows] = await pool.query(
-                    "SELECT permissions_assigned FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                    [effectiveRoleId, branch_id]
-                );
-                if (roleRows.length > 0) {
-                    const rolePerms = parsePermissions(roleRows[0].permissions_assigned);
+                const role = await fetchPermissionRoleById(pool, effectiveRoleId, branch_id);
+                if (role) {
+                    const rolePerms = parsePermissions(role.permissions_assigned);
                     rolePerms.forEach(perm => {
                         if (activeOptionIds.has(perm)) {
                             resolvedPermissions.add(perm);
@@ -528,11 +648,8 @@ router.get('/user-permissions', auth, validateBranch, async (req, res) => {
             if (effectiveRoleId === 'admin') {
                 roleName = 'Administrator';
             } else {
-                const [roleMeta] = await pool.query(
-                    "SELECT name FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                    [effectiveRoleId, branch_id]
-                );
-                roleName = roleMeta?.[0]?.name || null;
+                const role = await fetchPermissionRoleById(pool, effectiveRoleId, branch_id);
+                roleName = role?.name || null;
             }
         }
 
@@ -566,7 +683,7 @@ router.get('/check', auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const current_username = req.headers["username"] || req.headers["Username"] || '';
-        
+
         // If username is supplied in query, use it; otherwise use the current user
         const targetUsername = req.query.username ? String(req.query.username).trim() : current_username;
         const permission = req.query.permission ? String(req.query.permission).trim() : '';
@@ -648,14 +765,11 @@ router.get('/check', auth, validateBranch, async (req, res) => {
             }
         }
 
-        // 2. Check permissions from their assigned role
+        // 2. Check permissions from their assigned role (branch or global)
         if (userMap.permission_role_id) {
-            const [roleRows] = await pool.query(
-                "SELECT permissions_assigned FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                [userMap.permission_role_id, branch_id]
-            );
-            if (roleRows.length > 0) {
-                const rolePerms = parsePermissions(roleRows[0].permissions_assigned);
+            const role = await fetchPermissionRoleById(pool, userMap.permission_role_id, branch_id);
+            if (role) {
+                const rolePerms = parsePermissions(role.permissions_assigned);
                 if (rolePerms.includes(permission)) {
                     return res.status(200).json({
                         success: true,
@@ -687,33 +801,59 @@ router.get('/check', auth, validateBranch, async (req, res) => {
     }
 });
 
-const TASK_GET_IN_PERMISSION = {
-    p_option_id: "task_get_in",
-    name: "Task Get In",
-};
-
-async function ensureDefaultPermissionOptions() {
-    try {
+async function ensurePermissionOptions(pool) {
+    for (const option of DEFAULT_PERMISSION_OPTIONS) {
         const [existing] = await poolQuery(
             "SELECT id FROM permission_option WHERE p_option_id = ? LIMIT 1",
-            [TASK_GET_IN_PERMISSION.p_option_id],
+            [option.p_option_id],
             { retries: 3, delayMs: 1000 }
         );
-
         if (!existing.length) {
             await poolQuery(
                 "INSERT INTO permission_option (p_option_id, name, status) VALUES (?, ?, '1')",
-                [TASK_GET_IN_PERMISSION.p_option_id, TASK_GET_IN_PERMISSION.name],
+                [option.p_option_id, option.name],
                 { retries: 3, delayMs: 1000 }
             );
         }
+    }
+}
+
+async function ensureGlobalDefaultRoles(pool) {
+    for (const role of DEFAULT_GLOBAL_ROLES) {
+        const [existing] = await poolQuery(
+            "SELECT id FROM permission_role WHERE permission_role_id = ? AND branch_id IS NULL LIMIT 1",
+            [role.permission_role_id],
+            { retries: 3, delayMs: 1000 }
+        );
+        if (existing.length) continue;
+
+        await poolQuery(
+            `INSERT INTO permission_role (
+                branch_id, permission_role_id, name, permissions_assigned, remark,
+                create_by, modify_by, create_date, modify_date
+            ) VALUES (NULL, ?, ?, ?, ?, 'system', 'system', NOW(), NOW())`,
+            [
+                role.permission_role_id,
+                role.name,
+                JSON.stringify(role.permissions),
+                role.remark,
+            ],
+            { retries: 3, delayMs: 1000 }
+        );
+    }
+}
+
+async function ensurePermissionSystemDefaults() {
+    try {
+        await ensurePermissionOptions(pool);
+        await ensureGlobalDefaultRoles(pool);
     } catch (error) {
-        console.error("Error ensuring default permission options:", error.message || error);
+        console.error("Error ensuring permission system defaults:", error.message || error);
     }
 }
 
 setTimeout(() => {
-    ensureDefaultPermissionOptions();
+    ensurePermissionSystemDefaults();
 }, 3000);
 
 // 9. POST /option/create - Register a new permission option (admin only)

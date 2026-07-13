@@ -23,6 +23,8 @@
     "migrate:v3:staff-import": "node database/scripts/migrate-v3/staff-import.js",
     "migrate:v3:staff": "node database/scripts/migrate-v3/staff-reset.js --force && node database/scripts/migrate-v3/staff-import.js",
     "migrate:v3:staff-verify": "node database/scripts/migrate-v3/staff-verify.js",
+    "migrate:v3:attendance-reset": "node database/scripts/migrate-v3/attendance-reset.js",
+    "migrate:v3:permission-reset": "node database/scripts/migrate-v3/permission-reset.js",
     "invoice-format-samples": "node scripts/generate-invoice-format-samples.js",
     "worker": "node workers/email-broadcast-worker.js",
     "dev:worker": "nodemon workers/email-broadcast-worker.js",

@@ -2,6 +2,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
+import { fetchPermissionRoleById } from "../helpers/permissionRole.js";
 import { USER_SNIPPED_DATA, TODAY_DATE } from "../helpers/function.js";
 import {
     clientBalanceCountParams,
@@ -161,14 +162,11 @@ async function checkUserPermission(username, branchId, permissionKey) {
             if (customPerms.includes(permissionKey)) return true;
         }
 
-        // 5. Check permissions from their assigned role
+        // 5. Check permissions from their assigned role (branch or global)
         if (userMap.permission_role_id) {
-            const [roleRows] = await pool.query(
-                "SELECT permissions_assigned FROM permission_role WHERE permission_role_id = ? AND branch_id = ? LIMIT 1",
-                [userMap.permission_role_id, branchId]
-            );
-            if (roleRows.length > 0) {
-                const rolePerms = parsePermissions(roleRows[0].permissions_assigned);
+            const role = await fetchPermissionRoleById(pool, userMap.permission_role_id, branchId);
+            if (role) {
+                const rolePerms = parsePermissions(role.permissions_assigned);
                 if (rolePerms.includes(permissionKey)) return true;
             }
         }
