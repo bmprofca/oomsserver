@@ -444,7 +444,13 @@ export async function generateSchedulesForAssignment(connectionOrPool, assignmen
         }
 
         let freq = assignment.frequency;
-        if (assignment.service_id && (assignment.service_id.toUpperCase() === 'GSTR-1' || assignment.service_id.toUpperCase() === 'GSTR-3B')) {
+        const monthlyGstServiceIds = new Set([
+            'gstr-1',
+            'gstr-3b',
+            'gstr-1-regular-monthly',
+            'gstr-3b-monthly',
+        ]);
+        if (assignment.service_id && monthlyGstServiceIds.has(String(assignment.service_id).toLowerCase())) {
             freq = 'monthly';
         }
 
@@ -602,5 +608,101 @@ export function filterSchedulesByRecurringRules(rows, now = new Date()) {
         // Fallback for any other frequency: default to keeping it
         return true;
     });
+}
+
+function startOfCalendarDay(date) {
+    const d = date instanceof Date ? date : new Date(date);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+
+export function getCompliancePeriodVisibilityStart(row, now = new Date()) {
+    const period = row.period_name ?? row.compliance_period;
+    const fy = row.financial_year ?? row.compliance_year;
+    const frequency = row.frequency;
+    const dueDay = row.due_date;
+    const visibilityOffset = row.visibility_offset != null ? Number(row.visibility_offset) : 0;
+
+    if (!period || !fy) {
+        return startOfCalendarDay(now);
+    }
+
+    if (visibilityOffset < 0) {
+        return startOfCalendarDay(getPeriodStartDate(period, fy));
+    }
+
+    const dueDate = getPeriodDueDate(period, fy, dueDay);
+    return new Date(dueDate.getFullYear(), dueDate.getMonth(), 1, 0, 0, 0, 0);
+}
+
+export function isCompliancePeriodVisible(row, now = new Date()) {
+    const visibilityStart = getCompliancePeriodVisibilityStart(row, now);
+    return startOfCalendarDay(now) >= visibilityStart;
+}
+
+export function filterCompliancePeriodsByVisibility(rows, now = new Date()) {
+    if (!Array.isArray(rows)) return [];
+    return rows.filter((row) => isCompliancePeriodVisible(row, now));
+}
+
+export function buildComplianceTaskLookupKey(row) {
+    const serviceId = row.service_id;
+    const firmId = row.firm_id;
+    const complianceYear = row.compliance_year ?? row.financial_year;
+    const rawPeriod = row.compliance_period ?? row.period_name;
+    const frequency = row.frequency;
+    const period = isYearlyComplianceFrequency(frequency) || rawPeriod == null || rawPeriod === ""
+        ? "Annual"
+        : rawPeriod;
+    return `${serviceId}|${firmId}|${complianceYear}|${period}`;
+}
+
+export function expandComplianceFirmPeriods(firmRows, { complianceYear, compliancePeriod } = {}) {
+    const now = new Date();
+    const targetYear = complianceYear
+        ? normalizeFinancialYear(complianceYear)
+        : getFinancialYearForDate(now);
+    const currentFy = getFinancialYearForDate(now);
+    const explicitPeriod = compliancePeriod != null ? String(compliancePeriod).trim() : "";
+    const expanded = [];
+
+    for (const firm of firmRows) {
+        const isYearly = isYearlyComplianceFrequency(firm.frequency);
+        const periods = isYearly
+            ? ["Annual"]
+            : explicitPeriod
+                ? [explicitPeriod]
+                : getPeriodsForFrequency(firm.frequency);
+
+        for (const period of periods) {
+            if (
+                !isCompliancePeriodOnOrAfterEffective(
+                    targetYear,
+                    period,
+                    firm.effective_from,
+                    firm.frequency
+                )
+            ) {
+                continue;
+            }
+
+            expanded.push({
+                ...firm,
+                compliance_year: targetYear,
+                compliance_period: period,
+                period_name: period,
+                financial_year: targetYear,
+                create_date: firm.create_date,
+            });
+        }
+    }
+
+    if (!explicitPeriod && targetYear === currentFy) {
+        return filterCompliancePeriodsByVisibility(
+            filterSchedulesByRecurringRules(expanded, now),
+            now
+        );
+    }
+
+    return filterCompliancePeriodsByVisibility(expanded, now);
 }
 

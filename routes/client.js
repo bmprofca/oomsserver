@@ -629,8 +629,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 ca.custom_fields,
                 f.firm_name, 
                 s.name AS service_name, 
-                s.frequency,
-                s.fields
+                s.frequency
              FROM compliance_assignments ca
              INNER JOIN firms f ON ca.firm_id = f.firm_id
              INNER JOIN services s ON ca.service_id = s.service_id
@@ -650,31 +649,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 }
             } else {
                 item.custom_fields = {};
-            }
-
-            // Parse fields
-            if (item.fields) {
-                try {
-                    item.fields = JSON.parse(item.fields);
-                } catch (e) {
-                    item.fields = [];
-                }
-            } else {
-                // Predefined fallback
-                if (item.service_id === 'ptax') {
-                    item.fields = [
-                        { key: "ptax_reg_no", label: "Ptax Reg No", type: "text" },
-                        { key: "ptax_user_id", label: "User ID", type: "text" },
-                        { key: "ptax_password", label: "Password", type: "password" }
-                    ];
-                } else if (item.service_id === 'GSTR-1' || item.service_id === 'GSTR-3B') {
-                    item.fields = [
-                        { key: "gst_login_id", label: "GST Login ID", type: "text" },
-                        { key: "gst_password", label: "Password", type: "password" }
-                    ];
-                } else {
-                    item.fields = [];
-                }
             }
 
             item.employee = item.employee_username ? await USER_SNIPPED_DATA(item.employee_username) : null;
@@ -704,7 +678,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 f.firm_name, 
                 s.name AS service_name, 
                 s.frequency,
-                s.fields,
                 ca.create_date,
                 ca.modify_date,
                 ca.pay_from_month
@@ -756,31 +729,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 item.custom_fields = {};
             }
 
-            // Parse fields
-            if (item.fields) {
-                try {
-                    item.fields = JSON.parse(item.fields);
-                } catch (e) {
-                    item.fields = [];
-                }
-            } else {
-                // Predefined fallback
-                if (item.service_id === 'ptax') {
-                    item.fields = [
-                        { key: "ptax_reg_no", label: "Ptax Reg No", type: "text" },
-                        { key: "ptax_user_id", label: "User ID", type: "text" },
-                        { key: "ptax_password", label: "Password", type: "password" }
-                    ];
-                } else if (item.service_id === 'GSTR-1' || item.service_id === 'GSTR-3B') {
-                    item.fields = [
-                        { key: "gst_login_id", label: "GST Login ID", type: "text" },
-                        { key: "gst_password", label: "Password", type: "password" }
-                    ];
-                } else {
-                    item.fields = [];
-                }
-            }
-
             item.employee = item.employee_username ? await USER_SNIPPED_DATA(item.employee_username) : null;
             item.ca = item.ca_id ? await USER_SNIPPED_DATA(item.ca_id) : null;
         }
@@ -807,8 +755,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 ca.custom_fields,
                 f.firm_name, 
                 s.name AS service_name, 
-                s.frequency,
-                s.fields
+                s.frequency
              FROM compliance_schedules cs
              INNER JOIN compliance_assignments ca ON cs.assignment_id = ca.assignment_id
              INNER JOIN firms f ON ca.firm_id = f.firm_id
@@ -835,31 +782,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 }
             } else {
                 item.custom_fields = {};
-            }
-
-            // Parse fields
-            if (item.fields) {
-                try {
-                    item.fields = JSON.parse(item.fields);
-                } catch (e) {
-                    item.fields = [];
-                }
-            } else {
-                // Predefined fallback
-                if (item.service_id === 'ptax') {
-                    item.fields = [
-                        { key: "ptax_reg_no", label: "Ptax Reg No", type: "text" },
-                        { key: "ptax_user_id", label: "User ID", type: "text" },
-                        { key: "ptax_password", label: "Password", type: "password" }
-                    ];
-                } else if (item.service_id === 'GSTR-1' || item.service_id === 'GSTR-3B') {
-                    item.fields = [
-                        { key: "gst_login_id", label: "GST Login ID", type: "text" },
-                        { key: "gst_password", label: "Password", type: "password" }
-                    ];
-                } else {
-                    item.fields = [];
-                }
             }
 
             item.employee = item.employee_username ? await USER_SNIPPED_DATA(item.employee_username) : null;

@@ -427,8 +427,7 @@ router.get("/services", authAdmin, async (req, res) => {
                 s.frequency,
                 s.default_amount,
                 s.remark AS service_remark,
-                s.default_due_date,
-                s.fields
+                s.default_due_date
             ${baseFrom}
             ORDER BY s.name ASC
             LIMIT ? OFFSET ?`,

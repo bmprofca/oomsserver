@@ -17,47 +17,7 @@ function formatService(row) {
         default_amount: Number(row.default_amount) || 0,
         remark: row.remark,
         due_day: row.default_due_date ?? row.due_day ?? null,
-        fields: parseFields(row.fields),
     };
-}
-
-function parseFields(value) {
-    if (value === undefined || value === null || String(value).trim() === "") {
-        return null;
-    }
-    try {
-        return JSON.parse(value);
-    } catch {
-        return value;
-    }
-}
-
-function normalizeComplianceFields(fields, serviceType) {
-    if (serviceType !== "compliance" || fields == null) {
-        return null;
-    }
-
-    let parsed = fields;
-    if (typeof fields === "string") {
-        try {
-            parsed = JSON.parse(fields);
-        } catch {
-            return null;
-        }
-    }
-
-    if (!Array.isArray(parsed)) {
-        return null;
-    }
-
-    const normalized = parsed
-        .map((item) => ({
-            label: String(item?.label ?? "").trim(),
-            is_required: Boolean(item?.is_required),
-        }))
-        .filter((item) => item.label);
-
-    return normalized.length ? JSON.stringify(normalized) : null;
 }
 
 function validateServiceId(value) {
@@ -120,8 +80,7 @@ router.get("/list", authAdmin, async (req, res) => {
                 s.frequency,
                 s.default_amount,
                 s.remark,
-                s.default_due_date,
-                s.fields
+                s.default_due_date
             ${baseFrom}
             ORDER BY s.name ASC
             LIMIT ? OFFSET ?`,
@@ -169,7 +128,6 @@ router.post("/create", authAdmin, async (req, res) => {
             remark,
             due_day,
             default_due_date,
-            fields,
         } = req.body || {};
 
         if (!name || String(name).trim() === "") {
@@ -223,12 +181,11 @@ router.post("/create", authAdmin, async (req, res) => {
         const rem = remark != null ? String(remark).trim() : null;
         const dueDayRaw = default_due_date ?? due_day;
         const dueDayVal = dueDayRaw != null ? Number(dueDayRaw) : 10;
-        const fieldsJson = normalizeComplianceFields(fields, serviceType);
 
         await pool.query(
-            `INSERT INTO services (service_id, name, sac_code, type, frequency, default_amount, remark, default_due_date, fields)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [sid, String(name).trim(), sac, serviceType, freq, amount, rem, dueDayVal, fieldsJson]
+            `INSERT INTO services (service_id, name, sac_code, type, frequency, default_amount, remark, default_due_date)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [sid, String(name).trim(), sac, serviceType, freq, amount, rem, dueDayVal]
         );
 
         const [rows] = await pool.query(

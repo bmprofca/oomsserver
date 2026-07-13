@@ -1,5 +1,4 @@
 import express from "express";
-import path from "path";
 const router = express.Router();
 import authRoutes from "./auth.js";
 import subscriptionRoutes from "./subscription.js";
@@ -39,7 +38,6 @@ import exportRoutes from "./export.js";
 import paymentreminderRoutes from "./payment_reminder.js";
 import autopayRoutes from "./autopay.js";
 import walletRoutes from "./wallet.js";
-import botRoutes from "./bot.js";
 import complianceRoutes from "./compliance.js";
 import whatsappRoutes from "./whatsapp.js";
 import backupRoutes from "./backup.js";
@@ -85,12 +83,8 @@ router.use("/export", exportRoutes);
 router.use("/payment-reminder", paymentreminderRoutes);
 router.use("/autopay", autopayRoutes);
 router.use("/wallet", walletRoutes);
-router.use("/bot", botRoutes);
 router.use("/compliance", complianceRoutes);
 router.use("/recurring-task", complianceRoutes);
 router.use("/backup", backupRoutes);
-
-// Static chat media files
-router.use("/chat-media", express.static(path.join(process.cwd(), "/media/chat")));
 
 export default router;

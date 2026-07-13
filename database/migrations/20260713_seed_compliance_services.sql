@@ -1,0 +1,2 @@
+-- Seed active compliance services (companion to seed-compliance-services.js)
+-- Run via: node database/scripts/seed-compliance-services.js --apply

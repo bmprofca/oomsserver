@@ -1,4 +1,4 @@
--- Migration: Add required_fields column to services table and populate it for ptax & GSTR-1
+-- Migration: Add required_fields column to services table and populate it for ptax & gstr-1-regular-monthly
 ALTER TABLE services ADD COLUMN required_fields TEXT DEFAULT NULL;
 
 UPDATE services 
@@ -7,4 +7,4 @@ WHERE service_id = 'ptax';
 
 UPDATE services 
 SET required_fields = '[{"key":"gst_login_id","label":"GST Login ID","type":"text"},{"key":"gst_password","label":"Password","type":"password"}]' 
-WHERE service_id = 'GSTR-1';
+WHERE service_id = 'gstr-1-regular-monthly';

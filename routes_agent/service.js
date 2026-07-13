@@ -101,18 +101,6 @@ function calculateMarginAmount(serviceFees, margin) {
     return Number(((fees * marginValue) / 100).toFixed(2));
 }
 
-function parseRequiredFields(value) {
-    if (value === undefined || value === null || String(value).trim() === "") {
-        return null;
-    }
-
-    try {
-        return JSON.parse(value);
-    } catch (_) {
-        return value;
-    }
-}
-
 function formatMarginBlock(fees, margin) {
     return {
         margin_type: margin.margin_type,
@@ -131,7 +119,6 @@ function formatServiceDetails(row, margin) {
     const serviceBlock = {
         remark: row.service_remark,
         default_amount: Number(row.default_amount) || 0,
-        fields: parseRequiredFields(row.fields),
     };
 
     if (isCompliance) {
@@ -170,7 +157,6 @@ const SERVICE_SELECT_FIELDS = `
     s.default_due_date,
     s.default_amount,
     s.remark AS service_remark,
-    s.fields,
     bs.fees,
     bs.gst_rate,
     bs.gst_value,

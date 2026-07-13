@@ -12,7 +12,12 @@ import {
     clientBalanceTotalParams,
     clientBalanceTotalSql,
 } from "../helpers/clientBalanceSql.js";
-import { filterSchedulesByRecurringRules } from "../helpers/recurringTaskHelper.js";
+import {
+    filterSchedulesByRecurringRules,
+    buildComplianceTaskLookupKey,
+    expandComplianceFirmPeriods,
+    filterCompliancePeriodsByVisibility,
+} from "../helpers/recurringTaskHelper.js";
 
 const router = express.Router();
 // ========== GLOBAL HELPER FUNCTIONS (Available to all routes) ==========
@@ -68,7 +73,6 @@ function getComplianceStatusCategory(status) {
     if (s === 'pending from client') return 'PFC';
     if (s === 'complete') return 'CPL';
     if (s === 'cancel') return 'CNL';
-    if (s === 'n/a') return 'CNL';
     return null;
 }
 
@@ -350,7 +354,15 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                 message: "Unauthorized: You do not have permission to view this card"
             });
         }
-        const { service_ids, search } = req.query;
+        const { service_ids, search, type } = req.query;
+        const serviceType = type != null ? String(type).trim().toLowerCase() : "";
+
+        if (serviceType && !["general", "compliance"].includes(serviceType)) {
+            return res.status(400).json({
+                success: false,
+                message: "type must be empty, 'general', or 'compliance'",
+            });
+        }
 
         // Parse service_ids - can be single or multiple (comma separated)
         let serviceIdArray = [];
@@ -383,6 +395,12 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             serviceParams.push(...serviceIdArray);
         }
 
+        // Always filter by service type when requested (even with service_ids)
+        if (serviceType) {
+            serviceQuery += ` AND s.type = ?`;
+            serviceParams.push(serviceType);
+        }
+
         // Add search filter
         if (search && String(search).trim() !== "") {
             const searchPattern = `%${String(search).trim()}%`;
@@ -406,7 +424,8 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                     category_totals: {
                         OD: 0, DT: 0, D7: 0, FT: 0,
                         WIP: 0, PFC: 0, PFD: 0,
-                        CPL: 0, CNL: 0
+                        CPL: 0, CNL: 0,
+                        yet_no_started: 0
                     }
                 }
             });
@@ -433,15 +452,84 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             SELECT 
                 cs.schedule_id AS task_id,
                 ca.service_id,
-                cs.due_date,
-                cs.status
+                ca.firm_id,
+                cs.financial_year,
+                cs.period_name,
+                cs.due_date AS schedule_due_date,
+                cs.status,
+                s.frequency,
+                ca.create_date,
+                ca.modify_date,
+                ca.pay_from_month,
+                cf.due_date,
+                cf.visibility_offset
             FROM compliance_schedules cs
             INNER JOIN compliance_assignments ca ON cs.assignment_id = ca.assignment_id
             INNER JOIN firms f ON ca.firm_id = f.firm_id
+            INNER JOIN services s ON ca.service_id = s.service_id
+            LEFT JOIN compliance_firms cf
+                ON cf.branch_id = f.branch_id
+               AND cf.service_id = ca.service_id
+               AND cf.firm_id = ca.firm_id
+               AND cf.is_deleted = '0'
             WHERE f.branch_id = ? AND f.is_deleted = '0'
             AND ca.service_id IN (${taskPlaceholders})
         `;
         const [complianceTasks] = await pool.query(complianceQuery, [branch_id, ...serviceIdList]);
+
+        const complianceTasksForVisibility = complianceTasks.map((row) => ({
+            ...row,
+            visibility_offset: row.visibility_offset != null ? Number(row.visibility_offset) : 0,
+        }));
+
+        const visibleComplianceSchedules = filterCompliancePeriodsByVisibility(
+            filterSchedulesByRecurringRules(complianceTasksForVisibility),
+            new Date()
+        );
+
+        const [startedComplianceTasks] = await pool.query(
+            `SELECT t.service_id, t.firm_id, t.compliance_year, t.compliance_period, s.frequency
+             FROM tasks t
+             INNER JOIN services s ON t.service_id = s.service_id
+             WHERE t.branch_id = ?
+               AND t.task_type = 'compliance'
+               AND t.service_id IN (${taskPlaceholders})`,
+            [branch_id, ...serviceIdList]
+        );
+
+        const startedComplianceTaskKeys = new Set(
+            startedComplianceTasks.map((task) => buildComplianceTaskLookupKey(task))
+        );
+
+        const complianceServiceIds = services
+            .filter((service) => String(service.service_type || "").toLowerCase() === "compliance")
+            .map((service) => service.service_id);
+
+        let expandedComplianceFirmPeriods = [];
+        if (complianceServiceIds.length > 0) {
+            const complianceFirmPlaceholders = complianceServiceIds.map(() => "?").join(",");
+            const [complianceFirmRows] = await pool.query(
+                `SELECT cf.service_id,
+                        cf.firm_id,
+                        cf.effective_from,
+                        cf.create_date,
+                        cf.modify_date,
+                        cf.due_date,
+                        cf.visibility_offset,
+                        s.frequency
+                 FROM compliance_firms cf
+                 INNER JOIN services s ON s.service_id = cf.service_id
+                 INNER JOIN firms f
+                    ON f.firm_id = cf.firm_id
+                   AND f.branch_id = cf.branch_id
+                   AND f.is_deleted = '0'
+                 WHERE cf.branch_id = ?
+                   AND cf.is_deleted = '0'
+                   AND cf.service_id IN (${complianceFirmPlaceholders})`,
+                [branch_id, ...complianceServiceIds]
+            );
+            expandedComplianceFirmPeriods = expandComplianceFirmPeriods(complianceFirmRows, {});
+        }
 
         // Helper function to get due date category (OD, DT, D7, FT)
         function getDueDateCategory(dueDate) {
@@ -487,6 +575,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             OD: 0, DT: 0, D7: 0, FT: 0,
             WIP: 0, PFC: 0, PFD: 0,
             CPL: 0, CNL: 0,
+            yet_no_started: 0,
             total_active_tasks: 0,
             total_all_tasks: 0
         };
@@ -494,7 +583,10 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
         for (const service of services) {
             // Filter tasks for this service
             const serviceTasks = tasks.filter(t => t.service_id === service.service_id);
-            const serviceSchedules = complianceTasks.filter(cs => cs.service_id === service.service_id);
+            const serviceSchedules = visibleComplianceSchedules.filter(
+                (cs) => cs.service_id === service.service_id
+            );
+            const visibleServiceSchedules = serviceSchedules;
 
             // Initialize counters for this service
             const counts = {
@@ -504,6 +596,36 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             };
 
             let activeTaskCount = 0;
+            const isComplianceService =
+                String(service.service_type || "").toLowerCase() === "compliance";
+            let yetNoStarted = isComplianceService ? 0 : false;
+
+            if (isComplianceService) {
+                const notStartedKeys = new Set();
+
+                for (const periodRow of expandedComplianceFirmPeriods) {
+                    if (periodRow.service_id !== service.service_id) continue;
+                    const lookupKey = buildComplianceTaskLookupKey(periodRow);
+                    if (!startedComplianceTaskKeys.has(lookupKey)) {
+                        notStartedKeys.add(lookupKey);
+                    }
+                }
+
+                for (const cs of visibleServiceSchedules) {
+                    const lookupKey = buildComplianceTaskLookupKey({
+                        service_id: cs.service_id,
+                        firm_id: cs.firm_id,
+                        compliance_year: cs.financial_year,
+                        compliance_period: cs.period_name,
+                        frequency: cs.frequency,
+                    });
+                    if (!startedComplianceTaskKeys.has(lookupKey)) {
+                        notStartedKeys.add(lookupKey);
+                    }
+                }
+
+                yetNoStarted = notStartedKeys.size;
+            }
 
             // Categorize each task - tasks can be in multiple categories
             for (const task of serviceTasks) {
@@ -527,7 +649,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             for (const cs of serviceSchedules) {
                 // Get due date category (OD, DT, D7, FT) - only for active tasks
                 if (isComplianceActive(cs.status)) {
-                    const dueCategory = getDueDateCategory(cs.due_date);
+                    const dueCategory = getDueDateCategory(cs.schedule_due_date ?? cs.due_date);
                     if (dueCategory) {
                         counts[dueCategory]++;
                     }
@@ -543,11 +665,20 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
 
             const totalTasks = serviceTasks.length + serviceSchedules.length;
 
-            // ONLY include service if it has at least ONE active task
-            if (activeTaskCount > 0) {
+            const hasYetNoStarted = typeof yetNoStarted === 'number' && yetNoStarted > 0;
+
+            if (serviceType && String(service.service_type || '').toLowerCase() !== serviceType) {
+                continue;
+            }
+
+            // Include service if it has active tasks or not-started compliance schedules
+            if (activeTaskCount > 0 || hasYetNoStarted) {
                 // Update global totals
                 for (const key of Object.keys(counts)) {
                     globalTotals[key] += counts[key];
+                }
+                if (hasYetNoStarted) {
+                    globalTotals.yet_no_started += yetNoStarted;
                 }
                 globalTotals.total_active_tasks += activeTaskCount;
                 globalTotals.total_all_tasks += totalTasks;
@@ -557,6 +688,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                     service_name: service.service_name,
                     service_type: service.service_type,
                     task_counts: {
+                        yet_no_started: yetNoStarted,
                         OD: counts.OD,
                         DT: counts.DT,
                         D7: counts.D7,
@@ -576,6 +708,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
 
         // Calculate category totals for summary
         const categoryTotals = {
+            yet_no_started: globalTotals.yet_no_started,
             OD: globalTotals.OD,
             DT: globalTotals.DT,
             D7: globalTotals.D7,
@@ -599,9 +732,12 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             },
             filters_applied: {
                 service_ids: serviceIdArray.length > 0 ? serviceIdArray : "all",
+                type: serviceType || "all",
                 search: search || null
             },
             category_legend: {
+                "YNS": "Yet Not Started - Compliance schedules without a started task",
+                "yet_no_started": "Yet Not Started - Compliance schedules without a started task (false for general services)",
                 "OD": "Overdue (Due date passed) - Counted for active tasks with past due date",
                 "DT": "Due Today - Counted for active tasks due today",
                 "D7": "Due within 7 Days - Counted for active tasks due in next 7 days",
@@ -612,7 +748,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                 "CPL": "Complete - Tasks with status 'complete'",
                 "CNL": "Cancel - Tasks with status 'cancel'"
             },
-            note: "Only services with at least ONE active task (not complete or cancel) are shown. A task can be counted in multiple categories. For example, an 'in process' task with overdue due date will be counted in both WIP and OD."
+            note: "Services with at least one active task or not-started compliance schedule are shown. yet_no_started is a count for compliance services only (false for general services). A task can be counted in multiple categories. For example, an 'in process' task with overdue due date will be counted in both WIP and OD."
         });
 
     } catch (error) {

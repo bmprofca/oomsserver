@@ -1,0 +1,58 @@
+[
+  {
+    "compliance_service_id": "gstr-1",
+    "source_general_service_id": "gstr-1-regular-monthly",
+    "name": "GSTR-1 Regular Return (Monthly)",
+    "frequency": "monthly",
+    "default_due_date": 11
+  },
+  {
+    "compliance_service_id": "gstr-3b",
+    "source_general_service_id": "gstr-3b-monthly",
+    "name": "GSTR-3B (Monthly)",
+    "frequency": "monthly",
+    "default_due_date": 20
+  },
+  {
+    "compliance_service_id": "gstr-9",
+    "source_general_service_id": "gstr-9-9c",
+    "name": "GSTR 9 and 9C",
+    "frequency": "monthly",
+    "default_due_date": 20
+  },
+  {
+    "compliance_service_id": "gstr-04",
+    "source_general_service_id": "gstr-04-annual",
+    "name": "GSTR-04 (Annual)",
+    "frequency": "yearly",
+    "default_due_date": 10
+  },
+  {
+    "compliance_service_id": "gstr-10",
+    "source_general_service_id": "gstr-10-final-return",
+    "name": "GSTR-10 (Final Return)",
+    "frequency": "monthly",
+    "default_due_date": 20
+  },
+  {
+    "compliance_service_id": "cmp-08",
+    "source_general_service_id": "cmp-08-composition",
+    "name": "CMP-08 (Composition)",
+    "frequency": "quarterly",
+    "default_due_date": 10
+  },
+  {
+    "compliance_service_id": "professional-tax",
+    "source_general_service_id": "ptax",
+    "name": "Professional Tax",
+    "frequency": "monthly",
+    "default_due_date": 10
+  },
+  {
+    "compliance_service_id": "tds",
+    "source_general_service_id": "tds-return",
+    "name": "TDS Return",
+    "frequency": "monthly",
+    "default_due_date": 10
+  }
+]

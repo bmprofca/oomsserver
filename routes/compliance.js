@@ -17,6 +17,8 @@ import {
     isYearlyComplianceFrequency,
     resolveCompliancePeriodInput,
     normalizeComplianceFrequency,
+    buildComplianceTaskLookupKey,
+    expandComplianceFirmPeriods,
 } from "../helpers/recurringTaskHelper.js";
 import { notifyTaskCompletedEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
@@ -231,6 +233,17 @@ function parseDueDate(value) {
     return dueDate;
 }
 
+function parseVisibilityOffset(value) {
+    if (value === undefined || value === null || value === "") {
+        return 0;
+    }
+    const offset = Number(value);
+    if (!Number.isInteger(offset)) {
+        return null;
+    }
+    return offset;
+}
+
 function parseFeesTax(fees, tax_rate) {
     const feesNum = Number(fees);
     const taxRateNum = Number(tax_rate);
@@ -425,6 +438,7 @@ function formatComplianceFirmRow(row) {
         tax_rate: row.tax_rate != null ? Number(row.tax_rate) : 0,
         tax_value: row.tax_value != null ? Number(row.tax_value) : 0,
         due_date: row.due_date != null ? Number(row.due_date) : null,
+        visibility_offset: row.visibility_offset != null ? Number(row.visibility_offset) : 0,
         effective_from: row.effective_from ?? null,
         frequency: row.frequency ?? null,
         staffs,
@@ -453,6 +467,7 @@ const COMPLIANCE_FIRM_SELECT = `
     cf.ca,
     cf.agent,
     cf.due_date,
+    cf.visibility_offset,
     cf.effective_from,
     cf.create_date,
     cf.create_by,
@@ -779,11 +794,11 @@ async function fetchExistingComplianceTaskRows(branch_id, query, { complianceYea
 }
 
 function mergeComplianceTaskListRows(expandedRows, existingTaskRows) {
-    const keys = new Set(expandedRows.map(getComplianceTaskLookupKey));
+    const keys = new Set(expandedRows.map(buildComplianceTaskLookupKey));
     const merged = [...expandedRows];
 
     for (const row of existingTaskRows) {
-        const key = getComplianceTaskLookupKey(row);
+        const key = buildComplianceTaskLookupKey(row);
         if (!keys.has(key)) {
             keys.add(key);
             merged.push(row);
@@ -791,58 +806,6 @@ function mergeComplianceTaskListRows(expandedRows, existingTaskRows) {
     }
 
     return merged;
-}
-
-function expandComplianceFirmPeriods(firmRows, { complianceYear, compliancePeriod }) {
-    const now = new Date();
-    const targetYear = complianceYear
-        ? normalizeFinancialYear(complianceYear)
-        : getFinancialYearForDate(now);
-    const currentFy = getFinancialYearForDate(now);
-    const explicitPeriod = compliancePeriod != null ? String(compliancePeriod).trim() : "";
-    const expanded = [];
-
-    for (const firm of firmRows) {
-        const isYearly = isYearlyComplianceFrequency(firm.frequency);
-        const periods = isYearly
-            ? ["Annual"]
-            : explicitPeriod
-                ? [explicitPeriod]
-                : getPeriodsForFrequency(firm.frequency);
-
-        for (const period of periods) {
-            if (
-                !isCompliancePeriodOnOrAfterEffective(
-                    targetYear,
-                    period,
-                    firm.effective_from,
-                    firm.frequency
-                )
-            ) {
-                continue;
-            }
-
-            expanded.push({
-                ...firm,
-                compliance_year: targetYear,
-                compliance_period: period,
-                period_name: period,
-                financial_year: targetYear,
-                create_date: firm.create_date,
-            });
-        }
-    }
-
-    if (!explicitPeriod && targetYear === currentFy) {
-        return filterSchedulesByRecurringRules(expanded, now);
-    }
-
-    return expanded;
-}
-
-function getComplianceTaskLookupKey(row) {
-    const period = isYearlyComplianceFrequency(row.frequency) ? "Annual" : row.compliance_period;
-    return `${row.service_id}|${row.firm_id}|${row.compliance_year}|${period}`;
 }
 
 function sortComplianceTaskListRows(rows) {
@@ -882,8 +845,7 @@ async function fetchComplianceTasksMap(branch_id, rows) {
 
     const taskMap = new Map();
     for (const task of tasks) {
-        const key = `${task.service_id}|${task.firm_id}|${task.compliance_year}|${task.compliance_period}`;
-        taskMap.set(key, task);
+        taskMap.set(buildComplianceTaskLookupKey(task), task);
     }
     return taskMap;
 }
@@ -898,6 +860,7 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
             fees,
             tax_rate,
             due_date,
+            visibility_offset,
             effective_from,
             staffs,
             ca,
@@ -925,6 +888,14 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: "due_date is required and must be an integer between 1 and 31",
+            });
+        }
+
+        const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
+        if (visibilityOffsetVal === null) {
+            return res.status(400).json({
+                success: false,
+                message: "visibility_offset must be an integer",
             });
         }
 
@@ -1010,8 +981,8 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
 
         const [insertResult] = await pool.query(
             `INSERT INTO compliance_firms
-             (branch_id, service_id, username, firm_id, effective_from, fees, tax_rate, tax_value, staffs, ca, agent, due_date, create_by, modify_by, is_deleted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
+             (branch_id, service_id, username, firm_id, effective_from, fees, tax_rate, tax_value, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
             [
                 branch_id,
                 serviceId,
@@ -1025,6 +996,7 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 caVal,
                 agentVal,
                 dueDateVal,
+                visibilityOffsetVal,
                 createdBy,
                 createdBy,
             ]
@@ -1047,6 +1019,7 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 tax_rate: taxRateNum,
                 tax_value,
                 due_date: dueDateVal,
+                visibility_offset: visibilityOffsetVal,
                 staffs: staffsVal,
                 ca: caVal,
                 agent: agentVal,
@@ -1441,7 +1414,7 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
 
         const data = [];
         for (const row of pageRows) {
-            const task = taskMap.get(getComplianceTaskLookupKey(row)) || null;
+            const task = taskMap.get(buildComplianceTaskLookupKey(row)) || null;
             data.push(await formatComplianceTaskListRow(row, task));
         }
 
@@ -1572,6 +1545,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
             fees,
             tax_rate,
             due_date,
+            visibility_offset,
             effective_from,
             staffs,
             ca,
@@ -1599,6 +1573,14 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: "due_date is required and must be an integer between 1 and 31",
+            });
+        }
+
+        const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
+        if (visibilityOffsetVal === null) {
+            return res.status(400).json({
+                success: false,
+                message: "visibility_offset must be an integer",
             });
         }
 
@@ -1690,6 +1672,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                  tax_rate = ?,
                  tax_value = ?,
                  due_date = ?,
+                 visibility_offset = ?,
                  effective_from = ?,
                  staffs = ?,
                  ca = ?,
@@ -1707,6 +1690,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                 taxRateNum,
                 tax_value,
                 dueDateVal,
+                visibilityOffsetVal,
                 parsedEffectiveFrom.value,
                 staffsVal,
                 caVal,

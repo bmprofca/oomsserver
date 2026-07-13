@@ -59,17 +59,17 @@ function parseIsAddedFilter(value) {
 }
 
 // GET /list - List all global services by type; is_added shows branch mapping
-// Query: { page_no, limit, search, type, is_added | added_only } — type must be "general" or "compliance"
+// Query: { page_no, limit, search, type, is_added | added_only } — type: "" (all), "general", or "compliance"
 router.get('/list', auth, validateBranch, async (req, res) => {
     try {
         const { search, page_no, limit, type, is_added, added_only } = req.query;
         const branch_id = req.branch_id;
 
-        const serviceType = type != null ? String(type).trim() : "";
-        if (!ALLOWED_SERVICE_TYPES.includes(serviceType)) {
+        const serviceType = type != null ? String(type).trim().toLowerCase() : "";
+        if (serviceType && !ALLOWED_SERVICE_TYPES.includes(serviceType)) {
             return res.status(400).json({
                 success: false,
-                message: "type must be 'general' or 'compliance'",
+                message: "type must be empty, 'general', or 'compliance'",
             });
         }
 
@@ -84,7 +84,6 @@ router.get('/list', auth, validateBranch, async (req, res) => {
         const pageNum = Math.max(1, parseInt(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
         const offset = (pageNum - 1) * limitNum;
-        const isCompliance = serviceType === "compliance";
 
         let baseQuery = `
             FROM services s
@@ -92,10 +91,15 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 ON bs.service_id = s.service_id
                AND bs.branch_id = ?
                AND bs.is_deleted = '0'
-            WHERE s.type = ?
+            WHERE s.type IN ('general', 'compliance')
         `;
 
-        const queryParams = [branch_id, serviceType];
+        const queryParams = [branch_id];
+
+        if (serviceType) {
+            baseQuery += ` AND s.type = ?`;
+            queryParams.push(serviceType);
+        }
 
         if (isAddedFilter.filter === true) {
             baseQuery += ` AND bs.service_id IS NOT NULL`;
@@ -118,7 +122,8 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 s.sac_code,
                 s.type,
                 s.remark AS service_remark,
-                ${isCompliance ? "s.frequency, s.default_due_date," : ""}
+                s.frequency,
+                s.default_due_date,
                 CASE WHEN bs.service_id IS NOT NULL THEN 1 ELSE 0 END AS is_added,
                 bs.fees,
                 bs.gst_rate,
@@ -138,6 +143,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
         for (let i = 0; i < rows.length; i++) {
             const el = rows[i];
             const added = el.is_added === 1;
+            const rowIsCompliance = el.type === "compliance";
 
             const item = {
                 service_id: el.service_id,
@@ -148,7 +154,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 is_added: added,
             };
 
-            if (isCompliance) {
+            if (rowIsCompliance) {
                 item.frequency = el.frequency;
                 item.default_due_date = el.default_due_date;
             }
@@ -169,7 +175,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
             item.create_by = create_by;
             item.modify_by = modify_by;
 
-            if (isCompliance) {
+            if (rowIsCompliance) {
                 const [[firmRow]] = await pool.query(
                     `SELECT COUNT(*) AS firm_count
                      FROM compliance_firms
