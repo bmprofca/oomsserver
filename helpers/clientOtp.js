@@ -1,13 +1,18 @@
-export const DEFAULT_CLIENT_OTP = "123456";
+import { generateOtp, sendSmsOtp } from "./smsOtp.js";
+import { normalizeCountryCode, normalizeMobileDigits } from "./clientPhone.js";
 
 export async function generateClientOtp() {
-    return DEFAULT_CLIENT_OTP;
+    return generateOtp(6);
 }
 
 export async function sendClientOtp({ country_code, mobile, otp }) {
-    // country_code is digits only (e.g. 91), without "+"
-    const cc = String(country_code || "").replace(/\D/g, "");
-    // TODO: integrate real SMS provider
-    console.log(`[CLIENT OTP] ${cc}${mobile}: ${otp}`);
-    return { success: true };
+    const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
+    const normalizedMobile = normalizeMobileDigits(mobile);
+
+    if (!normalizedMobile) {
+        throw new Error("Mobile number is required to send OTP.");
+    }
+
+    await sendSmsOtp(normalizedMobile, String(otp));
+    return { success: true, country_code: normalizedCountryCode, mobile: normalizedMobile };
 }

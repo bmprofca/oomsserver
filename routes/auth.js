@@ -1,20 +1,10 @@
 import express from "express";
 const router = express.Router();
 import pool from "../db.js";
-import { FORMAT_DATE, RANDOM_INTEGER, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
-import { decrypt } from "../utils/smsEncryption.js";
+import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
-import { SendMail } from "../helpers/Mail.js";
-import {
-    APP_NAME,
-    FAST2SMS_API_URL,
-    FAST2SMS_AUTH_TOKEN,
-    FAST2SMS_SENDER_ID,
-    SMS_OTP_ROUTE,
-    SMS_OTP_DLT_TEMPLATE_ID,
-} from "../helpers/Config.js";
-import axios from 'axios';
+import { generateOtp, sendSmsOtp } from "../helpers/smsOtp.js";
 import {
     findSoftwareUserByEmail,
     findSoftwareUserByMobile,
@@ -103,23 +93,65 @@ function validateRegistrationContact({ email, mobile }) {
     const trimmedEmail = String(email || "").trim().toLowerCase();
     const normalizedMobile = normalizeMobile(mobile);
 
-    if (!trimmedEmail && !normalizedMobile) {
-        return { ok: false, message: "Email or mobile number is required." };
+    if (!normalizedMobile) {
+        return { ok: false, message: "Mobile number is required." };
+    }
+    if (!MOBILE_REGEX.test(normalizedMobile)) {
+        return { ok: false, message: "Mobile number must be a valid 10-digit Indian number." };
     }
     if (trimmedEmail && !EMAIL_REGEX.test(trimmedEmail)) {
         return { ok: false, message: "Please enter a valid email address." };
-    }
-    if (normalizedMobile && !MOBILE_REGEX.test(normalizedMobile)) {
-        return { ok: false, message: "Mobile number must be a valid 10-digit Indian number." };
     }
 
     return {
         ok: true,
         email: trimmedEmail || null,
-        mobile: normalizedMobile || null,
-        otpKey: normalizedMobile || trimmedEmail,
-        otpChannel: normalizedMobile ? "mobile" : "email",
+        mobile: normalizedMobile,
+        otpKey: normalizedMobile,
+        otpChannel: "mobile",
     };
+}
+
+function resolveLoginIdentifier(body = {}) {
+    const { email, login_id, phone, mobile, country_code } = body;
+    const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
+    const directMobile = normalizeMobileDigits(mobile || phone);
+    const identifier = String(login_id || email || "").trim();
+    let lookupEmail = email ? String(email).trim().toLowerCase() : null;
+    let lookupMobile = directMobile;
+
+    if (!lookupMobile && identifier) {
+        if (identifier.includes("@")) {
+            lookupEmail = identifier.toLowerCase();
+        } else {
+            lookupMobile = normalizeMobileDigits(identifier);
+        }
+    }
+
+    return {
+        normalizedCountryCode,
+        lookupEmail,
+        lookupMobile,
+        identifier,
+    };
+}
+
+async function findLoginUserAccount(conn, { normalizedCountryCode, lookupEmail, lookupMobile, identifier }) {
+    if (lookupMobile) {
+        const byMobile = await findSoftwareUserByMobile(conn, normalizedCountryCode, lookupMobile);
+        if (byMobile) return byMobile;
+    }
+
+    if (lookupEmail) {
+        const byEmail = await findSoftwareUserByEmail(conn, lookupEmail);
+        if (byEmail) return byEmail;
+    }
+
+    if (identifier) {
+        return resolveSoftwareUserByContact(conn, identifier);
+    }
+
+    return null;
 }
 
 async function findExistingUser(conn, { email, mobile }) {
@@ -140,99 +172,6 @@ async function findExistingUser(conn, { email, mobile }) {
     return null;
 }
 
-async function sendSmsOtp(targetPhone, otp, { template_id, config_id } = {}) {
-    const cleanNumber = String(targetPhone || "").replace(/\D/g, "");
-    if (cleanNumber.length < 10) return;
-
-    if (!FAST2SMS_AUTH_TOKEN) {
-        throw new Error("SMS OTP is not configured. Set FAST2SMS_AUTH_TOKEN in the server environment.");
-    }
-
-    let activeConfig = {
-        auth_token: FAST2SMS_AUTH_TOKEN,
-        sender_id: FAST2SMS_SENDER_ID,
-        route: SMS_OTP_ROUTE,
-    };
-    let dltTemplateId = SMS_OTP_DLT_TEMPLATE_ID || null;
-
-    if (config_id) {
-        const [configs] = await pool.query(
-            "SELECT * FROM sms_configs WHERE config_id = ? AND status = 'active' LIMIT 1",
-            [config_id]
-        );
-        if (configs.length > 0) {
-            activeConfig = {
-                auth_token: decrypt(configs[0].auth_token_encrypted),
-                sender_id: configs[0].sender_id || FAST2SMS_SENDER_ID,
-                route: configs[0].route || SMS_OTP_ROUTE,
-            };
-        }
-    }
-
-    if (template_id) {
-        const [templates] = await pool.query(
-            "SELECT * FROM sms_templates WHERE template_id = ? AND status = 'active' LIMIT 1",
-            [template_id]
-        );
-        if (templates.length > 0 && templates[0].dlt_template_id) {
-            dltTemplateId = templates[0].dlt_template_id;
-        }
-    }
-
-    const smsPayload = {
-        route: activeConfig.route || SMS_OTP_ROUTE,
-        numbers: cleanNumber,
-    };
-
-    if (dltTemplateId) {
-        smsPayload.route = "dlt";
-        smsPayload.sender_id = activeConfig.sender_id || FAST2SMS_SENDER_ID;
-        smsPayload.message = dltTemplateId;
-        smsPayload.variables_values = otp;
-    } else {
-        smsPayload.route = activeConfig.route || SMS_OTP_ROUTE;
-        smsPayload.variables_values = otp;
-    }
-
-    await axios.post(FAST2SMS_API_URL, smsPayload, {
-        headers: {
-            authorization: activeConfig.auth_token,
-            "Content-Type": "application/json",
-        },
-        timeout: 5000,
-    });
-}
-
-async function sendEmailOtp(to, otp) {
-    await SendMail({
-        to,
-        subject: `Registration OTP for ${APP_NAME}`,
-        html: `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    body { margin:0; padding:0; background:#f3f4f6; font-family: Arial, sans-serif; }
-    .container { max-width:420px; margin:40px auto; background:#fff; border-radius:10px; padding:24px; text-align:center; box-shadow:0 10px 25px rgba(0,0,0,.1); }
-    h2 { color:#111827; margin-bottom:8px; }
-    p { color:#6b7280; font-size:14px; }
-    .otp { margin:20px 0; font-size:28px; font-weight:700; letter-spacing:8px; color:#4f46e5; }
-    .footer { font-size:12px; color:#9ca3af; margin-top:24px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h2>OTP Verification</h2>
-    <p>Use the following OTP to complete your registration</p>
-    <div class="otp">${otp}</div>
-    <p>This OTP is valid for a limited time. Please do not share it with anyone.</p>
-    <div class="footer">© ${new Date().getFullYear()} ${APP_NAME}</div>
-  </div>
-</body>
-</html>`,
-    });
-}
-
 function serializeRouteError(err) {
     const responseData = err?.response?.data;
     return {
@@ -250,23 +189,20 @@ router.post("/login/send-otp", async (req, res) => {
     let conn;
 
     try {
-        const { email, login_id, phone, mobile, country_code, username, template_id, config_id } = req.body ?? {};
-        const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
-        const normalizedMobile = normalizeMobileDigits(mobile || phone);
-        const identifier = login_id || email || phone || mobile || username;
+        const { template_id, config_id } = req.body ?? {};
+        const loginLookup = resolveLoginIdentifier(req.body);
+
+        if (!loginLookup.lookupMobile && !loginLookup.lookupEmail && !loginLookup.identifier) {
+            return res.status(400).json({
+                success: false,
+                message: "Mobile number or email is required.",
+            });
+        }
 
         conn = await pool.getConnection();
         await conn.beginTransaction();
 
-        let userAccount = null;
-
-        if (normalizedMobile) {
-            userAccount = await findSoftwareUserByMobile(conn, normalizedCountryCode, normalizedMobile);
-        }
-
-        if (!userAccount && identifier) {
-            userAccount = await resolveSoftwareUserByContact(conn, identifier);
-        }
+        const userAccount = await findLoginUserAccount(conn, loginLookup);
 
         if (!userAccount) {
             await conn.rollback();
@@ -277,13 +213,19 @@ router.post("/login/send-otp", async (req, res) => {
         }
 
         const db_username = userAccount.username;
-        const user_email = userAccount.email;
-        const user_mobile = userAccount.mobile || normalizedMobile;
-        const otpCountryCode = normalizeCountryCode(userAccount.country_code || normalizedCountryCode);
-        const otpMobile = normalizeMobileDigits(user_mobile);
+        const otpCountryCode = normalizeCountryCode(userAccount.country_code || loginLookup.normalizedCountryCode);
+        const otpMobile = normalizeMobileDigits(userAccount.mobile || loginLookup.lookupMobile);
+
+        if (!otpMobile || !MOBILE_REGEX.test(otpMobile)) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "A registered mobile number is required for OTP login. Please contact support.",
+            });
+        }
 
         const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
-        const otp = RANDOM_INTEGER ? String(RANDOM_INTEGER()) : String(Math.floor(100000 + Math.random() * 900000));
+        const otp = generateOtp(6);
 
         await conn.execute(
             `UPDATE otps
@@ -310,52 +252,21 @@ router.post("/login/send-otp", async (req, res) => {
 
         await conn.commit();
 
-        const emailTarget = user_email || (identifier?.includes("@") ? identifier : null);
-
-        if (emailTarget && !otpMobile) {
-            try {
-                await SendMail({
-                    to: emailTarget,
-                    subject: `Login OTP for ${APP_NAME}`,
-                    html: `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    body { margin:0; padding:0; background:#f3f4f6; font-family: Arial, sans-serif; }
-    .container { max-width:420px; margin:40px auto; background:#fff; border-radius:10px; padding:24px; text-align:center; box-shadow:0 10px 25px rgba(0,0,0,.1); }
-    h2 { color:#111827; margin-bottom:8px; }
-    p { color:#6b7280; font-size:14px; }
-    .otp { margin:20px 0; font-size:28px; font-weight:700; letter-spacing:8px; color:#4f46e5; }
-    .footer { font-size:12px; color:#9ca3af; margin-top:24px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h2>OTP Verification</h2>
-    <p>Use the following OTP to complete your login</p>
-    <div class="otp">${otp}</div>
-    <p>This OTP is valid for a limited time. Please do not share it with anyone.</p>
-    <div class="footer">© ${new Date().getFullYear()} ${APP_NAME}</div>
-  </div>
-</body>
-</html>`,
-                });
-            } catch (mailErr) {
-                console.error("LOGIN EMAIL OTP SEND ERROR:", mailErr?.response?.data || mailErr?.message || mailErr);
-                throw mailErr;
-            }
-        } else if (otpMobile) {
-            try {
-                await sendSmsOtp(otpMobile, otp, { template_id, config_id });
-            } catch (smsErr) {
-                console.error("LOGIN SMS OTP SEND ERROR:", smsErr?.response?.data || smsErr.message);
-            }
+        try {
+            await sendSmsOtp(otpMobile, otp, { template_id, config_id });
+        } catch (smsErr) {
+            console.error("LOGIN SMS OTP SEND ERROR:", smsErr?.response?.data || smsErr.message);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to send OTP to your registered mobile number. Please try again.",
+            });
         }
 
         return res.status(200).json({
             success: true,
-            message: "OTP sent successfully",
+            message: "OTP sent to your registered mobile number.",
+            channel: "mobile",
+            mobile_masked: `******${otpMobile.slice(-4)}`,
             expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,
         });
     } catch (err) {
@@ -390,52 +301,51 @@ const verifyOtpHandler = async (req, res) => {
     let conn;
 
     try {
-        const { email, login_id, phone, mobile, country_code, username, otp } = req.body || {};
-        const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
-        const normalizedMobile = normalizeMobileDigits(mobile || phone);
-        const identifier = login_id || email || phone || mobile || username;
+        const { otp, country_code } = req.body || {};
+        const loginLookup = resolveLoginIdentifier(req.body);
         const IP = req.ip;
 
-        if (!otp || (!identifier && !normalizedMobile)) {
+        if (!otp) {
             return res.status(400).json({
                 success: false,
-                message: "Missing required parameters (mobile or identifier, otp)",
+                message: "OTP is required.",
+            });
+        }
+
+        if (!loginLookup.lookupMobile && !loginLookup.lookupEmail && !loginLookup.identifier) {
+            return res.status(400).json({
+                success: false,
+                message: "Mobile number or email is required.",
             });
         }
 
         conn = await pool.getConnection();
         await conn.beginTransaction();
 
-        let userAccount = null;
-
-        if (normalizedMobile) {
-            userAccount = await findSoftwareUserByMobile(conn, normalizedCountryCode, normalizedMobile);
-        }
-
-        if (!userAccount && identifier) {
-            userAccount = await resolveSoftwareUserByContact(conn, identifier);
-        }
+        const userAccount = await findLoginUserAccount(conn, loginLookup);
 
         if (!userAccount) {
             await conn.rollback();
             return res.status(401).json({
                 success: false,
-                message: "Invalid username or account not active",
+                message: "Invalid credentials or account not active.",
             });
         }
 
         const resolvedUsername = userAccount.username;
-        const otpCountryCode = normalizeCountryCode(userAccount.country_code || normalizedCountryCode);
-        const otpMobile = normalizeMobileDigits(userAccount.mobile || normalizedMobile);
+        const otpCountryCode = normalizeCountryCode(userAccount.country_code || loginLookup.normalizedCountryCode || country_code);
+        const otpMobile = normalizeMobileDigits(userAccount.mobile || loginLookup.lookupMobile);
 
-        let otpValid = false;
-        let matchedOtpId = null;
+        if (!otpMobile) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "A registered mobile number is required for OTP login.",
+            });
+        }
 
-        if (String(otp) === "123456") {
-            otpValid = true;
-        } else {
-            const [otpRows] = await conn.query(
-                `SELECT id
+        const [otpRows] = await conn.query(
+            `SELECT id
              FROM otps
             WHERE type = ?
               AND otp = ?
@@ -447,16 +357,10 @@ const verifyOtpHandler = async (req, res) => {
               )
             ORDER BY id DESC
             LIMIT 1`,
-                [USER_OTP_TYPE, otp, "0", resolvedUsername, otpCountryCode, otpMobile]
-            );
+            [USER_OTP_TYPE, String(otp), "0", resolvedUsername, otpCountryCode, otpMobile]
+        );
 
-            if (otpRows.length > 0) {
-                otpValid = true;
-                matchedOtpId = otpRows[0].id;
-            }
-        }
-
-        if (!otpValid) {
+        if (!otpRows.length) {
             await conn.rollback();
             return res.status(400).json({
                 success: false,
@@ -464,9 +368,7 @@ const verifyOtpHandler = async (req, res) => {
             });
         }
 
-        if (matchedOtpId) {
-            await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", matchedOtpId]);
-        }
+        await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
 
         const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const token = RANDOM_STRING(50);
@@ -535,8 +437,9 @@ const verifyOtpHandler = async (req, res) => {
     }
 };
 
-router.post("/login/email", verifyOtpHandler);
 router.post("/login/verify-otp", verifyOtpHandler);
+router.post("/login/verify", verifyOtpHandler);
+router.post("/login/email", verifyOtpHandler);
 
 router.post("/register/send-otp", async (req, res) => {
     let conn;
@@ -577,7 +480,7 @@ router.post("/register/send-otp", async (req, res) => {
         }
 
         const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
-        const otp = RANDOM_INTEGER ? String(RANDOM_INTEGER()) : String(Math.floor(100000 + Math.random() * 900000));
+        const otp = generateOtp(6);
         const remark = JSON.stringify({
             name: trimmedName,
             email: contact.email,
@@ -613,24 +516,20 @@ router.post("/register/send-otp", async (req, res) => {
         await conn.commit();
 
         try {
-            if (contact.otpChannel === "email") {
-                await sendEmailOtp(contact.email, otp);
-            } else {
-                await sendSmsOtp(contact.mobile, otp, { template_id, config_id });
-            }
+            await sendSmsOtp(contact.mobile, otp, { template_id, config_id });
         } catch (deliveryErr) {
             console.error("REGISTER OTP SEND ERROR:", deliveryErr?.response?.data || deliveryErr?.message || deliveryErr);
             return res.status(500).json({
                 success: false,
-                message: "Failed to send OTP. Please try again.",
+                message: "Failed to send OTP to your mobile number. Please try again.",
             });
         }
 
         return res.status(200).json({
             success: true,
-            message: `OTP sent successfully to your ${contact.otpChannel === "email" ? "email" : "mobile"}.`,
+            message: "OTP sent successfully to your mobile number.",
             expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,
-            channel: contact.otpChannel,
+            channel: "mobile",
         });
     } catch (err) {
         if (conn) {
@@ -694,14 +593,8 @@ router.post("/register/verify-otp", async (req, res) => {
             });
         }
 
-        let otpValid = false;
-        let matchedOtpId = null;
-
-        if (String(otp) === "123456") {
-            otpValid = true;
-        } else {
-            const [otpRows] = await conn.query(
-                `SELECT id, remark
+        const [otpRows] = await conn.query(
+            `SELECT id, remark
              FROM otps
             WHERE username = ?
               AND type = ?
@@ -710,22 +603,18 @@ router.post("/register/verify-otp", async (req, res) => {
               AND expire_date >= CURRENT_TIMESTAMP
             ORDER BY id DESC
             LIMIT 1`,
-                [contact.otpKey, REGISTER_OTP_TYPE, otp, "0"]
-            );
+            [contact.otpKey, REGISTER_OTP_TYPE, String(otp), "0"]
+        );
 
-            if (otpRows.length > 0) {
-                otpValid = true;
-                matchedOtpId = otpRows[0].id;
-            }
-        }
-
-        if (!otpValid) {
+        if (!otpRows.length) {
             await conn.rollback();
             return res.status(400).json({
                 success: false,
                 message: "Invalid or expired OTP. Please try again.",
             });
         }
+
+        const matchedOtpId = otpRows[0].id;
 
         const username = await UNIQUE_RANDOM_STRING("users", "username", {
             conn,

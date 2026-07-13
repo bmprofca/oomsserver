@@ -63,6 +63,10 @@ Run from `SERVER/`:
 | `npm run migrate:v3:fix-opening-balances` | Normalize opening balance party placement |
 | `npm run migrate:v3:diagnose-debtors` | Compare debtor counts across methods |
 | `npm run migrate:v3:dedupe-invoices` | Remove duplicate branch invoices |
+| `npm run migrate:v3:staff-reset` | Delete v5 staff rows for target branch (dry-run unless `--force`) |
+| `npm run migrate:v3:staff-import` | Re-import v3 employees as users + profile + branch_mapping |
+| `npm run migrate:v3:staff` | Reset (`--force`) then import staff in one step |
+| `npm run migrate:v3:staff-verify` | Verify all v3 employees exist in v5 staff tables |
 
 ### CLI flags (`migrate-v3-branch.js`)
 
@@ -106,6 +110,50 @@ npm run migrate:v3:verify
 ```
 
 Restart the API server after migration and repair scripts so `GET_BALANCE` and dashboard SQL pick up current logic.
+
+---
+
+## Staff re-migration (v3 employees only)
+
+Use when staff on the target branch were not migrated correctly but finance/tasks/clients should stay untouched. Preserves **v3 usernames** so `transactions`, `task_staffs`, and related tables keep working.
+
+**Scope:** `v3staging_users` where `user_type = employee` → v5 `users`, `profile` (`user_type = staff`, insert if missing), and `branch_mapping` (`type = staff`) on branch `MIGRATE_NEW_BRANCH_ID` (default `123456`).
+
+**Attendance is not modified** by staff reset or import.
+
+### Typical path after manual reset (admin-only `branch_mapping`)
+
+If you have already cleared `users` and `branch_mapping` staff rows and kept only the branch admin:
+
+```bash
+cd SERVER
+
+# 1. Ensure staging tables are loaded
+npm run migrate:v3:import
+
+# 2. Preview import (no writes)
+npm run migrate:v3:staff-import -- --dry-run
+
+# 3. Apply import
+npm run migrate:v3:staff-import
+
+# 4. Verify
+npm run migrate:v3:staff-verify
+```
+
+### Full reset + re-import (optional)
+
+```bash
+npm run migrate:v3:staff-reset              # preview deletes
+npm run migrate:v3:staff-reset -- --force   # delete staff users/profile/mapping only
+npm run migrate:v3:staff-import
+# or: npm run migrate:v3:staff
+npm run migrate:v3:staff-verify
+```
+
+**Reset deletes (per employee username):** `branch_mapping` (staff only), `tokens`, `profile`, `users`. Does **not** delete `attendance`. Usernames that also exist in `clients` are skipped.
+
+**Import order (matches v5 onboarding):** `users` (if missing) → `profile` (if missing) → `branch_mapping` (`type = staff`, if missing). No login tokens are created; staff can use OTP login if mobile is in `profile`.
 
 ---
 

@@ -128,7 +128,7 @@ export function userTypeToClientType(userType) {
 export function userTypeToMappingType(userType) {
     const t = String(userType || "").trim().toLowerCase();
     if (t === "admin") return "admin";
-    if (t === "employee") return "staff";
+    if (t === "employee" || t === "staff") return "staff";
     if (t === "ca") return "ca";
     if (t === "agent") return "agent";
     return null;
