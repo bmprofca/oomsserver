@@ -13,10 +13,15 @@ async function checkAgentToken(token) {
 
 async function resolveAgentTokenSession(token) {
     const [rows] = await pool.query(
-        `SELECT username, country_code, mobile
-         FROM tokens
-         WHERE token = ?
-           AND status = '1'
+        `SELECT t.username, t.country_code, t.mobile
+         FROM tokens t
+         INNER JOIN clients c ON c.username = t.username
+            AND c.user_type = 'agent'
+            AND (c.is_deleted = '0' OR c.is_deleted = 0)
+         INNER JOIN profile p ON p.username = c.username
+            AND p.status = '1'
+         WHERE t.token = ?
+           AND t.status = '1'
          LIMIT 1`,
         [token]
     );
@@ -29,11 +34,13 @@ async function resolveAgentTokenSession(token) {
 
     if (!session.country_code || !session.mobile) {
         const [profileRows] = await pool.query(
-            `SELECT country_code, mobile
-             FROM profile
-             WHERE username = ?
-               AND user_type = 'agent'
-               AND status = '1'
+            `SELECT p.country_code, p.mobile
+             FROM profile p
+             INNER JOIN clients c ON c.username = p.username
+                AND c.user_type = 'agent'
+                AND (c.is_deleted = '0' OR c.is_deleted = 0)
+             WHERE p.username = ?
+               AND p.status = '1'
              LIMIT 1`,
             [session.username]
         );
@@ -65,8 +72,10 @@ async function agentProfileExists(country_code, mobile) {
     const [rows] = await pool.query(
         `SELECT p.username
          FROM profile p
-         WHERE p.user_type = 'agent'
-           AND p.status = '1'
+         INNER JOIN clients c ON c.username = p.username
+            AND c.user_type = 'agent'
+            AND (c.is_deleted = '0' OR c.is_deleted = 0)
+         WHERE p.status = '1'
            AND ${PROFILE_MOBILE_SQL} = ?
            AND ${PROFILE_COUNTRY_CODE_SQL} = ?
          LIMIT 1`,
@@ -98,8 +107,8 @@ async function listAgentProfilesByPhone(country_code, mobile) {
             AND (c.is_deleted = '0' OR c.is_deleted = 0)
          LEFT JOIN branch_list bl ON bl.branch_id = c.branch_id
             AND (bl.is_deleted = '0' OR bl.is_deleted = 0)
-         WHERE p.user_type = 'agent'
-           AND p.status = '1'
+         WHERE p.status = '1'
+           AND c.user_type = 'agent'
            AND ${PROFILE_MOBILE_SQL} = ?
            AND ${PROFILE_COUNTRY_CODE_SQL} = ?
          ORDER BY bl.name ASC, p.name ASC, c.branch_id ASC`,

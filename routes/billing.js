@@ -393,7 +393,6 @@ async function handleBillingTaskList(req, res) {
                   OR IFNULL(f.file_no, '') LIKE ?
                   OR s.name LIKE ?
                   OR s.service_id LIKE ?
-                  OR IFNULL(u.login_id, '') LIKE ?
                   OR IFNULL(u.remark, '') LIKE ?
                   OR EXISTS (
                       SELECT 1 FROM profile pr
@@ -407,7 +406,7 @@ async function handleBillingTaskList(req, res) {
                   )
               )
             `;
-            for (let i = 0; i < 18; i++) {
+            for (let i = 0; i < 17; i++) {
                 params.push(searchPattern);
             }
             params.push(searchPattern, searchPattern, searchPattern);

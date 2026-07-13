@@ -6,37 +6,14 @@ import { authAgent } from "../middleware/authAgent.js";
 import {
     normalizeCountryCode,
     normalizeMobileDigits,
-    PROFILE_COUNTRY_CODE_SQL,
-    PROFILE_MOBILE_SQL,
 } from "../helpers/clientPhone.js";
+import { findPartyUserByMobile } from "../helpers/authProfile.js";
 
 const router = express.Router();
 const AGENT_OTP_TYPE = "agent_login";
 
 async function findActiveAgentProfile(country_code, mobile) {
-    const cc = normalizeCountryCode(country_code);
-    const mob = normalizeMobileDigits(mobile);
-
-    if (!mob || mob.length < 10) {
-        return null;
-    }
-
-    const [rows] = await pool.query(
-        `SELECT p.username, p.name, p.mobile, p.country_code, p.email
-         FROM profile p
-         INNER JOIN clients c ON c.username = p.username
-            AND c.user_type = 'agent'
-            AND c.is_deleted = '0'
-            AND c.status = '1'
-         WHERE p.user_type = 'agent'
-           AND p.status = '1'
-           AND ${PROFILE_MOBILE_SQL} = ?
-           AND ${PROFILE_COUNTRY_CODE_SQL} = ?
-         LIMIT 1`,
-        [mob, cc]
-    );
-
-    return rows[0] || null;
+    return findPartyUserByMobile(pool, country_code, mobile, "agent");
 }
 
 router.post("/login/send-otp", async (req, res) => {

@@ -8,6 +8,7 @@ import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER
 import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
 import { buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
+import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 
 const ALL_PAID_PLANS = ['Business', 'BusinessPlus', 'BusinessPro'];
 
@@ -735,19 +736,16 @@ router.post('/check-user', auth, validateBranch, async (req, res) => {
         }
 
 
-        const [rows] = await pool.query(
-            "SELECT * FROM users WHERE login_id = ? AND status = '1' ORDER BY id DESC LIMIT 1",
-            [email.trim()]
-        );
+        const resolvedUser = await resolveSoftwareUserByContact(pool, email.trim());
 
-        if (rows.length == 0) {
+        if (!resolvedUser) {
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
             });
         }
 
-        const staff_username = rows[0]?.username;
+        const staff_username = resolvedUser.username;
         const staff_data = await USER_DATA(staff_username);
 
         const [exist_data] = await pool.query(

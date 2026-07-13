@@ -131,7 +131,6 @@ function buildSearchClause(search) {
 
     const sql = ` AND (
         u.username LIKE ?
-        OR u.login_id LIKE ?
         OR u.remark LIKE ?
         OR p.name LIKE ?
         OR p.mobile LIKE ?
@@ -182,7 +181,7 @@ function buildSearchClause(search) {
     )`;
 
     const params = [
-        sp, sp, sp, sp, sp, sp, sp, sp, sp,
+        sp, sp, sp, sp, sp, sp, sp, sp,
         sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp,
         sp, sp, sp, sp, sp, sp, sp, sp, sp,
     ];
@@ -202,12 +201,8 @@ router.get("/list", authAdmin, async (req, res) => {
         const baseFrom = `
             FROM users u
             LEFT JOIN profile p ON p.username = u.username
-                AND p.id = (
-                    SELECT MAX(p2.id)
-                    FROM profile p2
-                    WHERE p2.username = u.username
-                )
-            WHERE u.type = 'user'
+                AND p.status = '1'
+            WHERE 1 = 1
             ${searchSql}
         `;
 
@@ -220,7 +215,6 @@ router.get("/list", authAdmin, async (req, res) => {
             `SELECT
                 u.id,
                 u.username,
-                u.login_id,
                 u.status,
                 u.remark,
                 u.create_date,
@@ -283,7 +277,6 @@ router.get("/list", authAdmin, async (req, res) => {
 
         const data = rows.map((row) => ({
             username: row.username,
-            login_id: row.login_id,
             status: row.status === "1",
             remark: row.remark,
             create_date: FORMAT_DATE(row.create_date),
@@ -342,9 +335,9 @@ router.get("/profile/:username", authAdmin, async (req, res) => {
         }
 
         const [users] = await pool.query(
-            `SELECT id, username, login_id, status, remark, create_date, create_by, type
+            `SELECT id, username, status, remark, create_date, create_by
              FROM users
-             WHERE username = ? AND type = 'user'
+             WHERE username = ?
              LIMIT 1`,
             [username]
         );
@@ -384,7 +377,7 @@ router.get("/profile/:username", authAdmin, async (req, res) => {
                 create_date
              FROM profile
              WHERE username = ?
-             ORDER BY id DESC
+               AND status = '1'
              LIMIT 1`,
             [username]
         );
@@ -438,7 +431,6 @@ router.get("/profile/:username", authAdmin, async (req, res) => {
             data: {
                 user: {
                     username: user.username,
-                    login_id: user.login_id,
                     status: user.status === "1",
                     remark: user.remark,
                     create_date: FORMAT_DATE(user.create_date),
@@ -468,8 +460,6 @@ router.get("/sessions", authAdmin, async (req, res) => {
         const filters = [];
         const filterParams = [];
 
-        filters.push("u.type = 'user'");
-
         if (username) {
             filters.push("t.username = ?");
             filterParams.push(username);
@@ -483,13 +473,12 @@ router.get("/sessions", authAdmin, async (req, res) => {
                 OR t.create_ip LIKE ?
                 OR t.last_ip LIKE ?
                 OR t.remark LIKE ?
-                OR u.login_id LIKE ?
                 OR u.remark LIKE ?
                 OR p.name LIKE ?
                 OR p.mobile LIKE ?
                 OR p.email LIKE ?
             )`);
-            filterParams.push(sp, sp, sp, sp, sp, sp, sp, sp, sp, sp);
+            filterParams.push(sp, sp, sp, sp, sp, sp, sp, sp, sp);
         }
 
         const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -498,11 +487,7 @@ router.get("/sessions", authAdmin, async (req, res) => {
             FROM tokens t
             INNER JOIN users u ON u.username = t.username
             LEFT JOIN profile p ON p.username = u.username
-                AND p.id = (
-                    SELECT MAX(p2.id)
-                    FROM profile p2
-                    WHERE p2.username = u.username
-                )
+                AND p.status = '1'
             ${whereSql}
         `;
 
@@ -525,8 +510,6 @@ router.get("/sessions", authAdmin, async (req, res) => {
                 t.create_date,
                 t.last_used_date,
                 t.expire_date,
-                u.login_id,
-                u.type AS user_type,
                 u.status AS user_status,
                 u.remark AS user_remark,
                 p.name,
@@ -560,8 +543,6 @@ router.get("/sessions", authAdmin, async (req, res) => {
                 remark: row.remark,
                 user: {
                     username: row.username,
-                    login_id: row.login_id,
-                    type: row.user_type,
                     status: row.user_status === "1",
                     remark: row.user_remark,
                     name: row.name,

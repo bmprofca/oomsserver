@@ -7,9 +7,18 @@ import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
 import { SendMail } from "../helpers/Mail.js";
 import { APP_NAME } from "../helpers/Config.js";
-import crypto from 'crypto';
-import bcrypt from 'bcrypt';
 import axios from 'axios';
+import {
+    findSoftwareUserByEmail,
+    findSoftwareUserByMobile,
+    resolveSoftwareUserByContact,
+    REGISTER_OTP_TYPE,
+    USER_OTP_TYPE,
+} from "../helpers/authProfile.js";
+import {
+    normalizeCountryCode,
+    normalizeMobileDigits,
+} from "../helpers/clientPhone.js";
 
 const DEFAULT_AUTH_TOKEN = "TNcvwZtlCVKAhVecVxeTOBubj8TdQDkRuw9m6r0bcsbdRjYzhv5ylzoyli6T";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -43,19 +52,21 @@ function validateRegistrationContact({ email, mobile }) {
 }
 
 async function findExistingUser(conn, { email, mobile }) {
-    const [rows] = await conn.query(
-        `SELECT u.username
-         FROM users u
-         LEFT JOIN profile p ON p.username = u.username
-         WHERE u.type = 'user'
-           AND (
-                (? IS NOT NULL AND (u.login_id = ? OR p.email = ?))
-             OR (? IS NOT NULL AND (u.login_id = ? OR p.mobile = ?))
-           )
-         LIMIT 1`,
-        [email, email, email, mobile, mobile, mobile]
-    );
-    return rows[0] || null;
+    if (mobile) {
+        const byMobile = await findSoftwareUserByMobile(conn, "+91", mobile);
+        if (byMobile) {
+            return { username: byMobile.username };
+        }
+    }
+
+    if (email) {
+        const byEmail = await findSoftwareUserByEmail(conn, email);
+        if (byEmail) {
+            return { username: byEmail.username };
+        }
+    }
+
+    return null;
 }
 
 async function sendSmsOtp(targetPhone, otp, { template_id, config_id } = {}) {
@@ -184,30 +195,25 @@ router.post("/login/send-otp", async (req, res) => {
     let conn;
 
     try {
-        const { email, login_id, phone, username, template_id, config_id } = req.body ?? {};
-        const identifier = login_id || email || phone || username;
-
-        if (!identifier) {
-            return res.status(400).json({
-                success: false,
-                message: "Missing required parameters (email or phone number).",
-            });
-        }
+        const { email, login_id, phone, mobile, country_code, username, template_id, config_id } = req.body ?? {};
+        const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
+        const normalizedMobile = normalizeMobileDigits(mobile || phone);
+        const identifier = login_id || email || phone || mobile || username;
 
         conn = await pool.getConnection();
         await conn.beginTransaction();
 
-        const [rows] = await conn.execute(
-            `SELECT u.username, u.login_id, p.mobile 
-             FROM users u 
-             LEFT JOIN profile p ON p.username = u.username
-             WHERE (u.login_id = ? OR u.username = ? OR p.mobile = ?) 
-               AND u.status = ? AND u.type = ? 
-             LIMIT 1`,
-            [identifier, identifier, identifier, "1", "user"]
-        );
+        let userAccount = null;
 
-        if (rows.length === 0) {
+        if (normalizedMobile) {
+            userAccount = await findSoftwareUserByMobile(conn, normalizedCountryCode, normalizedMobile);
+        }
+
+        if (!userAccount && identifier) {
+            userAccount = await resolveSoftwareUserByContact(conn, identifier);
+        }
+
+        if (!userAccount) {
             await conn.rollback();
             return res.status(404).json({
                 success: false,
@@ -215,40 +221,33 @@ router.post("/login/send-otp", async (req, res) => {
             });
         }
 
-        const { username: db_username, login_id: user_email, mobile: user_mobile } = rows[0];
+        const db_username = userAccount.username;
+        const user_email = userAccount.email;
+        const user_mobile = userAccount.mobile || normalizedMobile;
+        const otpCountryCode = normalizeCountryCode(userAccount.country_code || normalizedCountryCode);
+        const otpMobile = normalizeMobileDigits(user_mobile);
 
-        // Resolve the target phone number for OTP:
-        // 1. If the login identifier itself is a phone number, use it.
-        // 2. Otherwise, use the mobile number from the user's profile.
-        // 3. Fallback to db_username.
-        let targetPhone = "";
-        const cleanIdentifier = identifier.replace(/\D/g, "");
-        if (!identifier.includes("@") && cleanIdentifier.length >= 10) {
-            targetPhone = cleanIdentifier;
-        } else if (user_mobile) {
-            targetPhone = user_mobile.replace(/\D/g, "");
-        } else {
-            targetPhone = String(db_username).replace(/\D/g, "");
-        }
-
-        // OTP generation
         const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
         const otp = RANDOM_INTEGER ? String(RANDOM_INTEGER()) : String(Math.floor(100000 + Math.random() * 900000));
 
-        // Optional: invalidate previous active OTPs for this user/type to prevent confusion
         await conn.execute(
-            "UPDATE otps SET status = ? WHERE username = ? AND type = ? AND status = ?",
-            ["1", db_username, "login", "0"]
+            `UPDATE otps
+             SET status = ?
+             WHERE (
+                    (username = ? AND type = ?)
+                 OR (country_code = ? AND mobile = ? AND type = ?)
+               )
+               AND status = ?`,
+            ["1", db_username, USER_OTP_TYPE, otpCountryCode, otpMobile, USER_OTP_TYPE, "0"]
         );
 
         await conn.execute(
-            `INSERT INTO otps 
-         (otp_id, type, otp, username, create_date, expire_date, status, remark)
-        VALUES (?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
-            [otp_id, "login", otp, db_username, "0", "User login OTP"]
+            `INSERT INTO otps
+         (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
+        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
+            [otp_id, USER_OTP_TYPE, otp, db_username, otpCountryCode, otpMobile, "0", "User login OTP"]
         );
 
-        // Fetch expire_date from DB
         const [otpMeta] = await conn.query(
             "SELECT expire_date FROM otps WHERE otp_id = ? ORDER BY id DESC LIMIT 1",
             [otp_id]
@@ -256,11 +255,12 @@ router.post("/login/send-otp", async (req, res) => {
 
         await conn.commit();
 
-        // Send OTP via email if identifier contains @, or try SMS if it's a phone number
-        if (identifier.includes("@")) {
+        const emailTarget = user_email || (identifier?.includes("@") ? identifier : null);
+
+        if (emailTarget && !otpMobile) {
             try {
                 await SendMail({
-                    to: user_email,
+                    to: emailTarget,
                     subject: `Login OTP for ${APP_NAME}`,
                     html: `<!DOCTYPE html>
 <html>
@@ -290,9 +290,9 @@ router.post("/login/send-otp", async (req, res) => {
                 console.error("LOGIN EMAIL OTP SEND ERROR:", mailErr?.response?.data || mailErr?.message || mailErr);
                 throw mailErr;
             }
-        } else {
+        } else if (otpMobile) {
             try {
-                await sendSmsOtp(targetPhone, otp, { template_id, config_id });
+                await sendSmsOtp(otpMobile, otp, { template_id, config_id });
             } catch (smsErr) {
                 console.error("LOGIN SMS OTP SEND ERROR:", smsErr?.response?.data || smsErr.message);
             }
@@ -335,32 +335,33 @@ const verifyOtpHandler = async (req, res) => {
     let conn;
 
     try {
-        const { email, login_id, phone, username, otp } = req.body || {};
-        const identifier = login_id || email || phone || username;
+        const { email, login_id, phone, mobile, country_code, username, otp } = req.body || {};
+        const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
+        const normalizedMobile = normalizeMobileDigits(mobile || phone);
+        const identifier = login_id || email || phone || mobile || username;
         const IP = req.ip;
 
-        if (!identifier || !otp) {
+        if (!otp || (!identifier && !normalizedMobile)) {
             return res.status(400).json({
                 success: false,
-                message: "Missing required parameters (login_id, otp)",
+                message: "Missing required parameters (mobile or identifier, otp)",
             });
         }
 
         conn = await pool.getConnection();
         await conn.beginTransaction();
 
-        // 1) Validate user
-        const [users] = await conn.query(
-            `SELECT u.username 
-             FROM users u 
-             LEFT JOIN profile p ON p.username = u.username
-             WHERE (u.login_id = ? OR u.username = ? OR p.mobile = ?) 
-               AND u.status = ? AND u.type = ? 
-             LIMIT 1`,
-            [identifier, identifier, identifier, "1", "user"]
-        );
+        let userAccount = null;
 
-        if (!users.length) {
+        if (normalizedMobile) {
+            userAccount = await findSoftwareUserByMobile(conn, normalizedCountryCode, normalizedMobile);
+        }
+
+        if (!userAccount && identifier) {
+            userAccount = await resolveSoftwareUserByContact(conn, identifier);
+        }
+
+        if (!userAccount) {
             await conn.rollback();
             return res.status(401).json({
                 success: false,
@@ -368,9 +369,10 @@ const verifyOtpHandler = async (req, res) => {
             });
         }
 
-        const resolvedUsername = users[0].username;
+        const resolvedUsername = userAccount.username;
+        const otpCountryCode = normalizeCountryCode(userAccount.country_code || normalizedCountryCode);
+        const otpMobile = normalizeMobileDigits(userAccount.mobile || normalizedMobile);
 
-        // 2) Validate OTP (must be un-used AND not expired, OR the default 123456)
         let otpValid = false;
         let matchedOtpId = null;
 
@@ -378,16 +380,19 @@ const verifyOtpHandler = async (req, res) => {
             otpValid = true;
         } else {
             const [otpRows] = await conn.query(
-                `SELECT id, otp, expire_date, status
+                `SELECT id
              FROM otps
-            WHERE username = ?
-              AND type = ?
+            WHERE type = ?
               AND otp = ?
               AND status = ?
               AND expire_date >= CURRENT_TIMESTAMP
+              AND (
+                    username = ?
+                 OR (country_code = ? AND mobile = ?)
+              )
             ORDER BY id DESC
             LIMIT 1`,
-                [resolvedUsername, "login", otp, "0"]
+                [USER_OTP_TYPE, otp, "0", resolvedUsername, otpCountryCode, otpMobile]
             );
 
             if (otpRows.length > 0) {
@@ -405,18 +410,16 @@ const verifyOtpHandler = async (req, res) => {
         }
 
         if (matchedOtpId) {
-            // Mark OTP as used (so it cannot be reused)
             await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", matchedOtpId]);
         }
 
-        // 3) Create token
         const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const token = RANDOM_STRING(50);
         await conn.query(
             `INSERT INTO tokens
-        (token_id, username, token, create_date, create_by, create_ip, last_used_date, last_ip, login_method, status, expire_date)
-       VALUES (?,?,?,CURRENT_TIMESTAMP,?,?,CURRENT_TIMESTAMP,?,'email','1',DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY))`,
-            [token_id, resolvedUsername, token, resolvedUsername, IP, IP]
+        (token_id, username, token, country_code, mobile, create_date, create_by, create_ip, last_used_date, last_ip, login_method, status, expire_date)
+       VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,?,?,CURRENT_TIMESTAMP,?,'mobile','1',DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY))`,
+            [token_id, resolvedUsername, token, otpCountryCode, otpMobile, resolvedUsername, IP, IP]
         );
 
         const [tokenMeta] = await conn.query(
@@ -525,14 +528,23 @@ router.post("/register/send-otp", async (req, res) => {
 
         await conn.execute(
             "UPDATE otps SET status = ? WHERE username = ? AND type = ? AND status = ?",
-            ["1", contact.otpKey, "register", "0"]
+            ["1", contact.otpKey, REGISTER_OTP_TYPE, "0"]
         );
 
         await conn.execute(
             `INSERT INTO otps
-         (otp_id, type, otp, username, create_date, expire_date, status, remark)
-        VALUES (?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
-            [otp_id, "register", otp, contact.otpKey, "0", remark]
+         (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
+        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
+            [
+                otp_id,
+                REGISTER_OTP_TYPE,
+                otp,
+                contact.otpKey,
+                contact.mobile ? normalizeCountryCode("+91") : null,
+                contact.mobile || null,
+                "0",
+                remark,
+            ]
         );
 
         const [otpMeta] = await conn.query(
@@ -640,7 +652,7 @@ router.post("/register/verify-otp", async (req, res) => {
               AND expire_date >= CURRENT_TIMESTAMP
             ORDER BY id DESC
             LIMIT 1`,
-                [contact.otpKey, "register", otp, "0"]
+                [contact.otpKey, REGISTER_OTP_TYPE, otp, "0"]
             );
 
             if (otpRows.length > 0) {
@@ -662,15 +674,12 @@ router.post("/register/verify-otp", async (req, res) => {
             prefix: "usr_",
             length: ID_LENGTH,
         });
-        const loginId = contact.email || contact.mobile;
-        const tempPassword = crypto.randomBytes(16).toString("hex");
-        const hashedPassword = await bcrypt.hash(tempPassword, 10);
         const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
 
         await conn.query(
-            `INSERT INTO users (username, login_id, password, create_by, status, remark, type, create_date)
-             VALUES (?, ?, ?, ?, '1', ?, 'user', NOW())`,
-            [username, loginId, hashedPassword, username, "Self registration"]
+            `INSERT INTO users (username, create_by, status, remark, create_date)
+             VALUES (?, ?, '1', ?, NOW())`,
+            [username, username, "Self registration"]
         );
 
         await conn.query(
@@ -696,9 +705,18 @@ router.post("/register/verify-otp", async (req, res) => {
 
         await conn.query(
             `INSERT INTO tokens
-        (token_id, username, token, create_date, create_by, create_ip, last_used_date, last_ip, login_method, status, expire_date)
-       VALUES (?,?,?,CURRENT_TIMESTAMP,?,?,CURRENT_TIMESTAMP,?,'email','1',DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY))`,
-            [token_id, username, token, username, IP, IP]
+        (token_id, username, token, country_code, mobile, create_date, create_by, create_ip, last_used_date, last_ip, login_method, status, expire_date)
+       VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,?,?,CURRENT_TIMESTAMP,?,'mobile','1',DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY))`,
+            [
+                token_id,
+                username,
+                token,
+                contact.mobile ? normalizeCountryCode("+91") : null,
+                contact.mobile || null,
+                username,
+                IP,
+                IP,
+            ]
         );
 
         const [tokenMeta] = await conn.query(
@@ -763,34 +781,38 @@ router.post('/google-auth', async (req, res) => {
         conn = await pool.getConnection();
         await conn.beginTransaction();
 
-        // ✅ Check if user exists by login_id (email)
-        const [users] = await conn.query(
-            "SELECT username, login_id FROM users WHERE login_id = ? AND status = '1' AND type = 'user' LIMIT 1",
-            [email]
-        );
+        // Check if user exists by active profile email
+        const existingUser = await findSoftwareUserByEmail(conn, email);
 
         let finalUsername;
         let isNewUser = false;
 
-        if (users.length === 0) {
-            // ✅ Create new user - matching your exact columns
-            finalUsername = email.split('@')[0] + '_' + Date.now();
-            const tempPassword = crypto.randomBytes(16).toString('hex');
-            const hashedPassword = await bcrypt.hash(tempPassword, 10);
+        if (!existingUser) {
+            finalUsername = await UNIQUE_RANDOM_STRING("users", "username", {
+                conn,
+                prefix: "usr_",
+                length: ID_LENGTH,
+            });
+            const profile_id = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
 
             console.log('📝 Creating new user:', { finalUsername, email });
 
-            // ✅ INSERT with your exact column structure (no 'name' column)
             await conn.query(
-                `INSERT INTO users (username, login_id, password, create_by, status, remark, type, create_date)
-                 VALUES (?, ?, ?, ?, '1', ?, 'user', NOW())`,
-                [finalUsername, email, hashedPassword, finalUsername, "Google Login Auto-Register"]
+                `INSERT INTO users (username, create_by, status, remark, create_date)
+                 VALUES (?, ?, '1', ?, NOW())`,
+                [finalUsername, finalUsername, "Google Login Auto-Register"]
+            );
+
+            await conn.query(
+                `INSERT INTO profile (profile_id, username, create_by, user_type, name, email, status, create_date)
+                 VALUES (?, ?, ?, 'user', ?, ?, '1', NOW())`,
+                [profile_id, finalUsername, finalUsername, name, email]
             );
 
             console.log('✅ User created successfully');
             isNewUser = true;
         } else {
-            finalUsername = users[0].username;
+            finalUsername = existingUser.username;
             console.log('👤 Existing user found:', finalUsername);
         }
 

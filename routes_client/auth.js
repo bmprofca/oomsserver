@@ -6,33 +6,14 @@ import { authClient } from "../middleware/authClient.js";
 import {
     normalizeCountryCode,
     normalizeMobileDigits,
-    PROFILE_COUNTRY_CODE_SQL,
-    PROFILE_MOBILE_SQL,
 } from "../helpers/clientPhone.js";
+import { findPartyUserByMobile } from "../helpers/authProfile.js";
 
 const router = express.Router();
 const CLIENT_OTP_TYPE = "client_login";
 
 async function findActiveClientProfile(country_code, mobile) {
-    const cc = normalizeCountryCode(country_code);
-    const mob = normalizeMobileDigits(mobile);
-
-    if (!mob || mob.length < 10) {
-        return null;
-    }
-
-    const [rows] = await pool.query(
-        `SELECT p.username, p.name, p.mobile, p.country_code, p.email
-         FROM profile p
-         WHERE p.user_type = 'client'
-           AND p.status = '1'
-           AND ${PROFILE_MOBILE_SQL} = ?
-           AND ${PROFILE_COUNTRY_CODE_SQL} = ?
-         LIMIT 1`,
-        [mob, cc]
-    );
-
-    return rows[0] || null;
+    return findPartyUserByMobile(pool, country_code, mobile, "client");
 }
 
 router.post("/login/send-otp", async (req, res) => {

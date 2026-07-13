@@ -1,47 +1,77 @@
 import pool from "../db.js";
 import { getSubscriptionStatus, hasFeatureAccess } from "../services/subscriptionService.js";
 
-async function checkToken(username, token, userType = "user") {
+async function queryTokenRows(username, token, extraJoin = "", extraWhere = "", extraParams = []) {
+    const baseParams = [token, username, "1", ...extraParams];
+
     try {
-        // OTP login saves token to `tokens` table, while Google login/register uses `login_token`.
-        // Support both for compatibility.
-        let rows = [];
-
-        try {
-            const [tokenRows] = await pool.query(
-                "SELECT tokens.id, users.status AS user_status FROM tokens JOIN users ON users.username = tokens.username WHERE tokens.token = ? AND tokens.username = ? AND tokens.status = ? AND users.type = ?",
-                [token, username, "1", userType]
-            );
-            rows = tokenRows;
-        } catch (e) {
-            // ignore and try legacy table below
+        const [tokenRows] = await pool.query(
+            `SELECT tokens.id, users.status AS user_status
+             FROM tokens
+             JOIN users ON users.username = tokens.username
+             ${extraJoin}
+             WHERE tokens.token = ?
+               AND tokens.username = ?
+               AND tokens.status = ?
+               ${extraWhere}`,
+            baseParams
+        );
+        if (tokenRows.length) {
+            return tokenRows;
         }
+    } catch (_) {
+        // try legacy table below
+    }
 
-        if (!rows.length) {
-            try {
-                const [legacyRows] = await pool.query(
-                    "SELECT login_token.id, users.status AS user_status FROM login_token JOIN users ON users.username = login_token.username WHERE login_token.token = ? AND login_token.username = ? AND login_token.status = ? AND users.type = ?",
-                    [token, username, "1", userType]
-                );
-                rows = legacyRows;
-            } catch (e) {
-                // login_token table doesn't exist or query failed, ignore
-            }
+    try {
+        const [legacyRows] = await pool.query(
+            `SELECT login_token.id, users.status AS user_status
+             FROM login_token
+             JOIN users ON users.username = login_token.username
+             ${extraJoin}
+             WHERE login_token.token = ?
+               AND login_token.username = ?
+               AND login_token.status = ?
+               ${extraWhere}`,
+            baseParams
+        );
+        return legacyRows;
+    } catch (_) {
+        return [];
+    }
+}
+
+async function checkToken(username, token) {
+    try {
+        const rows = await queryTokenRows(username, token);
+
+        if (rows.length === 1) {
+            return rows[0]?.user_status === "1";
         }
-
-        if (rows.length == 1) {
-            var user_status = rows[0]?.user_status;
-            if (user_status == '1') {
-                return true;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-
+        return false;
     } catch (err) {
         console.error("Token check error:", err);
+        return false;
+    }
+}
+
+async function checkAdminToken(username, token) {
+    try {
+        const rows = await queryTokenRows(
+            username,
+            token,
+            `INNER JOIN profile p ON p.username = users.username
+                AND p.status = '1'
+                AND p.user_type = 'platform_admin'`,
+            "AND users.status = '1'"
+        );
+
+        if (rows.length === 1) {
+            return rows[0]?.user_status === "1";
+        }
+        return false;
+    } catch (err) {
+        console.error("Admin token check error:", err);
         return false;
     }
 }
@@ -51,7 +81,6 @@ async function auth(req, res, next) {
     const token = req.headers["token"] || req.headers["Token"] || '';
     const username = req.headers["username"] || req.headers["Username"] || '';
 
-
     if (!token || !username) {
         return res.status(401).json({
             success: false,
@@ -59,7 +88,7 @@ async function auth(req, res, next) {
         });
     }
 
-    const isValid = await checkToken(username, token, "user");
+    const isValid = await checkToken(username, token);
 
     if (!isValid) {
         return res.status(401).json({
@@ -256,4 +285,4 @@ function requireFeature(featureKey) {
     };
 }
 
-export { auth, checkToken, CheckUserProjectMaping, validateBranch, checkSubscription, requirePlan, requireFeature }
+export { auth, checkToken, checkAdminToken, CheckUserProjectMaping, validateBranch, checkSubscription, requirePlan, requireFeature }

@@ -3,6 +3,7 @@ import express from "express";
 import pool from "../db.js";
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
 import { initializeBranchDefaults } from "../services/branchSetupService.js";
+import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 
 const router = express.Router();
 
@@ -30,11 +31,14 @@ const auth = async (req, res, next) => {
 
         conn = await pool.getConnection();
 
-        // FIX: Try to find user by username OR login_id (email)
+        // Resolve software user by username or active profile contact
         const [users] = await conn.query(
-            `SELECT username, login_id, status FROM users 
-             WHERE (username = ? OR login_id = ?) AND status = '1'`,
-            [username, username]  // Try both username and email
+            `SELECT u.username, p.email, p.mobile
+             FROM users u
+             LEFT JOIN profile p ON p.username = u.username AND p.status = '1'
+             WHERE (u.username = ? OR p.email = ? OR p.mobile = ?)
+               AND u.status = '1'`,
+            [username, username, username]
         );
 
         if (users.length === 0) {
@@ -74,7 +78,7 @@ const auth = async (req, res, next) => {
         // Set user info in request
         req.username = dbUsername;  // Use username from database
         req.token = token;
-        req.userEmail = users[0].login_id;
+        req.userEmail = users[0].email || users[0].mobile;
 
 
         next();
@@ -332,7 +336,10 @@ router.get("/onboarding", auth, async (req, res) => {
 
         for (const invitation of invitations) {
             const [inviter] = await conn.query(
-                "SELECT login_id as invited_by_name FROM users WHERE username = ?",
+                `SELECT p.email AS invited_by_name
+                 FROM profile p
+                 WHERE p.username = ? AND p.status = '1'
+                 LIMIT 1`,
                 [invitation.invited_by]
             );
             invitation.invited_by_name = inviter[0]?.invited_by_name || invitation.invited_by;
@@ -607,7 +614,10 @@ router.get("/invitations/my-invitations", auth, async (req, res) => {
         // Get inviter names
         for (let invitation of invitations) {
             const [inviter] = await conn.query(
-                "SELECT login_id as invited_by_name FROM users WHERE username = ?",
+                `SELECT p.email AS invited_by_name
+                 FROM profile p
+                 WHERE p.username = ? AND p.status = '1'
+                 LIMIT 1`,
                 [invitation.invited_by]
             );
             invitation.invited_by_name = inviter[0]?.invited_by_name || invitation.invited_by;
@@ -733,11 +743,12 @@ router.get("/invitations/verify/:token", async (req, res) => {
                 bl.branch_id as branch_code,  -- Use branch_id as branch_code
                 bm.type as role,
                 bm.username as invited_user,
-                u.login_id as invited_email,
+                p.email as invited_email,
                 bm.create_by as invited_by,
                 bm.designation
              FROM branch_mapping bm
              LEFT JOIN branch_list bl ON bl.branch_id = bm.branch_id
+             LEFT JOIN profile p ON p.username = bm.username AND p.status = '1'
              LEFT JOIN users u ON u.username = bm.username
              WHERE bm.invitation_token = ? 
                AND bm.is_accepted = '0' 
@@ -755,7 +766,10 @@ router.get("/invitations/verify/:token", async (req, res) => {
         }
 
         const [inviter] = await conn.query(
-            "SELECT login_id as invited_by_name FROM users WHERE username = ?",
+            `SELECT p.email AS invited_by_name
+             FROM profile p
+             WHERE p.username = ? AND p.status = '1'
+             LIMIT 1`,
             [invitations[0].invited_by]
         );
 
@@ -816,21 +830,17 @@ router.post("/:branch_id/invite", auth, async (req, res) => {
             });
         }
 
-        // Find user by email
-        const [user] = await conn.query(
-            "SELECT username FROM users WHERE login_id = ? AND status = '1'",
-            [email]
-        );
+        const resolvedUser = await resolveSoftwareUserByContact(conn, email);
 
-        if (user.length === 0) {
+        if (!resolvedUser) {
             await conn.rollback();
             return res.status(404).json({
                 success: false,
-                message: "User not found with this email"
+                message: "User not found with this email or mobile"
             });
         }
 
-        const invitedUsername = user[0].username;
+        const invitedUsername = resolvedUser.username;
 
         // Check if already mapped
         const [existingMapping] = await conn.query(

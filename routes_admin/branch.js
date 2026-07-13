@@ -43,7 +43,6 @@ function formatBranchRow(row) {
         modify_date: FORMAT_DATE(row.modify_date),
         owner: {
             username: row.username,
-            login_id: row.login_id,
             status: row.user_status === "1",
             name: row.owner_name,
             mobile: row.owner_mobile,
@@ -161,14 +160,13 @@ function buildBranchSearchClause(search) {
         OR bl.pincode LIKE ?
         OR bl.address_line_1 LIKE ?
         OR bl.address_line_2 LIKE ?
-        OR u.login_id LIKE ?
         OR p.name LIKE ?
         OR p.mobile LIKE ?
         OR p.email LIKE ?
     )`;
 
     const params = [
-        sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp,
+        sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp, sp,
     ];
 
     return { sql, params };
@@ -197,13 +195,9 @@ router.get("/list", authAdmin, async (req, res) => {
 
         const baseFrom = `
             FROM branch_list bl
-            LEFT JOIN users u ON u.username = bl.username AND u.type = 'user'
+            LEFT JOIN users u ON u.username = bl.username
             LEFT JOIN profile p ON p.username = bl.username
-                AND p.id = (
-                    SELECT MAX(p2.id)
-                    FROM profile p2
-                    WHERE p2.username = bl.username
-                )
+                AND p.status = '1'
             ${whereSql}
         `;
 
@@ -241,7 +235,6 @@ router.get("/list", authAdmin, async (req, res) => {
                 bl.modify_by,
                 bl.create_date,
                 bl.modify_date,
-                u.login_id,
                 u.status AS user_status,
                 p.name AS owner_name,
                 p.mobile AS owner_mobile,
@@ -322,20 +315,15 @@ router.get("/details/:branch_id", authAdmin, async (req, res) => {
                 bl.modify_by,
                 bl.create_date,
                 bl.modify_date,
-                u.login_id,
                 u.status AS user_status,
                 p.name AS owner_name,
                 p.mobile AS owner_mobile,
                 p.country_code AS owner_country_code,
                 p.email AS owner_email
             FROM branch_list bl
-            LEFT JOIN users u ON u.username = bl.username AND u.type = 'user'
+            LEFT JOIN users u ON u.username = bl.username
             LEFT JOIN profile p ON p.username = bl.username
-                AND p.id = (
-                    SELECT MAX(p2.id)
-                    FROM profile p2
-                    WHERE p2.username = bl.username
-                )
+                AND p.status = '1'
             WHERE bl.branch_id = ?
               AND bl.is_deleted = '0'
             LIMIT 1`,

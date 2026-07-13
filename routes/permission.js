@@ -4,6 +4,7 @@ const router = express.Router();
 import pool, { poolQuery } from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH } from "../helpers/function.js";
+import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 
 // Helper to check if a user is an admin in the branch
 async function isBranchAdmin(username, branchId) {
@@ -30,24 +31,16 @@ async function resolveTargetMapping(identifier, branchId) {
         return direct[0];
     }
 
-    // 2. If not found, resolve from users/profile tables
-    const [lookup] = await pool.query(
-        `SELECT u.username FROM users u
-         LEFT JOIN profile p ON p.username = u.username
-         WHERE (u.username = ? OR u.login_id = ? OR p.email = ? OR p.mobile = ?) LIMIT 1`,
-        [input, input, input, input]
-    );
-
-    if (lookup.length > 0) {
-        const resolvedUsername = lookup[0].username;
-        const [resolved] = await pool.query(
+    const resolved = await resolveSoftwareUserByContact(pool, input);
+    if (resolved?.username) {
+        const [mapping] = await pool.query(
             `SELECT username, map_id, type, permission_role_id, custom_permissions 
              FROM branch_mapping 
              WHERE username = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1`,
-            [resolvedUsername, branchId]
+            [resolved.username, branchId]
         );
-        if (resolved.length > 0) {
-            return resolved[0];
+        if (mapping.length > 0) {
+            return mapping[0];
         }
     }
 

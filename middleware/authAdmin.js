@@ -1,4 +1,4 @@
-import { checkToken } from "./auth.js";
+import { checkAdminToken } from "./auth.js";
 
 async function authAdmin(req, res, next) {
     const token = req.headers["token"] || req.headers["Token"] || "";
@@ -11,7 +11,7 @@ async function authAdmin(req, res, next) {
         });
     }
 
-    const isValid = await checkToken(username, token, "admin");
+    const isValid = await checkAdminToken(username, token);
 
     if (!isValid) {
         return res.status(401).json({

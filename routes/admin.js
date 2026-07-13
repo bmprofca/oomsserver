@@ -5,6 +5,7 @@ import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER
 import { BASE_INVITATION_LINK, APP_NAME } from "../helpers/Config.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { SendMail } from "../helpers/Mail.js";
+import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 
 const router = express.Router();
 const BRANCH_MAPPING_TYPE = "admin";
@@ -177,19 +178,16 @@ router.post("/check-user", auth, validateBranch, requireBranchAdmin, requireBran
             });
         }
 
-        const [rows] = await pool.query(
-            "SELECT username FROM users WHERE login_id = ? AND status = '1' ORDER BY id DESC LIMIT 1",
-            [String(email).trim()]
-        );
+        const resolvedUser = await resolveSoftwareUserByContact(pool, String(email).trim());
 
-        if (!rows.length) {
+        if (!resolvedUser) {
             return res.status(404).json({
                 success: false,
                 message: "User not found",
             });
         }
 
-        const admin_username = rows[0].username;
+        const admin_username = resolvedUser.username;
 
         if (isSelfUser(req, admin_username)) {
             return res.status(400).json({
