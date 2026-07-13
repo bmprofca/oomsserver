@@ -664,7 +664,8 @@ router.get('/user-permissions', auth, validateBranch, async (req, res) => {
             permissions: Array.from(resolvedPermissions),
             data: {
                 permission_role_id: effectiveRoleId,
-                custom_permissions: customPermissionsArray
+                custom_permissions: customPermissionsArray,
+                permissions: Array.from(resolvedPermissions),
             }
         });
 
