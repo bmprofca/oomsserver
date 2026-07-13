@@ -2,6 +2,13 @@ import crypto from "crypto";
 import pool from "../db.js";
 import { decrypt, encrypt } from "../utils/smsEncryption.js";
 import axios from "axios";
+import {
+    FAST2SMS_API_URL,
+    FAST2SMS_AUTH_TOKEN,
+    FAST2SMS_AUTH_TOKEN_MASKED,
+    FAST2SMS_DEFAULT_ROUTE,
+    FAST2SMS_SENDER_ID,
+} from "../helpers/Config.js";
 
 function newId(prefix) {
     return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
@@ -126,8 +133,6 @@ async function updateConfig({ branch_id, username, payload }) {
     return sanitizeConfig(rows[0]);
 }
 
-const DEFAULT_AUTH_TOKEN = "TNcvwZtlCVKAhVecVxeTOBubj8TdQDkRuw9m6r0bcsbdRjYzhv5ylzoyli6T";
-
 async function listConfigs({ branch_id, page_no = 1, limit = 10 }) {
     const page = Math.max(Number(page_no) || 1, 1);
     const size = Math.max(Number(limit) || 10, 1);
@@ -148,13 +153,13 @@ async function listConfigs({ branch_id, page_no = 1, limit = 10 }) {
         branch_id: branch_id,
         config_name: "System Default Fast2SMS",
         provider: "fast2sms",
-        sender_id: "ONESAA",
-        route: "dlt",
+        sender_id: FAST2SMS_SENDER_ID,
+        route: FAST2SMS_DEFAULT_ROUTE,
         is_default: hasCustomDefault ? 0 : 1,
         status: "active",
         daily_limit: 1000,
         sent_today: 0,
-        auth_token: "TNcv********************" // Masked
+        auth_token: FAST2SMS_AUTH_TOKEN_MASKED
     };
 
     const sanitizedRows = rows.map(sanitizeConfig);
@@ -185,13 +190,13 @@ async function getConfigDetails({ branch_id, config_id }) {
             branch_id: branch_id,
             config_name: "System Default Fast2SMS",
             provider: "fast2sms",
-            sender_id: "ONESAA",
-            route: "dlt",
+            sender_id: FAST2SMS_SENDER_ID,
+            route: FAST2SMS_DEFAULT_ROUTE,
             is_default: 1, // Resolves as default
             status: "active",
             daily_limit: 1000,
             sent_today: 0,
-            auth_token: "TNcv********************" // Masked
+            auth_token: FAST2SMS_AUTH_TOKEN_MASKED
         };
     }
 
@@ -255,14 +260,14 @@ async function testConfig({ payload }) {
     const {
         provider = "fast2sms",
         auth_token,
-        sender_id = "ONESAA",
-        route = "dlt",
+        sender_id = FAST2SMS_SENDER_ID,
+        route = FAST2SMS_DEFAULT_ROUTE,
         test_number,
         template_id,
         variables_values
     } = payload;
 
-    const actualToken = auth_token === "TNcv********************" ? DEFAULT_AUTH_TOKEN : auth_token;
+    const actualToken = auth_token === FAST2SMS_AUTH_TOKEN_MASKED ? FAST2SMS_AUTH_TOKEN : auth_token;
 
     if (!actualToken || !test_number) {
         throw new Error("auth_token and test_number are required");
@@ -274,7 +279,7 @@ async function testConfig({ payload }) {
             const cleanNumbers = String(test_number).replace(/\s+/g, ',').replace(/,+/g, ',');
             const body = {
                 route: resolvedRoute,
-                sender_id: sender_id || "ONESAA",
+                sender_id: sender_id || FAST2SMS_SENDER_ID,
                 flash: 0,
                 numbers: cleanNumbers
             };
@@ -286,7 +291,7 @@ async function testConfig({ payload }) {
                 body.message = payload.message || "Test SMS config connection successful.";
             }
 
-            const response = await axios.post("https://www.fast2sms.com/dev/bulkV2", body, {
+            const response = await axios.post(FAST2SMS_API_URL, body, {
                 headers: {
                     "authorization": actualToken,
                     "Content-Type": "application/json"
@@ -313,12 +318,12 @@ async function getConfigWithDecryptedToken({ branch_id, config_id }) {
             branch_id: branch_id,
             config_name: "System Default Fast2SMS",
             provider: "fast2sms",
-            sender_id: "ONESAA",
-            route: "dlt",
+            sender_id: FAST2SMS_SENDER_ID,
+            route: FAST2SMS_DEFAULT_ROUTE,
             is_default: 1,
             status: "active",
             daily_limit: 1000,
-            auth_token: DEFAULT_AUTH_TOKEN
+            auth_token: FAST2SMS_AUTH_TOKEN
         };
     }
 

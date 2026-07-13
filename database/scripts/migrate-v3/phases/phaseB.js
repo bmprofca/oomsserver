@@ -57,12 +57,9 @@ export async function runPhaseB(ctx) {
         if (isLoginUser) {
             userRows.push({
                 username: ou.username,
-                login_id: ou.login_id || ou.username,
-                password: ou.password,
                 create_by: ou.create_by || ou.username,
                 status: ou.status ?? "1",
                 remark: ou.remark || "",
-                type: ou.user_type === "admin" ? "admin" : "user",
                 create_date: ou.create_date,
             });
             mappingRows.push({
@@ -93,15 +90,12 @@ export async function runPhaseB(ctx) {
                 is_deleted: "0",
                 create_date: ou.create_date,
             });
-            if (ou.login_id && ou.user_type === "user") {
+            if (ou.user_type === "user") {
                 userRows.push({
                     username: ou.username,
-                    login_id: ou.login_id,
-                    password: ou.password,
                     create_by: ou.create_by || ou.username,
                     status: ou.status ?? "1",
                     remark: ou.remark || "",
-                    type: "user",
                     create_date: ou.create_date,
                 });
             }
@@ -123,7 +117,7 @@ export async function runPhaseB(ctx) {
     const usersInserted = await batchInsert(
         target,
         "users",
-        ["username", "login_id", "password", "create_by", "status", "remark", "type", "create_date"],
+        ["username", "create_by", "status", "remark", "create_date"],
         userRows,
         { dryRun }
     );

@@ -6,7 +6,14 @@ import { decrypt } from "../utils/smsEncryption.js";
 import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
 import { SendMail } from "../helpers/Mail.js";
-import { APP_NAME } from "../helpers/Config.js";
+import {
+    APP_NAME,
+    FAST2SMS_API_URL,
+    FAST2SMS_AUTH_TOKEN,
+    FAST2SMS_SENDER_ID,
+    SMS_OTP_ROUTE,
+    SMS_OTP_DLT_TEMPLATE_ID,
+} from "../helpers/Config.js";
 import axios from 'axios';
 import {
     findSoftwareUserByEmail,
@@ -19,8 +26,72 @@ import {
     normalizeCountryCode,
     normalizeMobileDigits,
 } from "../helpers/clientPhone.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 
-const DEFAULT_AUTH_TOKEN = "TNcvwZtlCVKAhVecVxeTOBubj8TdQDkRuw9m6r0bcsbdRjYzhv5ylzoyli6T";
+async function fetchActiveProfilePayload(conn, username) {
+    const [rows] = await conn.query(
+        `SELECT
+            profile_id,
+            username,
+            user_type,
+            name,
+            email,
+            mobile,
+            country_code,
+            image,
+            pan_number,
+            city,
+            state,
+            gender,
+            date_of_birth
+         FROM profile
+         WHERE username = ?
+           AND status = '1'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [username]
+    );
+
+    const row = rows[0];
+    if (!row) {
+        return null;
+    }
+
+    return {
+        profile_id: row.profile_id,
+        username: row.username,
+        user_type: row.user_type,
+        name: row.name,
+        email: row.email,
+        mobile: row.mobile,
+        country_code: row.country_code,
+        image: buildProfileImageUrl(row.image),
+        pan_number: row.pan_number,
+        city: row.city,
+        state: row.state,
+        gender: row.gender,
+        date_of_birth: row.date_of_birth,
+    };
+}
+
+function buildProfilePayloadFromContact({ username, name, email, mobile, countryCode = "+91" }) {
+    return {
+        profile_id: null,
+        username,
+        user_type: "user",
+        name,
+        email: email || null,
+        mobile: mobile || null,
+        country_code: countryCode,
+        image: null,
+        pan_number: null,
+        city: null,
+        state: null,
+        gender: null,
+        date_of_birth: null,
+    };
+}
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MOBILE_REGEX = /^\d{10}$/;
 
@@ -73,12 +144,16 @@ async function sendSmsOtp(targetPhone, otp, { template_id, config_id } = {}) {
     const cleanNumber = String(targetPhone || "").replace(/\D/g, "");
     if (cleanNumber.length < 10) return;
 
+    if (!FAST2SMS_AUTH_TOKEN) {
+        throw new Error("SMS OTP is not configured. Set FAST2SMS_AUTH_TOKEN in the server environment.");
+    }
+
     let activeConfig = {
-        auth_token: DEFAULT_AUTH_TOKEN,
-        sender_id: "ONESAA",
-        route: "otp",
+        auth_token: FAST2SMS_AUTH_TOKEN,
+        sender_id: FAST2SMS_SENDER_ID,
+        route: SMS_OTP_ROUTE,
     };
-    let activeTemplate = null;
+    let dltTemplateId = SMS_OTP_DLT_TEMPLATE_ID || null;
 
     if (config_id) {
         const [configs] = await pool.query(
@@ -88,19 +163,8 @@ async function sendSmsOtp(targetPhone, otp, { template_id, config_id } = {}) {
         if (configs.length > 0) {
             activeConfig = {
                 auth_token: decrypt(configs[0].auth_token_encrypted),
-                sender_id: configs[0].sender_id || "ONESAA",
-                route: configs[0].route || "otp",
-            };
-        }
-    } else {
-        const [configs] = await pool.query(
-            "SELECT * FROM sms_configs WHERE is_default = 1 AND status = 'active' LIMIT 1"
-        );
-        if (configs.length > 0) {
-            activeConfig = {
-                auth_token: decrypt(configs[0].auth_token_encrypted),
-                sender_id: configs[0].sender_id || "ONESAA",
-                route: configs[0].route || "otp",
+                sender_id: configs[0].sender_id || FAST2SMS_SENDER_ID,
+                route: configs[0].route || SMS_OTP_ROUTE,
             };
         }
     }
@@ -110,34 +174,27 @@ async function sendSmsOtp(targetPhone, otp, { template_id, config_id } = {}) {
             "SELECT * FROM sms_templates WHERE template_id = ? AND status = 'active' LIMIT 1",
             [template_id]
         );
-        if (templates.length > 0) {
-            activeTemplate = templates[0];
-        }
-    } else {
-        const [templates] = await pool.query(
-            "SELECT * FROM sms_templates WHERE status = 'active' AND (template_name LIKE '%OTP%' OR message LIKE '%OTP%') LIMIT 1"
-        );
-        if (templates.length > 0) {
-            activeTemplate = templates[0];
+        if (templates.length > 0 && templates[0].dlt_template_id) {
+            dltTemplateId = templates[0].dlt_template_id;
         }
     }
 
     const smsPayload = {
-        route: activeConfig.route || "otp",
+        route: activeConfig.route || SMS_OTP_ROUTE,
         numbers: cleanNumber,
     };
 
-    if (activeTemplate?.dlt_template_id) {
+    if (dltTemplateId) {
         smsPayload.route = "dlt";
-        smsPayload.sender_id = activeConfig.sender_id || "ONESAA";
-        smsPayload.message = activeTemplate.dlt_template_id;
+        smsPayload.sender_id = activeConfig.sender_id || FAST2SMS_SENDER_ID;
+        smsPayload.message = dltTemplateId;
         smsPayload.variables_values = otp;
     } else {
-        smsPayload.route = "otp";
+        smsPayload.route = activeConfig.route || SMS_OTP_ROUTE;
         smsPayload.variables_values = otp;
     }
 
-    await axios.post("https://www.fast2sms.com/dev/bulkV2", smsPayload, {
+    await axios.post(FAST2SMS_API_URL, smsPayload, {
         headers: {
             authorization: activeConfig.auth_token,
             "Content-Type": "application/json",
@@ -190,8 +247,6 @@ function serializeRouteError(err) {
 
 
 router.post("/login/send-otp", async (req, res) => {
-    console.log("LOGIN INITIATED");
-
     let conn;
 
     try {
@@ -441,6 +496,8 @@ const verifyOtpHandler = async (req, res) => {
 
         await conn.commit();
 
+        const profile = await fetchActiveProfilePayload(conn, resolvedUsername);
+
         const branches = [];
         for (let i = 0; i < map_row.length; i++) {
             const element = map_row[i];
@@ -458,6 +515,7 @@ const verifyOtpHandler = async (req, res) => {
             token,
             expire_date: FORMAT_DATE(tokenMeta?.[0]?.expire_date) ?? null,
             branches,
+            profile,
         });
     } catch (err) {
         if (conn) {
@@ -726,6 +784,16 @@ router.post("/register/verify-otp", async (req, res) => {
 
         await conn.commit();
 
+        const profile =
+            (await fetchActiveProfilePayload(conn, username)) ||
+            buildProfilePayloadFromContact({
+                username,
+                name: trimmedName,
+                email: contact.email,
+                mobile: contact.mobile,
+                countryCode: contact.mobile ? normalizeCountryCode("+91") : null,
+            });
+
         return res.status(201).json({
             success: true,
             message: "Registration successful",
@@ -733,11 +801,7 @@ router.post("/register/verify-otp", async (req, res) => {
             token,
             expire_date: FORMAT_DATE(tokenMeta?.[0]?.expire_date) ?? null,
             branches: [],
-            profile: {
-                name: trimmedName,
-                email: contact.email,
-                mobile: contact.mobile,
-            },
+            profile,
             is_new_user: true,
         });
     } catch (err) {
@@ -817,7 +881,7 @@ router.post('/google-auth', async (req, res) => {
         }
 
         // ✅ Generate session token
-        const sessionToken = crypto.randomBytes(32).toString('hex');
+        const sessionToken = RANDOM_STRING(50);
         const tokenId = await UNIQUE_RANDOM_STRING("tokens", "token_id", { conn });
         const userIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
 
@@ -845,6 +909,14 @@ router.post('/google-auth', async (req, res) => {
 
         await conn.commit();
 
+        const profile =
+            (await fetchActiveProfilePayload(conn, finalUsername)) ||
+            buildProfilePayloadFromContact({
+                username: finalUsername,
+                name,
+                email,
+            });
+
         console.log('🏢 Branches found:', branches.length);
 
         // ✅ Return response matching frontend expectations
@@ -853,10 +925,7 @@ router.post('/google-auth', async (req, res) => {
             message: isNewUser ? "Account created successfully" : "Login successful",
             username: finalUsername,
             token: sessionToken,
-            profile: {
-                name: name,
-                email: email
-            },
+            profile,
             branches: branches.map(b => ({
                 branch_id: b.branch_id,
                 name: b.name,

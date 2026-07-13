@@ -4,9 +4,14 @@ import { getConfigWithDecryptedToken } from "./smsConfigService.js";
 import { parseJson } from "./smsBroadcastService.js";
 import crypto from "crypto";
 import { debitWallet, creditWallet, getOrCreateWallet } from "./walletService.js";
+import {
+    FAST2SMS_API_URL,
+    FAST2SMS_AUTH_TOKEN,
+    FAST2SMS_DEFAULT_ROUTE,
+    FAST2SMS_SENDER_ID,
+} from "../helpers/Config.js";
 
 const VARIABLE_REGEX = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
-const DEFAULT_AUTH_TOKEN = "TNcvwZtlCVKAhVecVxeTOBubj8TdQDkRuw9m6r0bcsbdRjYzhv5ylzoyli6T";
 
 function newId(prefix) {
     return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
@@ -145,9 +150,9 @@ async function getAvailableConfigs(branchId, primaryConfigId, fallbackConfigId =
                 branch_id: branchId,
                 config_name: "Default Fast2SMS",
                 provider: "fast2sms",
-                auth_token: DEFAULT_AUTH_TOKEN,
-                sender_id: "ONESAA",
-                route: "dlt",
+                auth_token: FAST2SMS_AUTH_TOKEN,
+                sender_id: FAST2SMS_SENDER_ID,
+                route: FAST2SMS_DEFAULT_ROUTE,
                 daily_limit: 1000
             },
             type: 'system_default',
@@ -224,11 +229,11 @@ function formatScheduleTime(date) {
  */
 async function sendSmsViaFast2SMS({ auth_token, route, sender_id, message, variables_values, numbers, schedule_time }) {
     try {
-        const resolvedRoute = route || "dlt";
+        const resolvedRoute = route || FAST2SMS_DEFAULT_ROUTE;
         const cleanNumbers = String(numbers).replace(/\s+/g, ',').replace(/,+/g, ',');
         const body = {
             route: resolvedRoute,
-            sender_id: sender_id || "ONESAA",
+            sender_id: sender_id || FAST2SMS_SENDER_ID,
             flash: 0,
             numbers: cleanNumbers
         };
@@ -244,7 +249,7 @@ async function sendSmsViaFast2SMS({ auth_token, route, sender_id, message, varia
             body.schedule_time = schedule_time;
         }
 
-        const response = await axios.post("https://www.fast2sms.com/dev/bulkV2", body, {
+        const response = await axios.post(FAST2SMS_API_URL, body, {
             headers: {
                 "authorization": auth_token,
                 "Content-Type": "application/json"
