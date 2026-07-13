@@ -135,7 +135,7 @@ async function ensureTypeFormatSamples(columnKey) {
     }
 
     const startTime = Date.now();
-    console.log(`[InvoiceFormats] Missing PDFs for '${columnKey}'. Generating now...`);
+    // console.log(`[InvoiceFormats] Missing PDFs for '${columnKey}'. Generating now...`);
 
     const jobs = [];
     for (const formatKey of formats) {
@@ -158,7 +158,7 @@ async function ensureTypeFormatSamples(columnKey) {
             }
         }
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[InvoiceFormats] Done — ${jobs.length} PDFs generated for '${columnKey}' in ${elapsed}s`);
+        // console.log(`[InvoiceFormats] Done — ${jobs.length} PDFs generated for '${columnKey}' in ${elapsed}s`);
     } catch (err) {
         console.error(`[InvoiceFormats] Batch PDF render failed for '${columnKey}':`, err.message);
     }

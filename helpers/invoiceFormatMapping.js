@@ -1,5 +1,5 @@
 export const INVOICE_FORMAT_MAPPING = {
-    sale: ["classic", "modern", "elegant", "corporate", "creative"],
+    sale: ["classic", "modern", "elegant", "corporate", "creative", "compact", "professional", "boutique"],
     purchase: ["classic", "modern", "elegant", "corporate", "creative"],
     payment: ["classic", "modern", "elegant", "corporate", "creative"],
     receive: ["classic", "modern", "elegant", "corporate", "creative"],
