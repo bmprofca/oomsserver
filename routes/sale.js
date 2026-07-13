@@ -644,7 +644,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const params = [
             saleEntriesBranchId,
             branch_id,
-            branch_id,
             "sale",
             fromD,
             toD,

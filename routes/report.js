@@ -3399,10 +3399,9 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
         const offset = (pageNum - 1) * limitNum;
 
-        // Query to get top clients by sales with proper firm association
+        // Aggregate top clients first (no per-row firms subquery — avoids max_statement_time timeout)
         const [clientsData] = await pool.query(
             `SELECT 
-                -- Client Information
                 se.party_id as username,
                 MAX(p.name) as name,
                 MAX(p.guardian_name) as guardian_name,
@@ -3410,75 +3409,40 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                 MAX(p.mobile) as mobile,
                 MAX(p.email) as email,
                 MAX(p.country_code) as country_code,
-                
-                -- Sales Summary
                 COUNT(DISTINCT se.sale_id) as total_transactions,
                 COUNT(se.id) as total_items,
                 COALESCE(SUM(se.total), 0) as total_amount,
-                
-                -- Additional Info
                 MIN(DATE(se.sale_date)) as first_sale_date,
-                MAX(DATE(se.sale_date)) as last_sale_date,
-                
-                -- Get all firms associated with this client (from firms table)
-                (
-                    SELECT JSON_ARRAYAGG(
-                        JSON_OBJECT(
-                            'firm_id', f.firm_id,
-                            'firm_name', f.firm_name,
-                            'firm_type', f.firm_type,
-                            'gst_no', f.gst_no,
-                            'pan_no', f.pan_no,
-                            'tan_no', f.tan_no,
-                            'address', f.address_line_1,
-                            'city', f.city,
-                            'state', f.state,
-                            'status', f.status
-                        )
-                    )
-                    FROM firms f
-                    WHERE f.branch_id = ?
-                    AND (
-                        -- Firm directly linked in sale_entries
-                        f.firm_id IN (
-                            SELECT DISTINCT se2.firm_id 
-                            FROM sale_entries se2 
-                            WHERE se2.party_id = se.party_id 
-                            AND se2.firm_id IS NOT NULL 
-                            AND se2.firm_id != ''
-                        )
-                        OR
-                        -- Firm associated with client through any means (you can add more conditions here)
-                        f.username = se.party_id
-                    )
-                    AND (f.is_deleted = '0' OR f.is_deleted = 0)
-                ) as firms_json
-                
+                MAX(DATE(se.sale_date)) as last_sale_date
             FROM sale_entries se
             LEFT JOIN profile p ON se.party_id = p.username
-            
             WHERE se.branch_id = ?
-            AND DATE(se.sale_date) BETWEEN ? AND ?
+            AND se.sale_date >= ? AND se.sale_date <= ?
             AND se.party_type = 'client'
             AND (se.is_task = '0' OR se.is_task = 0 OR se.is_task IS NULL)
-            
             GROUP BY se.party_id
             HAVING total_amount > 0
             ORDER BY total_amount DESC
-            LIMIT ? OFFSET ?
-            `,
-            [branch_id, branch_id, from_date, to_date, limitNum, offset]
+            LIMIT ? OFFSET ?`,
+            [branch_id, from_date, to_date, limitNum, offset]
         );
+
+        const clientUsernames = clientsData.map((c) => c.username).filter(Boolean);
+        const firmsByUsername = await getFirmsMapForUsernames(branch_id, clientUsernames);
 
         // Get total count for pagination
         const [countResult] = await pool.query(
-            `SELECT COUNT(DISTINCT party_id) as total
-            FROM sale_entries se
-            WHERE se.branch_id = ?
-            AND DATE(se.sale_date) BETWEEN ? AND ?
-            AND se.party_type = 'client'
-            AND (se.is_task = '0' OR se.is_task = 0 OR se.is_task IS NULL)
-            `,
+            `SELECT COUNT(*) as total
+            FROM (
+                SELECT se.party_id
+                FROM sale_entries se
+                WHERE se.branch_id = ?
+                AND se.sale_date >= ? AND se.sale_date <= ?
+                AND se.party_type = 'client'
+                AND (se.is_task = '0' OR se.is_task = 0 OR se.is_task IS NULL)
+                GROUP BY se.party_id
+                HAVING COALESCE(SUM(se.total), 0) > 0
+            ) counted`,
             [branch_id, from_date, to_date]
         );
 
@@ -3487,30 +3451,19 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
 
         // Format the response data with proper firm parsing
         const formattedClients = clientsData.map((client, index) => {
-            let firms = [];
-
-            // Parse firms_json if it exists and is not null
-            if (client.firms_json && client.firms_json !== 'null') {
-                try {
-                    // Handle cases where JSON_ARRAYAGG returns a string
-                    let firmsArray = client.firms_json;
-                    if (typeof firmsArray === 'string') {
-                        firmsArray = JSON.parse(firmsArray);
-                    }
-                    if (Array.isArray(firmsArray)) {
-                        firms = firmsArray.filter(f => f.firm_id !== null);
-                    }
-                } catch (e) {
-                    console.log("Error parsing firms JSON:", e);
-                }
-            }
-
-            // If no firms found through the subquery, try to get firms directly
-            if (firms.length === 0 && client.username) {
-                // This is a fallback - we'll get firms in a separate query if needed
-                // But for now, we'll leave it as empty array
-                console.log(`No firms found for client: ${client.username}`);
-            }
+            const firmsRaw = firmsByUsername[client.username] || [];
+            const firms = firmsRaw.map((f) => ({
+                firm_id: f.firm_id,
+                firm_name: f.firm_name,
+                firm_type: f.firm_type,
+                gst_no: f.gst_no,
+                pan_no: f.pan_no,
+                tan_no: f.tan_no,
+                address: f.address?.address_line_1 || '',
+                city: f.address?.city || '',
+                state: f.address?.state || '',
+                status: f.status,
+            }));
 
             return {
                 rank: index + 1,
@@ -3555,7 +3508,7 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                 COUNT(id) as total_items
             FROM sale_entries
             WHERE branch_id = ?
-            AND DATE(sale_date) BETWEEN ? AND ?
+            AND sale_date >= ? AND sale_date <= ?
             AND party_type = 'client'
             AND (is_task = '0' OR is_task = 0 OR is_task IS NULL)
             `,
