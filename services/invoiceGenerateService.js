@@ -130,11 +130,7 @@ async function getBranchInvoiceProfile(branch_id) {
 }
 
 function mapFormatKeyToTemplateName(key) {
-    const k = String(key || "classic").trim().toLowerCase();
-    if (k.startsWith("premium")) return "premium";
-    if (k === "modern") return "modern";
-    if (k === "compact" || k === "minimal") return "modern";
-    return "classic"; // fallback
+    return String(key || "classic").trim().toLowerCase();
 }
 
 async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {

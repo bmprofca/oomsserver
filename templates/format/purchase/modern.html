@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,232 +6,193 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>{{type_label}}</title>
 <style>
+
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,Arial,sans-serif;font-size:13px;color:#0f172a;background:#fff;width:794px;}
+  body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;color:#2d3748;background:#fff;width:794px;}
   .page{width:794px;min-height:1123px;padding:0;position:relative;}
-
-  /* ── SIDEBAR STRIP ── */
-  .layout{display:flex;min-height:1123px;}
-  .sidebar{width:220px;background:linear-gradient(185deg,#0f172a 0%,#1e293b 40%,#0f4c75 100%);padding:36px 24px;display:flex;flex-direction:column;flex-shrink:0;}
-  .main-col{flex:1;display:flex;flex-direction:column;}
-
-  /* sidebar elements */
-  .sb-logo-circle{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#38bdf8,#0ea5e9);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff;margin-bottom:20px;letter-spacing:-1px;}
-  .sb-company-name{font-size:14px;font-weight:700;color:#fff;margin-bottom:4px;line-height:1.3;}
-  .sb-company-detail{font-size:10px;color:rgba(255,255,255,0.55);line-height:1.7;margin-bottom:28px;}
-  .sb-divider{height:1px;background:rgba(255,255,255,0.12);margin-bottom:24px;}
-  .sb-section-label{font-size:8.5px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px;}
-  .sb-field{margin-bottom:14px;}
-  .sb-field-label{font-size:8.5px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;}
-  .sb-field-value{font-size:12px;font-weight:600;color:rgba(255,255,255,0.9);}
-  .sb-amount-box{background:linear-gradient(135deg,#38bdf8,#0ea5e9);border-radius:10px;padding:14px 16px;margin-top:auto;margin-bottom:0;}
-  .sb-amount-label{font-size:9px;font-weight:700;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
-  .sb-amount-value{font-size:18px;font-weight:800;color:#fff;word-break:break-all;}
-
-  /* main column top */
-  .main-top{padding:32px 36px 0;background:#fff;}
-  .invoice-type-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;}
-  .type-badge{font-size:26px;font-weight:800;color:#0f172a;letter-spacing:-0.5px;}
-  .type-sub{font-size:11px;color:#64748b;font-weight:400;margin-top:2px;}
-  .inv-no-block{text-align:right;}
-  .inv-no-label{font-size:9px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;}
-  .inv-no-value{font-size:16px;font-weight:700;color:#0f172a;}
-
-  /* accent line */
-  .accent-line{height:3px;background:linear-gradient(90deg,#38bdf8,#0ea5e9,#7c3aed);margin:0 36px 24px;border-radius:2px;}
-
-  /* party cards */
-  .party-section{padding:0 36px;margin-bottom:24px;display:flex;gap:16px;}
-  .party-card{flex:1;background:#f8fafc;border-radius:10px;padding:14px 18px;border:1px solid #e2e8f0;}
-  .party-card-label{font-size:9px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;}
-  .party-card-name{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px;}
-  .party-card-detail{font-size:10px;color:#64748b;line-height:1.6;}
-
-  /* items table */
-  .table-section{padding:0 36px;margin-bottom:24px;}
-  .table-section-label{font-size:9px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;}
-  .items-table{width:100%;border-collapse:collapse;}
-  .items-table thead tr{background:#0f172a;}
-  .items-table thead th{padding:10px 12px;font-size:9.5px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.8px;text-align:left;}
-  .items-table thead th:last-child,.items-table thead th:nth-last-child(-n+2){text-align:right;}
-  .items-table tbody tr{border-bottom:1px solid #f1f5f9;}
-  .items-table tbody tr:last-child{border-bottom:none;}
-  .items-table tbody td{padding:11px 12px;font-size:12px;color:#334155;}
-  .items-table tbody td:last-child,.items-table tbody td:nth-last-child(-n+2){text-align:right;font-weight:600;}
-  .item-name{font-weight:600;color:#0f172a;font-size:12px;}
-  .item-desc{font-size:10px;color:#94a3b8;margin-top:2px;}
-
-  /* totals */
-  .totals-section{padding:0 36px;margin-bottom:24px;display:flex;justify-content:flex-end;}
-  .totals-box{width:260px;}
-  .totals-row{display:flex;justify-content:space-between;padding:8px 0;font-size:12px;border-bottom:1px solid #f1f5f9;}
-  .totals-row:last-child{border:none;}
-  .totals-row .t-label{color:#64748b;}
-  .totals-row .t-value{font-weight:600;color:#0f172a;}
-  .totals-row.grand{background:linear-gradient(135deg,#38bdf8,#0ea5e9);padding:12px 16px;border-radius:8px;margin-top:4px;}
-  .totals-row.grand .t-label,.totals-row.grand .t-value{color:#fff;font-weight:700;font-size:14px;}
-
-  /* simple voucher */
-  .voucher-section{padding:0 36px;margin-bottom:24px;}
-  .voucher-card{background:#f8fafc;border-radius:12px;padding:24px;border:1px solid #e2e8f0;}
-  .voucher-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #e2e8f0;}
-  .voucher-row:last-child{border:none;}
-  .v-label{font-size:10px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;}
-  .v-value{font-size:12px;font-weight:600;color:#0f172a;}
-  .v-amount{font-size:22px;font-weight:800;color:#0ea5e9;}
-
-  /* remark */
-  .remark-section{padding:0 36px;margin-bottom:24px;}
-  .remark-card{background:#fefce8;border:1px solid #fef08a;border-radius:8px;padding:14px 16px;}
-  .remark-label{font-size:9px;font-weight:700;color:#a16207;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
-  .remark-text{font-size:11px;color:#713f12;line-height:1.6;}
-
-  /* footer */
-  .footer{margin-top:auto;background:#f8fafc;border-top:2px solid #e2e8f0;padding:14px 36px 14px 36px;display:flex;justify-content:space-between;align-items:center;}
-  .footer-left{font-size:10px;color:#94a3b8;}
-  .footer-right{font-size:10px;color:#94a3b8;text-align:right;}
-  .footer-brand{font-weight:700;color:#0ea5e9;}
+  .header{padding:48px;display:flex;justify-content:space-between;align-items:center;}
+  .company-name{font-size:22px;font-weight:600;color:#1a202c;margin-bottom:4px;letter-spacing:-0.5px;}
+  .company-details{font-size:12px;color:#718096;line-height:1.5;}
+  .invoice-type-label{font-size:12px;font-weight:600;text-transform:uppercase;color:#4a5568;letter-spacing:2px;margin-bottom:6px;text-align:right;}
+  .invoice-num-val{font-size:18px;font-weight:300;color:#2d3748;text-align:right;}
+  .invoice-num-label{display:none;}
+  .meta-strip{margin:0 48px;padding:24px 0;display:flex;gap:48px;border-top:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;}
+  .meta-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;}
+  .meta-value{font-size:14px;font-weight:500;color:#2d3748;}
+  .body{padding:36px 48px;}
+  .party-section{display:flex;gap:36px;margin-bottom:40px;}
+  .party-card{flex:1;}
+  .party-card-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;}
+  .party-name{font-size:16px;font-weight:500;color:#1a202c;margin-bottom:6px;}
+  .party-detail{font-size:12px;color:#718096;line-height:1.6;}
+  .table-title{display:none;}
+  .items-table{width:100%;border-collapse:collapse;margin-bottom:40px;}
+  .items-table th{padding:12px 0;font-size:10px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;border-bottom:2px solid #e2e8f0;text-align:left;}
+  .items-table td{padding:16px 0;font-size:13px;color:#4a5568;border-bottom:1px solid #edf2f7;vertical-align:top;}
+  .items-table th:last-child, .items-table td:last-child{text-align:right;}
+  .totals-section{display:flex;justify-content:flex-end;margin-bottom:40px;}
+  .totals-box{width:280px;}
+  .totals-row{display:flex;justify-content:space-between;padding:12px 0;font-size:14px;}
+  .t-label{color:#718096;}
+  .t-value{color:#2d3748;font-weight:500;}
+  .totals-row.grand{border-top:2px solid #2d3748;margin-top:8px;padding-top:16px;}
+  .totals-row.grand .t-label, .totals-row.grand .t-value{font-size:18px;font-weight:600;color:#1a202c;}
+  .voucher-section{padding:0;margin-bottom:40px;}
+  .voucher-row{display:flex;justify-content:space-between;padding:16px 0;border-bottom:1px solid #edf2f7;}
+  .voucher-label{font-size:11px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;}
+  .voucher-value{font-size:14px;color:#4a5568;font-weight:500;}
+  .amount-highlight{font-size:24px;font-weight:300;color:#1a202c;}
+  .remark-section{margin-bottom:40px;}
+  .remark-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;}
+  .remark-text{font-size:12px;color:#718096;line-height:1.6;}
+  .footer{position:absolute;bottom:48px;left:48px;right:48px;display:flex;justify-content:space-between;font-size:10px;color:#a0aec0;border-top:1px solid #e2e8f0;padding-top:16px;}
+    
 </style>
 </head>
 <body>
 <div class="page">
-  <div class="layout">
-    <!-- SIDEBAR -->
-    <div class="sidebar">
-      <div class="sb-logo-circle">{{company_initials}}</div>
-      <div class="sb-company-name">{{company_name}}</div>
-      <div class="sb-company-detail">{{company_address}}</div>
-      {{#if company_phone}}<div class="sb-company-detail">📞 {{company_phone}}</div>{{/if}}
-      {{#if company_email}}<div class="sb-company-detail">✉ {{company_email}}</div>{{/if}}
-      <div class="sb-divider"></div>
-
-      <div class="sb-section-label">Invoice Details</div>
-      <div class="sb-field">
-        <div class="sb-field-label">Issue Date</div>
-        <div class="sb-field-value">{{invoice_date}}</div>
+  <div class="header">
+    <div class="header-inner">
+      <div class="company-block">
+        <div class="company-name">{{company_name}}</div>
+        <div class="company-details">
+          {{company_address}}<br/>
+          {{#if company_phone}}Phone: {{company_phone}}{{/if}}{{#if company_phone}}{{#if company_email}} &nbsp;|&nbsp; {{/if}}{{/if}}{{#if company_email}}Email: {{company_email}}{{/if}}
+        </div>
       </div>
-      {{#if due_date}}
-      <div class="sb-field">
-        <div class="sb-field-label">Due Date</div>
-        <div class="sb-field-value">{{due_date}}</div>
-      </div>
-      {{/if}}
-      {{#if tax_amount}}
-      <div class="sb-field">
-        <div class="sb-field-label">Tax Amount</div>
-        <div class="sb-field-value">{{tax_amount}}</div>
-      </div>
-      {{/if}}
-
-      <div class="sb-amount-box">
-        <div class="sb-amount-label">Total Amount</div>
-        <div class="sb-amount-value">{{amount}}</div>
+      <div class="invoice-badge">
+        <div class="invoice-type-label">{{type_label}}</div>
+        <div class="invoice-number-row">
+          <span class="invoice-num-label">Invoice No.</span>
+          <span class="invoice-num-val">{{invoice_no}}</span>
+        </div>
       </div>
     </div>
+  </div>
 
-    <!-- MAIN COLUMN -->
-    <div class="main-col">
-      <div class="main-top">
-        <div class="invoice-type-header">
-          <div>
-            <div class="type-badge">{{type_label}}</div>
-            <div class="type-sub">{{invoice_no}}</div>
-          </div>
-          <div class="inv-no-block">
-            <div class="inv-no-label">Invoice No.</div>
-            <div class="inv-no-value">{{invoice_no}}</div>
-          </div>
-        </div>
+  <div class="meta-strip">
+    <div class="meta-item">
+      <div class="meta-label">Issue Date</div>
+      <div class="meta-value">{{invoice_date}}</div>
+    </div>
+    {{#if due_date}}
+    <div class="meta-item">
+      <div class="meta-label">Due Date</div>
+      <div class="meta-value">{{due_date}}</div>
+    </div>
+    {{/if}}
+    <div class="meta-item">
+      <div class="meta-label">Amount Due</div>
+      <div class="meta-value">{{amount}}</div>
+    </div>
+    {{#if tax_amount}}
+    <div class="meta-item">
+      <div class="meta-label">Tax</div>
+      <div class="meta-value">{{tax_amount}}</div>
+    </div>
+    {{/if}}
+  </div>
+
+  <div class="body">
+    {{#if show_parties}}
+    <div class="party-section">
+      {{#if party_name}}
+      <div class="party-card">
+        <div class="party-card-label">{{bill_to_label}}</div>
+        <div class="party-name">{{party_name}}</div>
+        {{#if party_detail}}<div class="party-detail">{{{party_detail}}}</div>{{/if}}
       </div>
-      <div class="accent-line"></div>
+      {{/if}}
+      {{#if party2_name}}
+      <div class="party-card">
+        <div class="party-card-label">{{party2_label}}</div>
+        <div class="party-name">{{party2_name}}</div>
+        {{#if party2_detail}}<div class="party-detail">{{{party2_detail}}}</div>{{/if}}
+      </div>
+      {{/if}}
+    </div>
+    {{/if}}
 
-      {{#if show_parties}}
-      <div class="party-section">
-        {{#if party_name}}
-        <div class="party-card">
-          <div class="party-card-label">{{bill_to_label}}</div>
-          <div class="party-card-name">{{party_name}}</div>
-          {{#if party_detail}}<div class="party-card-detail">{{{party_detail}}}</div>{{/if}}
+    {{#if has_items}}
+    <div class="table-section">
+      <div class="table-title">Items &amp; Services</div>
+      <table class="items-table">
+        <thead>
+          <tr>
+            <th style="width:4%">#</th>
+            <th style="width:35%">Item / Service</th>
+            <th style="width:25%">Description</th>
+            <th style="width:12%">Rate</th>
+            <th style="width:10%">Qty</th>
+            <th style="width:14%">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{{items_rows}}}
+        </tbody>
+      </table>
+    </div>
+    <div class="totals-section">
+      <div class="totals-box">
+        {{#if tax_amount}}
+        <div class="totals-row">
+          <span class="t-label">Subtotal</span>
+          <span class="t-value">{{subtotal}}</span>
+        </div>
+        <div class="totals-row">
+          <span class="t-label">Tax</span>
+          <span class="t-value">{{tax_amount}}</span>
         </div>
         {{/if}}
-        {{#if party2_name}}
-        <div class="party-card">
-          <div class="party-card-label">{{party2_label}}</div>
-          <div class="party-card-name">{{party2_name}}</div>
-          {{#if party2_detail}}<div class="party-card-detail">{{{party2_detail}}}</div>{{/if}}
-        </div>
-        {{/if}}
-      </div>
-      {{/if}}
-
-      {{#if has_items}}
-      <div class="table-section">
-        <div class="table-section-label">Line Items</div>
-        <table class="items-table">
-          <thead>
-            <tr>
-              <th style="width:4%">#</th>
-              <th style="width:36%">Item / Service</th>
-              <th style="width:24%">Description</th>
-              <th style="width:13%">Rate</th>
-              <th style="width:9%">Qty</th>
-              <th style="width:14%">Amount</th>
-            </tr>
-          </thead>
-          <tbody>{{{items_rows}}}</tbody>
-        </table>
-      </div>
-      <div class="totals-section">
-        <div class="totals-box">
-          {{#if tax_amount}}
-          <div class="totals-row"><span class="t-label">Subtotal</span><span class="t-value">{{subtotal}}</span></div>
-          <div class="totals-row"><span class="t-label">Tax</span><span class="t-value">{{tax_amount}}</span></div>
-          {{/if}}
-          <div class="totals-row grand"><span class="t-label">Total</span><span class="t-value">{{amount}}</span></div>
+        <div class="totals-row grand">
+          <span class="t-label">Total Amount</span>
+          <span class="t-value">{{amount}}</span>
         </div>
       </div>
-      {{/if}}
+    </div>
+    {{/if}}
 
-      {{#if is_simple}}
-      <div class="voucher-section">
-        <div class="voucher-card">
-          <div class="voucher-row">
-            <span class="v-label">Reference No.</span>
-            <span class="v-value">{{invoice_no}}</span>
-          </div>
-          {{#if party_name}}
-          <div class="voucher-row">
-            <span class="v-label">{{bill_to_label}}</span>
-            <span class="v-value">{{party_name}}</span>
-          </div>
-          {{/if}}
-          {{#if party2_name}}
-          <div class="voucher-row">
-            <span class="v-label">{{party2_label}}</span>
-            <span class="v-value">{{party2_name}}</span>
-          </div>
-          {{/if}}
-          <div class="voucher-row" style="padding-top:14px;margin-top:4px;border-top:2px dashed #e2e8f0;">
-            <span class="v-label">Total Amount</span>
-            <span class="v-amount">{{amount}}</span>
-          </div>
-        </div>
+    {{#if is_simple}}
+    <div class="voucher-section">
+      <div class="voucher-row">
+        <span class="voucher-label">Transaction Reference</span>
+        <span class="voucher-value">{{invoice_no}}</span>
+      </div>
+      {{#if party_name}}
+      <div class="voucher-row">
+        <span class="voucher-label">{{bill_to_label}}</span>
+        <span class="voucher-value">{{party_name}}</span>
       </div>
       {{/if}}
-
-      {{#if remark}}
-      <div class="remark-section">
-        <div class="remark-card">
-          <div class="remark-label">Remarks</div>
-          <div class="remark-text">{{remark}}</div>
-        </div>
+      {{#if party2_name}}
+      <div class="voucher-row">
+        <span class="voucher-label">{{party2_label}}</span>
+        <span class="voucher-value">{{party2_name}}</span>
       </div>
       {{/if}}
-
-      <div class="footer">
-        <div class="footer-left"><span class="footer-brand">{{company_name}}</span><br/>Computer-generated document.</div>
-        <div class="footer-right">Generated: {{generated_date}}</div>
+      <div class="voucher-row" style="margin-top:8px;padding-top:16px;">
+        <span class="voucher-label">Total Amount</span>
+        <span class="amount-highlight">{{amount}}</span>
       </div>
+    </div>
+    {{/if}}
+
+    {{#if remark}}
+    <div class="remark-section">
+      <div class="remark-label">Remarks</div>
+      <div class="remark-text">{{remark}}</div>
+    </div>
+    {{/if}}
+  </div>
+
+  <div class="footer">
+    <div class="footer-left">
+      <span class="footer-brand">{{company_name}}</span><br/>
+      This is a computer-generated document.
+    </div>
+    <div class="footer-right">
+      Generated on {{generated_date}}<br/>
+      Page 1
     </div>
   </div>
 </div>

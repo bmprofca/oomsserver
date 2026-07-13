@@ -10,6 +10,7 @@ import {
     normInvoiceType,
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
+import { isValidFormatForType } from "../helpers/invoiceFormatMapping.js";
 
 const router = express.Router();
 
@@ -26,16 +27,7 @@ const INVOICE_TYPE_TO_FORMAT_COLUMN = {
 
 const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
 
-const FORMAT_VARIANT_IDS = [
-    "classic", 
-    "compact", 
-    "minimal",
-    "premium_modern",    
-    "premium_elegant",   
-    "premium_corporate", 
-    "premium_creative",  
-    "premium_luxury"     
-];
+
 
 function getFormatColumnForInvoiceType(invoiceType) {
     if (invoiceType == null) return null;
@@ -43,8 +35,8 @@ function getFormatColumnForInvoiceType(invoiceType) {
     return INVOICE_TYPE_TO_FORMAT_COLUMN[key] ?? null;
 }
 
-function isValidFormatKey(key) {
-    return FORMAT_VARIANT_IDS.includes(key);
+function isValidFormatKey(invoiceType, key) {
+    return isValidFormatForType(invoiceType, key);
 }
 
 async function ensureBranchInvoiceFormatsRow(branch_id) {
@@ -147,10 +139,10 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
                 message: "format_id is required",
             });
         }
-        if (!isValidFormatKey(rawFormat)) {
+        if (!isValidFormatKey(col, rawFormat)) {
             return res.status(400).json({
                 success: false,
-                message: 'format_id must be one of: classic, compact, minimal, premium_modern, premium_elegant, premium_corporate, premium_creative, premium_luxury',
+                message: `format_id must be a valid format for type ${col}`,
             });
         }
 

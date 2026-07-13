@@ -8,46 +8,46 @@
 <style>
 
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:13px;color:#333;background:#fff;width:794px;}
-  .page{width:794px;min-height:1123px;padding:0;position:relative;background:#fff;}
-  .header{padding:40px 48px 30px;background:#f8f9fa;border-bottom:3px solid #0056b3;display:flex;justify-content:space-between;}
-  .company-name{font-size:24px;font-weight:bold;color:#0056b3;margin-bottom:8px;}
-  .company-details{font-size:12px;color:#555;line-height:1.6;}
-  .invoice-type-label{font-size:14px;font-weight:bold;text-transform:uppercase;color:#0056b3;letter-spacing:1px;margin-bottom:8px;}
-  .invoice-num-val{font-size:16px;font-weight:bold;color:#333;}
-  .invoice-num-label{font-size:11px;color:#777;text-transform:uppercase;display:block;}
-  .meta-strip{background:#fff;padding:20px 48px;display:flex;gap:40px;border-bottom:1px solid #eee;}
-  .meta-label{font-size:10px;font-weight:bold;color:#777;text-transform:uppercase;margin-bottom:4px;}
-  .meta-value{font-size:13px;font-weight:bold;color:#333;}
-  .body{padding:30px 48px;}
-  .party-section{display:flex;gap:30px;margin-bottom:30px;}
-  .party-card{flex:1;background:#fcfcfc;border:1px solid #e0e0e0;padding:20px;border-top:3px solid #0056b3;}
-  .party-card-label{font-size:10px;font-weight:bold;color:#777;text-transform:uppercase;margin-bottom:8px;}
-  .party-name{font-size:15px;font-weight:bold;color:#333;margin-bottom:6px;}
-  .party-detail{font-size:12px;color:#555;line-height:1.6;}
-  .table-title{font-size:12px;font-weight:bold;color:#0056b3;text-transform:uppercase;margin-bottom:12px;}
-  .items-table{width:100%;border-collapse:collapse;margin-bottom:30px;}
-  .items-table th{background:#f4f6f8;color:#0056b3;padding:12px;font-size:11px;text-transform:uppercase;text-align:left;border-bottom:2px solid #ccc;}
-  .items-table td{padding:12px;font-size:13px;color:#444;border-bottom:1px solid #eee;vertical-align:top;}
+  body{font-family:'Georgia',serif;font-size:13px;color:#3b3a36;background:#fffaf0;width:794px;}
+  .page{width:794px;min-height:1123px;padding:0;position:relative;}
+  .header{padding:50px 50px 30px;text-align:center;border-bottom:1px solid #d4c4a8;background:#fffaf0;}
+  .company-name{font-size:28px;font-weight:normal;color:#2c2b29;letter-spacing:2px;margin-bottom:10px;text-transform:uppercase;}
+  .company-details{font-family:'Helvetica Neue',sans-serif;font-size:11px;color:#6b675d;line-height:1.8;letter-spacing:0.5px;}
+  .invoice-type-label{font-size:16px;font-style:italic;color:#5a5446;margin-top:25px;margin-bottom:5px;}
+  .invoice-num-val{font-family:'Helvetica Neue',sans-serif;font-size:14px;color:#3b3a36;}
+  .invoice-num-label{display:none;}
+  .meta-strip{display:flex;justify-content:center;gap:40px;padding:15px 0;background:#fdf9f1;border-bottom:1px solid #d4c4a8;}
+  .meta-label{font-family:'Helvetica Neue',sans-serif;font-size:9px;color:#8a8373;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px;text-align:center;}
+  .meta-value{font-size:13px;color:#3b3a36;text-align:center;}
+  .body{padding:40px 50px;}
+  .party-section{display:flex;justify-content:space-between;margin-bottom:40px;}
+  .party-card{flex:0 0 45%;}
+  .party-card-label{font-family:'Helvetica Neue',sans-serif;font-size:9px;color:#8a8373;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;border-bottom:1px solid #e8e0d0;padding-bottom:5px;}
+  .party-name{font-size:16px;color:#2c2b29;margin-bottom:6px;}
+  .party-detail{font-family:'Helvetica Neue',sans-serif;font-size:12px;color:#5a5446;line-height:1.7;}
+  .table-title{display:none;}
+  .items-table{width:100%;border-collapse:collapse;margin-bottom:40px;}
+  .items-table th{font-family:'Helvetica Neue',sans-serif;padding:12px 5px;font-size:9px;color:#8a8373;text-transform:uppercase;letter-spacing:2px;border-bottom:1px solid #d4c4a8;text-align:left;}
+  .items-table td{padding:16px 5px;font-size:13px;color:#3b3a36;border-bottom:1px dashed #e8e0d0;vertical-align:top;}
   .items-table th:last-child, .items-table td:last-child{text-align:right;}
-  .totals-section{display:flex;justify-content:flex-end;margin-bottom:30px;}
+  .totals-section{display:flex;justify-content:flex-end;margin-bottom:40px;}
   .totals-box{width:300px;}
-  .totals-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #eee;}
-  .totals-row.grand{border-top:2px solid #0056b3;border-bottom:none;margin-top:5px;padding-top:15px;}
-  .t-label{color:#555;font-weight:bold;}
-  .t-value{color:#333;font-weight:bold;}
-  .totals-row.grand .t-label, .totals-row.grand .t-value{font-size:16px;color:#0056b3;}
-  .voucher-section{background:#fcfcfc;border:1px solid #e0e0e0;padding:25px;margin-bottom:30px;border-left:4px solid #0056b3;}
-  .voucher-row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px dotted #ccc;}
+  .totals-row{display:flex;justify-content:space-between;padding:10px 0;font-size:14px;}
+  .t-label{font-family:'Helvetica Neue',sans-serif;color:#5a5446;font-size:12px;letter-spacing:1px;}
+  .t-value{color:#3b3a36;}
+  .totals-row.grand{border-top:1px solid #d4c4a8;margin-top:10px;padding-top:15px;}
+  .totals-row.grand .t-label{font-size:14px;color:#2c2b29;}
+  .totals-row.grand .t-value{font-size:18px;color:#2c2b29;font-weight:bold;}
+  .voucher-section{padding:30px;background:#fdf9f1;border:1px solid #e8e0d0;margin-bottom:40px;}
+  .voucher-row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px dashed #e8e0d0;}
   .voucher-row:last-child{border-bottom:none;}
-  .voucher-label{font-size:11px;font-weight:bold;color:#777;text-transform:uppercase;}
-  .voucher-value{font-size:13px;font-weight:bold;color:#333;}
-  .amount-highlight{font-size:20px;font-weight:bold;color:#0056b3;}
-  .remark-section{background:#fdfcf0;border:1px solid #f3e5b3;padding:20px;margin-bottom:30px;}
-  .remark-label{font-size:10px;font-weight:bold;color:#9b7a14;text-transform:uppercase;margin-bottom:6px;}
-  .remark-text{font-size:12px;color:#5c490a;line-height:1.6;}
-  .footer{position:absolute;bottom:0;width:100%;padding:20px 48px;background:#f8f9fa;border-top:1px solid #ddd;display:flex;justify-content:space-between;font-size:11px;color:#777;}
-  .footer-brand{font-weight:bold;color:#0056b3;}
+  .voucher-label{font-family:'Helvetica Neue',sans-serif;font-size:10px;color:#8a8373;text-transform:uppercase;letter-spacing:2px;}
+  .voucher-value{font-size:14px;color:#3b3a36;}
+  .amount-highlight{font-size:22px;color:#2c2b29;}
+  .remark-section{margin-bottom:40px;text-align:center;font-style:italic;color:#6b675d;}
+  .remark-label{display:none;}
+  .remark-text{font-size:13px;line-height:1.6;}
+  .footer{position:absolute;bottom:0;width:100%;text-align:center;padding:20px;font-family:'Helvetica Neue',sans-serif;font-size:10px;color:#8a8373;border-top:1px solid #e8e0d0;background:#fdf9f1;}
     
 </style>
 </head>

@@ -4,16 +4,7 @@ import { BASE_DOMAIN } from "./Config.js";
 import { renderHtmlTemplate, htmlToPdfBufferBatch } from "./invoiceTemplateEngine.js";
 import { buildTemplateData } from "./invoiceDataBuilder.js";
 
-const FORMAT_VARIANT_IDS = [
-    "classic", 
-    "compact", 
-    "minimal",
-    "premium_modern",    
-    "premium_elegant",   
-    "premium_corporate", 
-    "premium_creative",  
-    "premium_luxury"     
-];
+import { getAvailableFormatsForType } from "./invoiceFormatMapping.js";
 
 const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
 
@@ -80,11 +71,7 @@ const SAMPLE_ISSUER = {
 };
 
 function mapFormatKeyToTemplateName(key) {
-    const k = String(key || "classic").trim().toLowerCase();
-    if (k.startsWith("premium")) return "premium";
-    if (k === "modern") return "modern";
-    if (k === "compact" || k === "minimal") return "modern";
-    return "classic"; 
+    return String(key || "classic").trim().toLowerCase();
 }
 
 /**
@@ -126,16 +113,17 @@ async function fileExists(filePath) {
 }
 
 /**
- * Checks if the 8 PDFs for a specific type (e.g. "sale") already exist.
- * If any are missing, it batch-generates all 8 in ~2 seconds.
+ * Checks if the PDFs for a specific type (e.g. "sale") already exist.
+ * If any are missing, it batch-generates all in ~2 seconds.
  */
 async function ensureTypeFormatSamples(columnKey) {
+    const formats = getAvailableFormatsForType(columnKey);
     const dir = path.join(process.cwd(), "media", "format", columnKey);
     await fs.mkdir(dir, { recursive: true });
 
     // Check if ALL variants already exist
     let allExist = true;
-    for (const formatKey of FORMAT_VARIANT_IDS) {
+    for (const formatKey of formats) {
         if (!(await fileExists(path.join(dir, `${formatKey}.pdf`)))) {
             allExist = false;
             break;
@@ -150,7 +138,7 @@ async function ensureTypeFormatSamples(columnKey) {
     console.log(`[InvoiceFormats] Missing PDFs for '${columnKey}'. Generating now...`);
 
     const jobs = [];
-    for (const formatKey of FORMAT_VARIANT_IDS) {
+    for (const formatKey of formats) {
         try {
             const html = await buildOneSampleHtml(columnKey, formatKey);
             jobs.push({ formatKey, html });
@@ -195,10 +183,11 @@ export async function getFormatSamplePdfsBase64(invoiceTypeInput) {
     // Lazy load: ensure the PDFs for THIS SPECIFIC TYPE exist before returning URLs
     await ensureTypeFormatSamples(dirKey);
 
+    const formats = getAvailableFormatsForType(dirKey);
     const base = String(BASE_DOMAIN || "").replace(/\/$/, "");
     const out = [];
-    for (let i = 0; i < FORMAT_VARIANT_IDS.length; i++) {
-        const formatKey = FORMAT_VARIANT_IDS[i];
+    for (let i = 0; i < formats.length; i++) {
+        const formatKey = formats[i];
         out.push({
             format_id: formatKey,
             url: `${base}/media/format/${dirKey}/${formatKey}.pdf`,

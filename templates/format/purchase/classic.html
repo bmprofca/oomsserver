@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,97 +6,53 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>{{type_label}}</title>
 <style>
+
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,Arial,sans-serif;font-size:13px;color:#1a2035;background:#fff;width:794px;}
-  .page{width:794px;min-height:1123px;padding:0;position:relative;}
-
-  /* ── HEADER ── */
-  .header{background:linear-gradient(135deg,#1a3c5e 0%,#14567a 50%,#0d7a9e 100%);padding:36px 48px 28px;position:relative;overflow:hidden;}
-  .header::after{content:'';position:absolute;bottom:-20px;right:-20px;width:180px;height:180px;border-radius:50%;background:rgba(255,255,255,0.05);}
-  .header::before{content:'';position:absolute;top:-40px;right:80px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,0.04);}
-  .header-inner{display:flex;justify-content:space-between;align-items:flex-start;position:relative;z-index:2;}
-  .company-block{}
-  .company-name{font-size:22px;font-weight:700;color:#fff;letter-spacing:0.3px;margin-bottom:6px;}
-  .company-details{font-size:11px;color:rgba(255,255,255,0.75);line-height:1.7;}
-  .invoice-badge{text-align:right;}
-  .invoice-type-label{display:inline-block;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.3);color:#fff;font-size:13px;font-weight:700;letter-spacing:2.5px;padding:7px 18px;border-radius:4px;text-transform:uppercase;}
-  .invoice-number-row{margin-top:10px;text-align:right;}
-  .invoice-num-val{font-size:18px;font-weight:700;color:#fff;}
-  .invoice-num-label{font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:2px;}
-
-  /* ── DIVIDER BAR ── */
-  .divider-bar{height:4px;background:linear-gradient(90deg,#0d7a9e,#00c6ff,#0d7a9e);}
-
-  /* ── META STRIP ── */
-  .meta-strip{background:#f5f8fb;padding:18px 48px;display:flex;gap:40px;border-bottom:1px solid #e0e8f0;}
-  .meta-item{}
-  .meta-label{font-size:9px;font-weight:600;color:#6b7a99;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;}
-  .meta-value{font-size:12px;font-weight:600;color:#1a2035;}
-
-  /* ── BODY AREA ── */
-  .body{padding:28px 48px;}
-
-  /* ── PARTY CARDS ── */
-  .party-section{display:flex;gap:24px;margin-bottom:28px;}
-  .party-card{flex:1;background:#fff;border:1px solid #dde4f0;border-radius:8px;padding:16px 20px;position:relative;overflow:hidden;}
-  .party-card::before{content:'';position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(180deg,#1a3c5e,#0d7a9e);}
-  .party-card-label{font-size:9px;font-weight:700;color:#6b7a99;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px;}
-  .party-name{font-size:14px;font-weight:700;color:#1a2035;margin-bottom:4px;}
-  .party-detail{font-size:11px;color:#4a5568;line-height:1.6;}
-
-  /* ── ITEMS TABLE ── */
-  .table-section{margin-bottom:28px;}
-  .table-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7a99;margin-bottom:10px;}
-  .items-table{width:100%;border-collapse:collapse;}
-  .items-table thead tr{background:linear-gradient(135deg,#1a3c5e,#14567a);}
-  .items-table thead th{padding:11px 14px;font-size:10px;font-weight:600;color:#fff;text-transform:uppercase;letter-spacing:0.8px;text-align:left;}
-  .items-table thead th:last-child,.items-table thead th:nth-last-child(-n+2){text-align:right;}
-  .items-table tbody tr{border-bottom:1px solid #eef1f8;}
-  .items-table tbody tr:last-child{border-bottom:none;}
-  .items-table tbody tr:nth-child(even){background:#f9fafd;}
-  .items-table tbody td{padding:11px 14px;font-size:12px;color:#2d3748;vertical-align:top;}
-  .items-table tbody td:last-child,.items-table tbody td:nth-last-child(-n+2){text-align:right;}
-  .item-name{font-weight:600;color:#1a2035;}
-  .item-desc{font-size:10px;color:#718096;margin-top:2px;}
-
-  /* ── TOTALS ── */
-  .totals-section{display:flex;justify-content:flex-end;margin-bottom:28px;}
-  .totals-box{width:280px;border:1px solid #dde4f0;border-radius:8px;overflow:hidden;}
-  .totals-row{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;font-size:12px;}
-  .totals-row:not(:last-child){border-bottom:1px solid #eef1f8;}
-  .totals-row .t-label{color:#6b7a99;font-weight:500;}
-  .totals-row .t-value{color:#1a2035;font-weight:600;}
-  .totals-row.grand{background:linear-gradient(135deg,#1a3c5e,#14567a);border:none;}
-  .totals-row.grand .t-label,.totals-row.grand .t-value{color:#fff;font-size:14px;font-weight:700;}
-
-  /* ── SIMPLE VOUCHER SECTION ── */
-  .voucher-section{background:#f9fafd;border:1px solid #dde4f0;border-radius:8px;padding:24px 28px;margin-bottom:28px;}
-  .voucher-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #eef1f8;}
+  body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:13px;color:#333;background:#fff;width:794px;}
+  .page{width:794px;min-height:1123px;padding:0;position:relative;background:#fff;}
+  .header{padding:40px 48px 30px;background:#f8f9fa;border-bottom:3px solid #0056b3;display:flex;justify-content:space-between;}
+  .company-name{font-size:24px;font-weight:bold;color:#0056b3;margin-bottom:8px;}
+  .company-details{font-size:12px;color:#555;line-height:1.6;}
+  .invoice-type-label{font-size:14px;font-weight:bold;text-transform:uppercase;color:#0056b3;letter-spacing:1px;margin-bottom:8px;}
+  .invoice-num-val{font-size:16px;font-weight:bold;color:#333;}
+  .invoice-num-label{font-size:11px;color:#777;text-transform:uppercase;display:block;}
+  .meta-strip{background:#fff;padding:20px 48px;display:flex;gap:40px;border-bottom:1px solid #eee;}
+  .meta-label{font-size:10px;font-weight:bold;color:#777;text-transform:uppercase;margin-bottom:4px;}
+  .meta-value{font-size:13px;font-weight:bold;color:#333;}
+  .body{padding:30px 48px;}
+  .party-section{display:flex;gap:30px;margin-bottom:30px;}
+  .party-card{flex:1;background:#fcfcfc;border:1px solid #e0e0e0;padding:20px;border-top:3px solid #0056b3;}
+  .party-card-label{font-size:10px;font-weight:bold;color:#777;text-transform:uppercase;margin-bottom:8px;}
+  .party-name{font-size:15px;font-weight:bold;color:#333;margin-bottom:6px;}
+  .party-detail{font-size:12px;color:#555;line-height:1.6;}
+  .table-title{font-size:12px;font-weight:bold;color:#0056b3;text-transform:uppercase;margin-bottom:12px;}
+  .items-table{width:100%;border-collapse:collapse;margin-bottom:30px;}
+  .items-table th{background:#f4f6f8;color:#0056b3;padding:12px;font-size:11px;text-transform:uppercase;text-align:left;border-bottom:2px solid #ccc;}
+  .items-table td{padding:12px;font-size:13px;color:#444;border-bottom:1px solid #eee;vertical-align:top;}
+  .items-table th:last-child, .items-table td:last-child{text-align:right;}
+  .totals-section{display:flex;justify-content:flex-end;margin-bottom:30px;}
+  .totals-box{width:300px;}
+  .totals-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #eee;}
+  .totals-row.grand{border-top:2px solid #0056b3;border-bottom:none;margin-top:5px;padding-top:15px;}
+  .t-label{color:#555;font-weight:bold;}
+  .t-value{color:#333;font-weight:bold;}
+  .totals-row.grand .t-label, .totals-row.grand .t-value{font-size:16px;color:#0056b3;}
+  .voucher-section{background:#fcfcfc;border:1px solid #e0e0e0;padding:25px;margin-bottom:30px;border-left:4px solid #0056b3;}
+  .voucher-row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px dotted #ccc;}
   .voucher-row:last-child{border-bottom:none;}
-  .voucher-label{font-size:11px;font-weight:600;color:#6b7a99;text-transform:uppercase;letter-spacing:0.5px;}
-  .voucher-value{font-size:12px;font-weight:600;color:#1a2035;}
-  .amount-highlight{font-size:20px;font-weight:700;color:#1a3c5e;}
-
-  /* ── REMARK ── */
-  .remark-section{background:#fffbf0;border:1px solid #fde8a0;border-radius:8px;padding:14px 18px;margin-bottom:28px;}
-  .remark-label{font-size:9px;font-weight:700;color:#b7791f;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
-  .remark-text{font-size:11px;color:#744210;line-height:1.6;}
-
-  /* ── FOOTER ── */
-  .footer{position:absolute;bottom:0;left:0;right:0;background:#f5f8fb;border-top:1px solid #dde4f0;padding:16px 48px;display:flex;justify-content:space-between;align-items:center;}
-  .footer-left{font-size:10px;color:#6b7a99;}
-  .footer-right{font-size:10px;color:#6b7a99;text-align:right;}
-  .footer-brand{font-weight:700;color:#1a3c5e;}
-
-  /* ── WATERMARK STATUS ── */
-  .status-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;}
-  .status-paid{background:#d4edda;color:#155724;}
-  .status-pending{background:#fff3cd;color:#856404;}
+  .voucher-label{font-size:11px;font-weight:bold;color:#777;text-transform:uppercase;}
+  .voucher-value{font-size:13px;font-weight:bold;color:#333;}
+  .amount-highlight{font-size:20px;font-weight:bold;color:#0056b3;}
+  .remark-section{background:#fdfcf0;border:1px solid #f3e5b3;padding:20px;margin-bottom:30px;}
+  .remark-label{font-size:10px;font-weight:bold;color:#9b7a14;text-transform:uppercase;margin-bottom:6px;}
+  .remark-text{font-size:12px;color:#5c490a;line-height:1.6;}
+  .footer{position:absolute;bottom:0;width:100%;padding:20px 48px;background:#f8f9fa;border-top:1px solid #ddd;display:flex;justify-content:space-between;font-size:11px;color:#777;}
+  .footer-brand{font-weight:bold;color:#0056b3;}
+    
 </style>
 </head>
 <body>
 <div class="page">
-  <!-- HEADER -->
   <div class="header">
     <div class="header-inner">
       <div class="company-block">
@@ -114,9 +71,7 @@
       </div>
     </div>
   </div>
-  <div class="divider-bar"></div>
 
-  <!-- META STRIP -->
   <div class="meta-strip">
     <div class="meta-item">
       <div class="meta-label">Issue Date</div>
@@ -140,9 +95,7 @@
     {{/if}}
   </div>
 
-  <!-- BODY -->
   <div class="body">
-    <!-- PARTY SECTION -->
     {{#if show_parties}}
     <div class="party-section">
       {{#if party_name}}
@@ -162,7 +115,6 @@
     </div>
     {{/if}}
 
-    <!-- ITEMS TABLE (sale/purchase) -->
     {{#if has_items}}
     <div class="table-section">
       <div class="table-title">Items &amp; Services</div>
@@ -182,7 +134,6 @@
         </tbody>
       </table>
     </div>
-    <!-- TOTALS -->
     <div class="totals-section">
       <div class="totals-box">
         {{#if tax_amount}}
@@ -203,7 +154,6 @@
     </div>
     {{/if}}
 
-    <!-- SIMPLE VOUCHER (payment/receive/journal/contra/expense) -->
     {{#if is_simple}}
     <div class="voucher-section">
       <div class="voucher-row">
@@ -222,14 +172,13 @@
         <span class="voucher-value">{{party2_name}}</span>
       </div>
       {{/if}}
-      <div class="voucher-row" style="margin-top:8px;padding-top:16px;border-top:2px solid #dde4f0;">
+      <div class="voucher-row" style="margin-top:8px;padding-top:16px;">
         <span class="voucher-label">Total Amount</span>
         <span class="amount-highlight">{{amount}}</span>
       </div>
     </div>
     {{/if}}
 
-    <!-- REMARK -->
     {{#if remark}}
     <div class="remark-section">
       <div class="remark-label">Remarks</div>
@@ -238,7 +187,6 @@
     {{/if}}
   </div>
 
-  <!-- FOOTER -->
   <div class="footer">
     <div class="footer-left">
       <span class="footer-brand">{{company_name}}</span><br/>
