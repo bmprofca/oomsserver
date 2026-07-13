@@ -404,39 +404,16 @@ router.post("/create", validateAgentSession, async (req, res) => {
             }
         }
 
-        const [existingMobile] = await pool.query(
-            "SELECT p.username FROM profile p JOIN clients c ON p.username = c.username WHERE p.mobile = ? AND c.user_type = 'client' AND c.is_deleted = '0'",
-            [mobile]
-        );
-
-        if (existingMobile.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "A Client with this mobile number already exists",
-            });
-        }
-
-        const [existingEmail] = await pool.query(
-            "SELECT p.username FROM profile p JOIN clients c ON p.username = c.username WHERE p.email = ? AND c.user_type = 'client' AND c.is_deleted = '0'",
-            [email]
-        );
-
-        if (existingEmail.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "A Client with this email already exists",
-            });
-        }
-
+        const normalizedPan = String(pan_number).trim().toUpperCase();
         const [existingPan] = await pool.query(
             "SELECT p.username FROM profile p JOIN clients c ON p.username = c.username WHERE p.pan_number = ? AND c.user_type = 'client' AND c.is_deleted = '0' AND c.branch_id = ?",
-            [pan_number, branch_id]
+            [normalizedPan, branch_id]
         );
 
         if (existingPan.length > 0) {
             return res.status(409).json({
                 success: false,
-                message: "A Client with this PAN number already exists",
+                message: "A Client with this PAN number already exists in this branch",
             });
         }
 
@@ -480,7 +457,7 @@ router.post("/create", validateAgentSession, async (req, res) => {
             mobile,
             country_code,
             email,
-            pan_number,
+            pan_number: normalizedPan,
             state: state || null,
             district: district || null,
             city: district || null,
