@@ -244,8 +244,8 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
     const html = await renderHtmlTemplate(invoiceType, activeTemplate, templateData);
     const buffer = await htmlToPdfBuffer(html);
 
-    // Save the file on the server in media/<invoice_type>/<filename>.pdf
-    const typeFolder = path.join(process.cwd(), "media", invoiceType);
+    // Save the file on the server in media/format/<invoice_type>/<filename>.pdf
+    const typeFolder = path.join(process.cwd(), "media", "format", invoiceType);
     await fs.mkdir(typeFolder, { recursive: true });
     
     const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
@@ -253,7 +253,7 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
     const filePath = path.join(typeFolder, saveFilename);
     await fs.writeFile(filePath, buffer);
 
-    const localUrl = `${BASE_DOMAIN}/media/${invoiceType}/${saveFilename}`;
+    const localUrl = `${BASE_DOMAIN}/media/format/${invoiceType}/${saveFilename}`;
 
     return { 
         buffer, 

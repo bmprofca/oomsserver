@@ -18,7 +18,7 @@ Handlebars.registerHelper("eq", function (a, b) {
  * Loads an HTML template from disk, compiles it with Handlebars, and injects data.
  */
 export async function renderHtmlTemplate(type, templateName, data) {
-    const templatePath = path.join(process.cwd(), "media", "format", type, `${templateName}.html`);
+    const templatePath = path.join(process.cwd(), "templates", "format", type, `${templateName}.html`);
     try {
         const htmlContent = await fs.readFile(templatePath, "utf-8");
         const template = Handlebars.compile(htmlContent);
