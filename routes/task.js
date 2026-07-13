@@ -15,6 +15,27 @@ import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 
 const router = express.Router();
 
+const TRANSIENT_DB_ERRORS = new Set([
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "PROTOCOL_CONNECTION_LOST",
+    "ER_CLIENT_INTERACTION_TIMEOUT",
+]);
+
+async function safeTaskLookup(label, loader, fallback = null) {
+    try {
+        return await loader();
+    } catch (error) {
+        console.warn(`Task lookup skipped (${label}):`, error?.code || error?.message || error);
+        return fallback;
+    }
+}
+
+function isTransientDbError(error) {
+    return TRANSIENT_DB_ERRORS.has(error?.code);
+}
+
 async function isBranchAdmin(username, branchId) {
     const [rows] = await pool.query(
         "SELECT id FROM branch_mapping WHERE username = ? AND branch_id = ? AND type = 'admin' AND is_deleted = '0' LIMIT 1",
@@ -1421,12 +1442,12 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             service_data,
             staffs
         ] = await Promise.all([
-            USER_SNIPPED_DATA(element?.create_by),
-            USER_SNIPPED_DATA(element?.modify_by || element?.create_by),
-            USER_SNIPPED_DATA(element?.username),
-            SINGLE_FIRM_DATA(element?.firm_id),
-            SINGLE_SERVICE_DATA(element?.service_id),
-            SINGLE_TASK_STAFF_LIST(element?.task_id)
+            safeTaskLookup("create_by", () => USER_SNIPPED_DATA(element?.create_by)),
+            safeTaskLookup("modify_by", () => USER_SNIPPED_DATA(element?.modify_by || element?.create_by)),
+            safeTaskLookup("client_profile", () => USER_SNIPPED_DATA(element?.username)),
+            safeTaskLookup("firm_data", () => SINGLE_FIRM_DATA(element?.firm_id), {}),
+            safeTaskLookup("service_data", () => SINGLE_SERVICE_DATA(element?.service_id), {}),
+            safeTaskLookup("staffs", () => SINGLE_TASK_STAFF_LIST(element?.task_id), []),
         ]);
 
         const object = {
@@ -1436,8 +1457,8 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 profile: client_profile
             },
             firm: {
-                firm_id: firm_data?.firm_id,
-                firm_name: firm_data?.firm_name
+                firm_id: firm_data?.firm_id || element?.firm_id,
+                firm_name: firm_data?.firm_name || element?.firm_name || null,
             },
             service: {
                 service_id: service_data?.service_id,
@@ -1491,6 +1512,13 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
         });
     } catch (error) {
         console.error("Task details error:", error);
+        if (isTransientDbError(error)) {
+            return res.status(503).json({
+                success: false,
+                message: "Database is temporarily unavailable. Please try again.",
+                error: error.message,
+            });
+        }
         return res.status(500).json({
             success: false,
             message: "Failed to fetch task details",

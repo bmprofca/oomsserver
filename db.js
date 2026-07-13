@@ -24,20 +24,32 @@ const pool = mysql.createPool({
     keepAliveInitialDelay: 10000,
 });
 
-export async function poolQuery(sql, params, { retries = 2, delayMs = 500 } = {}) {
-    let lastError;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-            return await pool.query(sql, params);
-        } catch (error) {
-            lastError = error;
-            if (!TRANSIENT_DB_ERRORS.has(error.code) || attempt === retries) {
-                throw error;
+function wrapPoolWithRetry(basePool, { retries, delayMs } = {}) {
+    const maxRetries = retries ?? (Number(process.env.DB_QUERY_RETRIES) || 3);
+    const retryDelayMs = delayMs ?? (Number(process.env.DB_QUERY_RETRY_DELAY_MS) || 1500);
+    const originalQuery = basePool.query.bind(basePool);
+    basePool.query = async function queryWithRetry(sql, params) {
+        let lastError;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return await originalQuery(sql, params);
+            } catch (error) {
+                lastError = error;
+                if (!TRANSIENT_DB_ERRORS.has(error.code) || attempt === maxRetries) {
+                    throw error;
+                }
+                await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
             }
-            await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)));
         }
-    }
-    throw lastError;
+        throw lastError;
+    };
+    return basePool;
+}
+
+wrapPoolWithRetry(pool);
+
+export async function poolQuery(sql, params) {
+    return pool.query(sql, params);
 }
 
 export default pool;
