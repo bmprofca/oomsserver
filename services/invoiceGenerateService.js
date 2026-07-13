@@ -16,7 +16,10 @@ const ALLOWED_GENERATE_TYPES = new Set([
 ]);
 
 function normInvoiceType(value) {
-    return String(value ?? "").trim().toLowerCase();
+    const v = String(value ?? "").trim().toLowerCase();
+    // DB sometimes stores "payment receive" — canonicalize to "receive"
+    if (v === "payment receive") return "receive";
+    return v;
 }
 
 function isAllowedGenerateType(value) {
