@@ -1,9 +1,9 @@
+import fs from "fs/promises";
+import path from "path";
 import pool from "../db.js";
-import { getActiveFormatKeyForInvoiceType, normalizeInvoiceTypeForMatch } from "../helpers/invoiceFormats.js";
-import { buildSaleInvoicePdfBuffer } from "../helpers/SaleInvoicePdf.js";
-import { buildSimpleInvoicePdfBuffer } from "../helpers/SimpleInvoicePdf.js";
-import { getSimpleDocTitleForInvoiceType } from "../helpers/invoiceSimpleDocTitles.js";
-import { uploadBufferToOneSaas } from "./onesaasUploadService.js";
+import { renderHtmlTemplate, htmlToPdfBuffer } from "../helpers/invoiceTemplateEngine.js";
+import { buildTemplateData } from "../helpers/invoiceDataBuilder.js";
+import { BASE_DOMAIN } from "../helpers/Config.js";
 
 const ALLOWED_GENERATE_TYPES = new Set([
     "sale",
@@ -16,11 +16,27 @@ const ALLOWED_GENERATE_TYPES = new Set([
 ]);
 
 function normInvoiceType(value) {
-    return String(value ?? "").trim().toLowerCase();
+    const v = String(value ?? "").trim().toLowerCase();
+    // DB sometimes stores "payment receive" — canonicalize to "receive"
+    if (v === "payment receive") return "receive";
+    return v;
 }
 
 function isAllowedGenerateType(value) {
     return ALLOWED_GENERATE_TYPES.has(normInvoiceType(value));
+}
+
+function getSimpleDocTitleForInvoiceType(type) {
+    const map = {
+        sale: "TAX INVOICE",
+        purchase: "PURCHASE INVOICE",
+        payment: "PAYMENT VOUCHER",
+        receive: "RECEIPT",
+        journal: "JOURNAL VOUCHER",
+        contra: "CONTRA VOUCHER",
+        expense: "EXPENSE VOUCHER",
+    };
+    return map[normInvoiceType(type)] || "VOUCHER";
 }
 
 function downloadFilenameForInvoice(invoice) {
@@ -116,6 +132,35 @@ async function getBranchInvoiceProfile(branch_id) {
     };
 }
 
+function mapFormatKeyToTemplateName(key) {
+    return String(key || "classic").trim().toLowerCase();
+}
+
+async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {
+    const map = {
+        sale: "sale",
+        purchase: "purchase",
+        payment: "payment",
+        receive: "receive",
+        "payment receive": "receive",
+        journal: "journal",
+        contra: "contra",
+        expense: "expense",
+    };
+    const col = map[String(invoiceType).trim().toLowerCase()];
+    if (!col) return "classic";
+    try {
+        const [rows] = await pool.query(
+            `SELECT \`${col}\` FROM \`invoice_formats\` WHERE \`branch_id\` = ? LIMIT 1`,
+            [branch_id]
+        );
+        if (rows.length > 0 && rows[0][col]) {
+            return rows[0][col];
+        }
+    } catch {}
+    return "classic";
+}
+
 async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedType) {
     const invId = String(invoice_id).trim();
 
@@ -127,9 +172,10 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         return { error: { status: 404, message: "Invoice not found in this branch" } };
     }
     const invoice = invRows[0];
-    const invoiceType = invoice.type != null ? String(invoice.type).trim() : "";
+    const invoiceType = normInvoiceType(invoice.type);
+    const reqType = normInvoiceType(requestedType);
 
-    if (normalizeInvoiceTypeForMatch(invoiceType) !== normalizeInvoiceTypeForMatch(requestedType)) {
+    if (invoiceType !== reqType) {
         return {
             error: {
                 status: 400,
@@ -152,9 +198,12 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         return { error: { status: 403, message: "You do not have access to this invoice" } };
     }
 
-    const formatKey = await getActiveFormatKeyForInvoiceType(branch_id, invoiceType);
     const issuer = await getBranchInvoiceProfile(branch_id);
     const filename = downloadFilenameForInvoice(invoice);
+
+    let items = [];
+    let partyName = "-";
+    let lines = [];
 
     if (invoiceType === "sale" || invoiceType === "purchase") {
         const [itemRows] = await pool.query(
@@ -165,64 +214,59 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
              ORDER BY si.id ASC`,
             [invId]
         );
+        items = itemRows;
 
         const counterpartyId = invoiceType === "sale" ? tx.party2_id : tx.party1_id;
-        let partyName = counterpartyId ? String(counterpartyId) : "-";
         if (counterpartyId) {
-            partyName = (await profileDisplayName(String(counterpartyId))) || partyName;
+            partyName = (await profileDisplayName(String(counterpartyId))) || String(counterpartyId);
         }
-
-        const buffer = await buildSaleInvoicePdfBuffer({
-            formatKey,
-            title: invoiceType === "sale" ? "TAX INVOICE" : "PURCHASE INVOICE",
-            pdfSubject: invoiceType === "sale" ? "Sale invoice" : "Purchase invoice",
-            billToLabel: invoiceType === "sale" ? "Bill to" : "Supplier",
-            invoice,
-            transactionRow: tx,
-            items: itemRows,
-            partyName,
-            issuer,
-        });
-        return { buffer, filename, formatKey, type: invoiceType, invoice_id: invId };
+    } else {
+        const a = await formatPartyLine(tx.party1_type, tx.party1_id);
+        const b = await formatPartyLine(tx.party2_type, tx.party2_id);
+        if (a) lines.push(a);
+        if (b) lines.push(b);
     }
 
-    const simpleTitle = getSimpleDocTitleForInvoiceType(invoiceType);
-    if (!simpleTitle) {
-        return {
-            error: {
-                status: 400,
-                message: `PDF generation is not configured for invoice type "${invoiceType}"`,
-            },
-        };
-    }
+    const rawFormatKey = await getActiveFormatKeyForInvoiceType(branch_id, invoiceType);
+    const activeTemplate = mapFormatKeyToTemplateName(rawFormatKey);
 
-    const lines = [];
-    const a = await formatPartyLine(tx.party1_type, tx.party1_id);
-    const b = await formatPartyLine(tx.party2_type, tx.party2_id);
-    if (a) lines.push(a);
-    if (b) lines.push(b);
-
-    const buffer = await buildSimpleInvoicePdfBuffer({
-        formatKey,
-        title: simpleTitle,
-        pdfSubject: simpleTitle,
+    const templateData = buildTemplateData({
+        type: invoiceType,
         invoice,
         transactionRow: tx,
-        lines,
+        items,
+        partyName,
         issuer,
+        lines,
     });
-    return { buffer, filename, formatKey, type: invoiceType, invoice_id: invId };
+
+    const html = await renderHtmlTemplate(invoiceType, activeTemplate, templateData);
+    const buffer = await htmlToPdfBuffer(html);
+
+    // Save the file on the server in media/format/<invoice_type>/<filename>.pdf
+    const typeFolder = path.join(process.cwd(), "media", "format", invoiceType);
+    await fs.mkdir(typeFolder, { recursive: true });
+    
+    const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
+    const saveFilename = `${safeNo}.pdf`;
+    const filePath = path.join(typeFolder, saveFilename);
+    await fs.writeFile(filePath, buffer);
+
+    const localUrl = `${BASE_DOMAIN}/media/format/${invoiceType}/${saveFilename}`;
+
+    return { 
+        buffer, 
+        filename: saveFilename, 
+        formatKey: rawFormatKey, 
+        type: invoiceType, 
+        invoice_id: invId,
+        url: localUrl
+    };
 }
 
 async function saveInvoicePdfLink(built) {
-    const uploaded = await uploadBufferToOneSaas({
-        buffer: built.buffer,
-        filename: built.filename,
-        mimeType: "application/pdf",
-    });
-
     return {
-        url: uploaded.url,
+        url: built.url,
         filename: built.filename,
         suggested_filename: built.filename,
     };

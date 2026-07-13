@@ -2,16 +2,6 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { TODAY_DATE } from "../helpers/function.js";
-import {
-    ensureBranchInvoiceFormatsRow,
-    getActiveFormatKeyForInvoiceType,
-    getFormatColumnForInvoiceType,
-    INVOICE_FORMAT_COLUMNS,
-    INVOICE_FORMAT_API_TYPES,
-    normalizeFormatKey,
-    isValidFormatKey,
-    isAllowedFormatApiType,
-} from "../helpers/invoiceFormats.js";
 import { getFormatSamplePdfsBase64 } from "../helpers/invoiceFormatSamplePdfs.js";
 import {
     ALLOWED_GENERATE_TYPES,
@@ -20,8 +10,64 @@ import {
     normInvoiceType,
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
+import { isValidFormatForType } from "../helpers/invoiceFormatMapping.js";
 
 const router = express.Router();
+
+const INVOICE_TYPE_TO_FORMAT_COLUMN = {
+    sale: "sale",
+    purchase: "purchase",
+    payment: "payment",
+    receive: "receive",
+    "payment receive": "receive",
+    journal: "journal",
+    contra: "contra",
+    expense: "expense",
+};
+
+const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
+
+
+
+function getFormatColumnForInvoiceType(invoiceType) {
+    if (invoiceType == null) return null;
+    const key = String(invoiceType).trim().toLowerCase();
+    return INVOICE_TYPE_TO_FORMAT_COLUMN[key] ?? null;
+}
+
+function isValidFormatKey(invoiceType, key) {
+    return isValidFormatForType(invoiceType, key);
+}
+
+async function ensureBranchInvoiceFormatsRow(branch_id) {
+    const [existing] = await pool.query(
+        "SELECT * FROM `invoice_formats` WHERE `branch_id` = ? ORDER BY `id` ASC LIMIT 1",
+        [branch_id]
+    );
+    if (existing.length > 0) {
+        return existing[0];
+    }
+    await pool.query(
+        `INSERT INTO \`invoice_formats\` (\`branch_id\`, \`sale\`, \`purchase\`, \`payment\`, \`receive\`, \`journal\`, \`contra\`, \`expense\`)
+         VALUES (?, 'classic', 'classic', 'classic', 'classic', 'classic', 'classic', 'classic')`,
+        [branch_id]
+    );
+    const [again] = await pool.query(
+        "SELECT * FROM `invoice_formats` WHERE `branch_id` = ? ORDER BY `id` ASC LIMIT 1",
+        [branch_id]
+    );
+    return again[0];
+}
+
+async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {
+    const col = getFormatColumnForInvoiceType(invoiceType);
+    if (!col) {
+        return "classic";
+    }
+    const row = await ensureBranchInvoiceFormatsRow(branch_id);
+    const raw = row[col];
+    return raw || "classic";
+}
 
 /** Body `response` for POST /generate: pdf (default) | base64 | link */
 function normGenerateResponseMode(s) {
@@ -34,21 +80,10 @@ router.get("/formats", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const rawType = req.query?.type;
-        if (rawType == null || String(rawType).trim() === "") {
-            return res.status(400).json({
-                success: false,
-                message: `Query type is required. Allowed: ${INVOICE_FORMAT_API_TYPES.join(", ")}`,
-            });
-        }
-        if (!isAllowedFormatApiType(rawType)) {
-            return res.status(400).json({
-                success: false,
-                message: `Invalid type. Allowed: ${INVOICE_FORMAT_API_TYPES.join(", ")}`,
-            });
-        }
-        const bodyType = normInvoiceType(rawType);
+        const bodyType = normInvoiceType(rawType || "sale");
         const active_format = await getActiveFormatKeyForInvoiceType(branch_id, bodyType);
         const samples = await getFormatSamplePdfsBase64(bodyType);
+        
         return res.status(200).json({
             success: true,
             message: "Format sample PDFs retrieved successfully",
@@ -60,7 +95,7 @@ router.get("/formats", auth, validateBranch, async (req, res) => {
             },
         });
     } catch (error) {
-        console.error("Invoice formats GET (samples) error:", error);
+        console.error("Invoice formats GET error:", error);
         return res.status(500).json({
             success: false,
             message: "Failed to load format sample PDFs",
@@ -85,17 +120,10 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
         if (body.type == null || String(body.type).trim() === "") {
             return res.status(400).json({
                 success: false,
-                message: `type is required. Allowed: ${INVOICE_FORMAT_API_TYPES.join(", ")}`,
-            });
-        }
-        if (!isAllowedFormatApiType(body.type)) {
-            return res.status(400).json({
-                success: false,
-                message: `Invalid type. Allowed: ${INVOICE_FORMAT_API_TYPES.join(", ")}`,
+                message: "type is required",
             });
         }
         const bodyType = normInvoiceType(body.type);
-
         const col = getFormatColumnForInvoiceType(bodyType);
         if (!col || !INVOICE_FORMAT_COLUMNS.includes(col)) {
             return res.status(400).json({
@@ -111,18 +139,17 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
                 message: "format_id is required",
             });
         }
-        if (!isValidFormatKey(rawFormat)) {
+        if (!isValidFormatKey(col, rawFormat)) {
             return res.status(400).json({
                 success: false,
-                message: 'format_id must be one of: classic, compact, minimal',
+                message: `format_id must be a valid format for type ${col}`,
             });
         }
-        const format_id = normalizeFormatKey(rawFormat);
 
         await ensureBranchInvoiceFormatsRow(branch_id);
         await pool.query(
             `UPDATE \`invoice_formats\` SET \`${col}\` = ? WHERE \`branch_id\` = ? LIMIT 1`,
-            [format_id, branch_id]
+            [rawFormat, branch_id]
         );
 
         const [updated] = await pool.query(
@@ -133,16 +160,16 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
         const settings = {};
         for (let i = 0; i < INVOICE_FORMAT_COLUMNS.length; i++) {
             const c = INVOICE_FORMAT_COLUMNS[i];
-            settings[c] = normalizeFormatKey(row[c]);
+            settings[c] = row[c] || "classic";
         }
-
+        
         return res.status(200).json({
             success: true,
             message: "Invoice format updated successfully",
             data: {
                 branch_id,
                 type: bodyType,
-                format_id,
+                format_id: rawFormat,
                 settings,
             },
         });
@@ -156,7 +183,8 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/generate", auth, validateBranch, async (req, res) => {
+// Support both /generate and /generate-invoice under /invoice
+const generateHandler = async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const caller = String(req.headers["username"] || req.headers["Username"] || "").trim();
@@ -239,8 +267,10 @@ router.post("/generate", auth, validateBranch, async (req, res) => {
             });
         }
     }
-});
+};
 
+router.post("/generate", auth, validateBranch, generateHandler);
+router.post("/generate-invoice", auth, validateBranch, generateHandler);
 
 router.get("/prefix/list", auth, validateBranch, async (req, res) => {
     try {
@@ -262,7 +292,6 @@ router.get("/prefix/list", auth, validateBranch, async (req, res) => {
         return res.status(500).json({ success: false, message: "Failed to retrieve invoice prefix list", error: error.message });
     }
 });
-
 
 router.post("/prefix/create", auth, validateBranch, async (req, res) => {
     try {
@@ -293,7 +322,6 @@ router.post("/prefix/create", auth, validateBranch, async (req, res) => {
         return res.status(500).json({ success: false, message: "Failed to create invoice prefix", error: error.message });
     }
 });
-
 
 router.delete("/prefix/delete", auth, validateBranch, async (req, res) => {
     try {

@@ -5,7 +5,8 @@ import { fileURLToPath } from "url";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
-import { buildQuotationPdfBuffer } from "../helpers/QuotationPdf.js";
+import { renderHtmlTemplate, htmlToPdfBuffer } from "../helpers/invoiceTemplateEngine.js";
+import { buildTemplateData } from "../helpers/invoiceDataBuilder.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, USER_DATA, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { createTaskFromQuotation } from "../helpers/taskCreateHelper.js";
 
@@ -814,22 +815,91 @@ router.post("/download", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const buffer = await buildQuotationPdfBuffer({
-            issuerCompany,
-            quotation: {
-                quotation_id: qrow.quotation_id,
-                status: qrow.status,
-                create_date: qrow.create_date,
-            },
-            client,
-            clientFirm,
-            lineItems,
-            totals: {
-                subtotalFees: Number(subtotalFees.toFixed(2)),
-                taxTotal: Number(taxTotal.toFixed(2)),
-                grandTotal: Number(grandTotal.toFixed(2)),
-            },
+                // Build issuer profile info in standard format
+        const issuer = {
+            name: issuerCompany?.name || "Business",
+            phone: [issuerCompany?.mobile_1, issuerCompany?.mobile_2].filter(Boolean).join(" / "),
+            email: [issuerCompany?.email_1, issuerCompany?.email_2].filter(Boolean).join(" / "),
+            address: [
+                issuerCompany?.address_line_1,
+                issuerCompany?.address_line_2,
+                issuerCompany?.city,
+                issuerCompany?.state,
+                issuerCompany?.country,
+                issuerCompany?.pincode
+            ].filter(Boolean).join(", ")
+        };
+
+        // Standardize quotation fields to match invoice schema
+        const invoiceData = {
+            invoice_id: qrow.quotation_id,
+            invoice_no: qrow.quotation_id,
+            created_at: qrow.create_date,
+            amount: grandTotal,
+            tax_amount: taxTotal,
+            remark: null
+        };
+
+        const txRow = {
+            payment_method: null,
+            reference_no: null
+        };
+
+        // Line items mapping
+        const itemsMapped = lineItems.map(item => ({
+            service_name: item.description,
+            fees: item.fees,
+            rate: item.fees,
+            quantity: 1,
+            description: ""
+        }));
+
+        const clientName = client?.name || client?.username || "-";
+        const firmName = clientFirm?.firm_name || "";
+        const clientEmail = client?.email ? `Email: ${client.email}` : "";
+        const clientMobile = client?.mobile ? `Mobile: ${client.mobile}` : "";
+        const firmPan = clientFirm?.pan_no ? `PAN: ${clientFirm.pan_no}` : "";
+        const clientPan = client?.pan_number ? `PAN: ${client.pan_number}` : "";
+
+        // Combine client and firm details for party details mapping
+        const partyDetailParts = [];
+        if (firmName) {
+            partyDetailParts.push(firmName);
+            if (firmPan) partyDetailParts.push(firmPan);
+        } else {
+            if (clientPan) partyDetailParts.push(clientPan);
+        }
+        if (clientEmail) partyDetailParts.push(clientEmail);
+        if (clientMobile) partyDetailParts.push(clientMobile);
+
+        const templateData = buildTemplateData({
+            type: "sale", // use sale layout as it matches perfectly
+            invoice: invoiceData,
+            transactionRow: txRow,
+            items: itemsMapped,
+            partyName: clientName,
+            issuer,
+            lines: []
         });
+
+        // Add custom party details block
+        templateData.party_detail = partyDetailParts.join("<br/>");
+        templateData.type_label = "QUOTATION";
+
+        // Query the active format key for branch (defaulting to classic)
+        let activeFormat = "classic";
+        try {
+            const [formats] = await pool.query(
+                `SELECT quotation FROM invoice_formats WHERE branch_id = ? LIMIT 1`,
+                [branch_id]
+            );
+            if (formats?.length && formats[0].quotation) {
+                activeFormat = formats[0].quotation;
+            }
+        } catch {}
+
+        const html = await renderHtmlTemplate("quotation", activeFormat, templateData);
+        const buffer = await htmlToPdfBuffer(html);
 
         await fs.mkdir(QUOTATION_PDF_DIR, { recursive: true });
         const safeBase = qid.replace(/[^a-zA-Z0-9._-]/g, "_");

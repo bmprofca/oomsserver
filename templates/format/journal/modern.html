@@ -1,0 +1,200 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>{{type_label}}</title>
+<style>
+
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;color:#2d3748;background:#fff;width:794px;}
+  .page{width:794px;min-height:1123px;padding:0;position:relative;}
+  .header{padding:48px;display:flex;justify-content:space-between;align-items:center;}
+  .company-name{font-size:22px;font-weight:600;color:#1a202c;margin-bottom:4px;letter-spacing:-0.5px;}
+  .company-details{font-size:12px;color:#718096;line-height:1.5;}
+  .invoice-type-label{font-size:12px;font-weight:600;text-transform:uppercase;color:#4a5568;letter-spacing:2px;margin-bottom:6px;text-align:right;}
+  .invoice-num-val{font-size:18px;font-weight:300;color:#2d3748;text-align:right;}
+  .invoice-num-label{display:none;}
+  .meta-strip{margin:0 48px;padding:24px 0;display:flex;gap:48px;border-top:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;}
+  .meta-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;}
+  .meta-value{font-size:14px;font-weight:500;color:#2d3748;}
+  .body{padding:36px 48px;}
+  .party-section{display:flex;gap:36px;margin-bottom:40px;}
+  .party-card{flex:1;}
+  .party-card-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;}
+  .party-name{font-size:16px;font-weight:500;color:#1a202c;margin-bottom:6px;}
+  .party-detail{font-size:12px;color:#718096;line-height:1.6;}
+  .table-title{display:none;}
+  .items-table{width:100%;border-collapse:collapse;margin-bottom:40px;}
+  .items-table th{padding:12px 0;font-size:10px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;border-bottom:2px solid #e2e8f0;text-align:left;}
+  .items-table td{padding:16px 0;font-size:13px;color:#4a5568;border-bottom:1px solid #edf2f7;vertical-align:top;}
+  .items-table th:last-child, .items-table td:last-child{text-align:right;}
+  .totals-section{display:flex;justify-content:flex-end;margin-bottom:40px;}
+  .totals-box{width:280px;}
+  .totals-row{display:flex;justify-content:space-between;padding:12px 0;font-size:14px;}
+  .t-label{color:#718096;}
+  .t-value{color:#2d3748;font-weight:500;}
+  .totals-row.grand{border-top:2px solid #2d3748;margin-top:8px;padding-top:16px;}
+  .totals-row.grand .t-label, .totals-row.grand .t-value{font-size:18px;font-weight:600;color:#1a202c;}
+  .voucher-section{padding:0;margin-bottom:40px;}
+  .voucher-row{display:flex;justify-content:space-between;padding:16px 0;border-bottom:1px solid #edf2f7;}
+  .voucher-label{font-size:11px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;}
+  .voucher-value{font-size:14px;color:#4a5568;font-weight:500;}
+  .amount-highlight{font-size:24px;font-weight:300;color:#1a202c;}
+  .remark-section{margin-bottom:40px;}
+  .remark-label{font-size:9px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;}
+  .remark-text{font-size:12px;color:#718096;line-height:1.6;}
+  .footer{position:absolute;bottom:48px;left:48px;right:48px;display:flex;justify-content:space-between;font-size:10px;color:#a0aec0;border-top:1px solid #e2e8f0;padding-top:16px;}
+    
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div class="header-inner">
+      <div class="company-block">
+        <div class="company-name">{{company_name}}</div>
+        <div class="company-details">
+          {{company_address}}<br/>
+          {{#if company_phone}}Phone: {{company_phone}}{{/if}}{{#if company_phone}}{{#if company_email}} &nbsp;|&nbsp; {{/if}}{{/if}}{{#if company_email}}Email: {{company_email}}{{/if}}
+        </div>
+      </div>
+      <div class="invoice-badge">
+        <div class="invoice-type-label">{{type_label}}</div>
+        <div class="invoice-number-row">
+          <span class="invoice-num-label">Invoice No.</span>
+          <span class="invoice-num-val">{{invoice_no}}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="meta-strip">
+    <div class="meta-item">
+      <div class="meta-label">Issue Date</div>
+      <div class="meta-value">{{invoice_date}}</div>
+    </div>
+    {{#if due_date}}
+    <div class="meta-item">
+      <div class="meta-label">Due Date</div>
+      <div class="meta-value">{{due_date}}</div>
+    </div>
+    {{/if}}
+    <div class="meta-item">
+      <div class="meta-label">Amount Due</div>
+      <div class="meta-value">{{amount}}</div>
+    </div>
+    {{#if tax_amount}}
+    <div class="meta-item">
+      <div class="meta-label">Tax</div>
+      <div class="meta-value">{{tax_amount}}</div>
+    </div>
+    {{/if}}
+  </div>
+
+  <div class="body">
+    {{#if show_parties}}
+    <div class="party-section">
+      {{#if party_name}}
+      <div class="party-card">
+        <div class="party-card-label">{{bill_to_label}}</div>
+        <div class="party-name">{{party_name}}</div>
+        {{#if party_detail}}<div class="party-detail">{{{party_detail}}}</div>{{/if}}
+      </div>
+      {{/if}}
+      {{#if party2_name}}
+      <div class="party-card">
+        <div class="party-card-label">{{party2_label}}</div>
+        <div class="party-name">{{party2_name}}</div>
+        {{#if party2_detail}}<div class="party-detail">{{{party2_detail}}}</div>{{/if}}
+      </div>
+      {{/if}}
+    </div>
+    {{/if}}
+
+    {{#if has_items}}
+    <div class="table-section">
+      <div class="table-title">Items &amp; Services</div>
+      <table class="items-table">
+        <thead>
+          <tr>
+            <th style="width:4%">#</th>
+            <th style="width:35%">Item / Service</th>
+            <th style="width:25%">Description</th>
+            <th style="width:12%">Rate</th>
+            <th style="width:10%">Qty</th>
+            <th style="width:14%">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{{items_rows}}}
+        </tbody>
+      </table>
+    </div>
+    <div class="totals-section">
+      <div class="totals-box">
+        {{#if tax_amount}}
+        <div class="totals-row">
+          <span class="t-label">Subtotal</span>
+          <span class="t-value">{{subtotal}}</span>
+        </div>
+        <div class="totals-row">
+          <span class="t-label">Tax</span>
+          <span class="t-value">{{tax_amount}}</span>
+        </div>
+        {{/if}}
+        <div class="totals-row grand">
+          <span class="t-label">Total Amount</span>
+          <span class="t-value">{{amount}}</span>
+        </div>
+      </div>
+    </div>
+    {{/if}}
+
+    {{#if is_simple}}
+    <div class="voucher-section">
+      <div class="voucher-row">
+        <span class="voucher-label">Transaction Reference</span>
+        <span class="voucher-value">{{invoice_no}}</span>
+      </div>
+      {{#if party_name}}
+      <div class="voucher-row">
+        <span class="voucher-label">{{bill_to_label}}</span>
+        <span class="voucher-value">{{party_name}}</span>
+      </div>
+      {{/if}}
+      {{#if party2_name}}
+      <div class="voucher-row">
+        <span class="voucher-label">{{party2_label}}</span>
+        <span class="voucher-value">{{party2_name}}</span>
+      </div>
+      {{/if}}
+      <div class="voucher-row" style="margin-top:8px;padding-top:16px;">
+        <span class="voucher-label">Total Amount</span>
+        <span class="amount-highlight">{{amount}}</span>
+      </div>
+    </div>
+    {{/if}}
+
+    {{#if remark}}
+    <div class="remark-section">
+      <div class="remark-label">Remarks</div>
+      <div class="remark-text">{{remark}}</div>
+    </div>
+    {{/if}}
+  </div>
+
+  <div class="footer">
+    <div class="footer-left">
+      <span class="footer-brand">{{company_name}}</span><br/>
+      This is a computer-generated document.
+    </div>
+    <div class="footer-right">
+      Generated on {{generated_date}}<br/>
+      Page 1
+    </div>
+  </div>
+</div>
+</body>
+</html>
