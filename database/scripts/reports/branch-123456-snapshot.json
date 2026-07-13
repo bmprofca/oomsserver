@@ -1,0 +1,19 @@
+{
+  "branch_id": "123456",
+  "database": "u278432002_ooms_v5",
+  "host": "193.203.184.193",
+  "captured_at": "2026-07-12T11:31:12.006Z",
+  "note": "Row-count snapshot after migration. Take a full DB backup via hosting panel before go-live.",
+  "counts": {
+    "clients": 2642,
+    "firms": 2674,
+    "tasks": 7623,
+    "transactions": 7347,
+    "invoice": 11541,
+    "branch_mapping": 13,
+    "attendance": 2837,
+    "documents": 1039,
+    "sale_entries": 10293,
+    "expense_entries": 222
+  }
+}

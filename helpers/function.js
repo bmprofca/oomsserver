@@ -181,12 +181,16 @@ async function SET_OPENING_BALANCE({
             [invoice_id, branch_id, invoice_no, username, username, "opening balance", transaction_id, absAmount, "not applicable", 0, 0, 0, 0, 0, absAmount, 0, absAmount]
         );
 
-        // Opening balance: use signed amount (positive=debit, negative=credit). Only one party is stored.
-        const signedAmount = type === "1" ? -absAmount : absAmount;
+        // Opening balance: debit → party2, credit → party1; amount always positive.
+        const isCredit = String(type) === "1";
+        const party1_type = isCredit ? party_type : null;
+        const party1_id = isCredit ? party_id : null;
+        const party2_type = isCredit ? null : party_type;
+        const party2_id = isCredit ? null : party_id;
         const remarkVal = remark != null && String(remark).trim() !== "" ? String(remark).trim() : null;
         await connection.query(
-            "INSERT INTO `transactions` (`branch_id`, `transaction_id`, `create_by`, `modify_by`, `transaction_date`, `amount`, `transaction_type`, `invoice_id`, `invoice_no`, `party1_type`, `party1_id`, `remark`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            [branch_id, transaction_id, username, username, transaction_date, signedAmount, "opening balance", invoice_id, invoice_no, party_type, party_id, remarkVal]
+            "INSERT INTO `transactions` (`branch_id`, `transaction_id`, `create_by`, `modify_by`, `transaction_date`, `amount`, `transaction_type`, `invoice_id`, `invoice_no`, `party1_type`, `party1_id`, `party2_type`, `party2_id`, `remark`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [branch_id, transaction_id, username, username, transaction_date, absAmount, "opening balance", invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remarkVal]
         );
 
         await connection.query("UPDATE `invoice_prefix` SET `current`= ? WHERE `id` = ?", [serial, invoice_primary_id]);
@@ -239,12 +243,15 @@ async function EDIT_OPENING_BALANCE({
             [username, absAmount, absAmount, absAmount, branch_id, transaction_id]
         );
 
-        // Opening balance: use signed amount (positive=debit, negative=credit). remark on transactions.
-        const signedAmount = type === "1" ? -absAmount : absAmount;
+        const isCredit = String(type) === "1";
+        const party1_type = isCredit ? party_type : null;
+        const party1_id = isCredit ? party_id : null;
+        const party2_type = isCredit ? null : party_type;
+        const party2_id = isCredit ? null : party_id;
         const remarkVal = remark != null && String(remark).trim() !== "" ? String(remark).trim() : null;
         await connection.query(
-            "UPDATE `transactions` SET `modify_by` = ?, `transaction_date` = ?, `amount` = ?, `party1_type` = ?, `party1_id` = ?, `remark` = ? WHERE `branch_id` = ? AND `transaction_id` = ?",
-            [username, transaction_date, signedAmount, party_type, party_id, remarkVal, branch_id, transaction_id]
+            "UPDATE `transactions` SET `modify_by` = ?, `transaction_date` = ?, `amount` = ?, `party1_type` = ?, `party1_id` = ?, `party2_type` = ?, `party2_id` = ?, `remark` = ? WHERE `branch_id` = ? AND `transaction_id` = ?",
+            [username, transaction_date, absAmount, party1_type, party1_id, party2_type, party2_id, remarkVal, branch_id, transaction_id]
         );
 
         await connection.commit();
@@ -269,22 +276,25 @@ async function GET_BALANCE({
     try {
         await connection.beginTransaction();
 
-        // party1=sender (effect=-amount), party2=receiver (effect=+amount). opening balance (party2 null): amount is signed.
+        // balance = total party2 amounts - total party1 amounts (amounts are always positive).
         const [rows] = await connection.query(
             `SELECT
-                SUM(effect) AS balance,
-                SUM(GREATEST(effect, 0)) AS debit,
-                SUM(GREATEST(-effect, 0)) AS credit
-            FROM (
-                SELECT CASE
-                    WHEN party1_type = ? AND party1_id = ? THEN (CASE WHEN party2_id IS NULL THEN amount ELSE -amount END)
-                    WHEN party2_type = ? AND party2_id = ? THEN amount
-                    ELSE 0
-                END AS effect
-                FROM transactions
-                WHERE branch_id = ? AND (party1_type = ? AND party1_id = ? OR party2_type = ? AND party2_id = ?)
-            ) t`,
-            [party_type, party_id, party_type, party_id, branch_id, party_type, party_id, party_type, party_id]
+                COALESCE(SUM(CASE WHEN party2_type = ? AND party2_id = ? THEN ABS(amount) ELSE 0 END), 0)
+                - COALESCE(SUM(CASE WHEN party1_type = ? AND party1_id = ? THEN ABS(amount) ELSE 0 END), 0) AS balance,
+                COALESCE(SUM(CASE WHEN party2_type = ? AND party2_id = ? THEN ABS(amount) ELSE 0 END), 0) AS debit,
+                COALESCE(SUM(CASE WHEN party1_type = ? AND party1_id = ? THEN ABS(amount) ELSE 0 END), 0) AS credit
+            FROM transactions
+            WHERE branch_id = ?
+              AND ((party1_type = ? AND party1_id = ?) OR (party2_type = ? AND party2_id = ?))`,
+            [
+                party_type, party_id,
+                party_type, party_id,
+                party_type, party_id,
+                party_type, party_id,
+                branch_id,
+                party_type, party_id,
+                party_type, party_id,
+            ]
         );
         const r = rows?.[0];
         let balance = Number(r?.balance ?? 0) || 0;

@@ -3,6 +3,14 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { USER_SNIPPED_DATA, TODAY_DATE } from "../helpers/function.js";
+import {
+    clientBalanceCountParams,
+    clientBalanceCountSql,
+    clientBalanceListParams,
+    clientBalanceListSql,
+    clientBalanceTotalParams,
+    clientBalanceTotalSql,
+} from "../helpers/clientBalanceSql.js";
 import { filterSchedulesByRecurringRules } from "../helpers/recurringTaskHelper.js";
 
 const router = express.Router();
@@ -2145,76 +2153,16 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
      AND billing_status IN (0, '0')`,
             [branch_id]
         );
-        // Creditors: UNIQUE clients with negative net balance (we owe them money) - Show as NEGATIVE
+        // Creditors: clients with negative net balance (GET_BALANCE rules)
         const [creditors] = await pool.query(
-            `SELECT 
-                COUNT(DISTINCT client_username) AS total_count,
-                COALESCE(SUM(net_balance), 0) AS total_amount
-             FROM (
-                SELECT 
-                    client_username,
-                    SUM(net_amount) AS net_balance
-                FROM (
-                    SELECT 
-                        party2_id AS client_username,
-                        amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party2_type = 'client'
-                        AND party2_id IS NOT NULL
-                        AND party2_id NOT REGEXP '^[0-9]+$'
-                    
-                    UNION ALL
-                    
-                    SELECT 
-                        party1_id AS client_username,
-                        -amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party1_type = 'client'
-                        AND party1_id IS NOT NULL
-                        AND party1_id NOT REGEXP '^[0-9]+$'
-                ) AS all_transactions
-                GROUP BY client_username
-                HAVING SUM(net_amount) < 0
-             ) AS creditor_clients`,
-            [branch_id, branch_id]
+            clientBalanceCountSql("creditor"),
+            clientBalanceCountParams(branch_id)
         );
 
-        // Debtors: UNIQUE clients with positive net balance (they owe us money) - Show as POSITIVE
+        // Debtors: clients with positive net balance (GET_BALANCE rules)
         const [debtors] = await pool.query(
-            `SELECT 
-                COUNT(DISTINCT client_username) AS total_count,
-                COALESCE(SUM(net_balance), 0) AS total_amount
-             FROM (
-                SELECT 
-                    client_username,
-                    SUM(net_amount) AS net_balance
-                FROM (
-                    SELECT 
-                        party2_id AS client_username,
-                        amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party2_type = 'client'
-                        AND party2_id IS NOT NULL
-                        AND party2_id NOT REGEXP '^[0-9]+$'
-                    
-                    UNION ALL
-                    
-                    SELECT 
-                        party1_id AS client_username,
-                        -amount AS net_amount
-                    FROM transactions 
-                    WHERE branch_id = ? 
-                        AND party1_type = 'client'
-                        AND party1_id IS NOT NULL
-                        AND party1_id NOT REGEXP '^[0-9]+$'
-                ) AS all_transactions
-                GROUP BY client_username
-                HAVING SUM(net_amount) > 0
-             ) AS debtor_clients`,
-            [branch_id, branch_id]
+            clientBalanceCountSql("debtor"),
+            clientBalanceCountParams(branch_id)
         );
 
         // Today Received: transaction_type = 'receive' or 'sale' or 'received'
@@ -2321,7 +2269,7 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
                 },
                 creditors: {
                     count: Number(creditors[0]?.total_count) || 0,
-                    total_amount: -Number(creditors[0]?.total_amount) || 0  // NEGATIVE balance
+                    total_amount: Number(creditors[0]?.total_amount) || 0
                 },
                 debtors: {
                     count: Number(debtors[0]?.total_count) || 0,
@@ -2358,6 +2306,53 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
     }
 });
 
+async function getFirmsMapForUsernames(branchId, usernames) {
+    const firmsByUsername = {};
+    if (!usernames.length) return firmsByUsername;
+
+    const firmPlaceholders = usernames.map(() => "?").join(", ");
+    const [firmRows] = await pool.query(
+        `SELECT firm_id, username, firm_name, firm_type, pan_no, gst_no, tan_no, vat_no, cin_no, file_no,
+                status, create_date, modify_date, address_line_1, address_line_2, city, state, pincode, country
+         FROM firms
+         WHERE branch_id = ?
+           AND username IN (${firmPlaceholders})
+           AND (is_deleted = '0' OR is_deleted = 0)
+         ORDER BY COALESCE(modify_date, create_date) DESC`,
+        [branchId, ...usernames]
+    );
+
+    for (const row of firmRows) {
+        if (!firmsByUsername[row.username]) {
+            firmsByUsername[row.username] = [];
+        }
+        firmsByUsername[row.username].push({
+            firm_id: row.firm_id || "",
+            firm_name: row.firm_name || "",
+            firm_type: row.firm_type || "",
+            gst_no: row.gst_no || "",
+            pan_no: row.pan_no || "",
+            tan_no: row.tan_no || "",
+            vat_no: row.vat_no || "",
+            cin_no: row.cin_no || "",
+            file_no: row.file_no || "",
+            status: row.status === "1",
+            create_date: row.create_date,
+            modify_date: row.modify_date,
+            address: {
+                address_line_1: row.address_line_1 || "",
+                address_line_2: row.address_line_2 || "",
+                city: row.city || "",
+                state: row.state || "",
+                pincode: row.pincode || "",
+                country: row.country || "",
+            },
+        });
+    }
+
+    return firmsByUsername;
+}
+
 router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -2372,8 +2367,13 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
         const {
             page_no = 1,
             limit = 10,
-            type = "all"
+            type = "all",
+            search = "",
+            balance_after = 0
         } = req.query || {};
+
+        const searchTerm = String(search || "").trim();
+        const balanceAfter = Math.max(0, Number(balance_after) || 0);
 
         const pageNum = Math.max(1, Number(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
@@ -2381,6 +2381,8 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
 
         let data = [];
         let total = 0;
+        let debtorMeta = null;
+        let creditorMeta = null;
 
         switch (type) {
             case "pending_billing":
@@ -2423,171 +2425,70 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                 total = totalPending[0]?.total || 0;
                 break;
 
-            case "creditors":
-                // Creditors: UNIQUE clients with NEGATIVE net balance (we owe them money) - Show as NEGATIVE
+            case "creditors": {
                 const [creditorDetails] = await pool.query(
-                    `SELECT 
-                        t.client_username AS username,
-                        MAX(p.name) AS name,
-                        MAX(p.guardian_name) AS guardian_name,
-                        MAX(p.care_of) AS care_of,
-                        MAX(p.mobile) AS mobile,
-                        MAX(p.email) AS email,
-                        MAX(p.country_code) AS country_code,
-                        MAX(f.firm_name) AS firm_name,
-                        MAX(f.firm_id) AS firm_id,
-                        MAX(f.gst_no) AS gst_no,
-                        MAX(f.pan_no) AS pan_no,
-                        SUM(t.net_amount) AS total_balance
-                    FROM (
-                        SELECT 
-                            party2_id AS client_username,
-                            amount AS net_amount
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party2_type = 'client'
-                            AND party2_id IS NOT NULL
-                            AND party2_id NOT REGEXP '^[0-9]+$'
-                        
-                        UNION ALL
-                        
-                        SELECT 
-                            party1_id AS client_username,
-                            -amount AS net_amount
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party1_type = 'client'
-                            AND party1_id IS NOT NULL
-                            AND party1_id NOT REGEXP '^[0-9]+$'
-                    ) t
-                    LEFT JOIN profile p ON p.username = t.client_username
-                    LEFT JOIN firms f ON f.username = t.client_username
-                    WHERE t.client_username IS NOT NULL
-                    GROUP BY t.client_username
-                    HAVING SUM(t.net_amount) < 0
-                    ORDER BY SUM(t.net_amount) ASC
-                    LIMIT ? OFFSET ?`,
-                    [branch_id, branch_id, limitNum, offset]
+                    clientBalanceListSql("creditor", searchTerm),
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "creditor", 0)
                 );
 
-                const formattedCreditors = creditorDetails.map(creditor => ({
-                    username: creditor.username,
-                    name: creditor.name || creditor.username,
-                    guardian_name: creditor.guardian_name || '',
-                    care_of: creditor.care_of || '',
-                    mobile: creditor.mobile || '',
-                    email: creditor.email || '',
-                    country_code: creditor.country_code || '',
-                    firm: {
-                        firm_id: creditor.firm_id || '',
-                        firm_name: creditor.firm_name || '',
-                        gst_no: creditor.gst_no || '',
-                        pan_no: creditor.pan_no || ''
-                    },
-                    balance: -Number(Math.abs(creditor.total_balance)),
-                    balance_type: "creditor"
-                }));
+                const creditorUsernames = creditorDetails.map((c) => c.username).filter(Boolean);
+                const creditorFirmsMap = await getFirmsMapForUsernames(branch_id, creditorUsernames);
+
+                const formattedCreditors = creditorDetails.map(creditor => {
+                    const firms = creditorFirmsMap[creditor.username] || [];
+                    const primaryFirm = firms[0] || null;
+                    return {
+                        username: creditor.username,
+                        name: creditor.name || creditor.username,
+                        guardian_name: creditor.guardian_name || '',
+                        care_of: creditor.care_of || '',
+                        mobile: creditor.mobile || '',
+                        email: creditor.email || '',
+                        country_code: creditor.country_code || '',
+                        firms,
+                        firm: primaryFirm ? {
+                            firm_id: primaryFirm.firm_id || '',
+                            firm_name: primaryFirm.firm_name || '',
+                            gst_no: primaryFirm.gst_no || '',
+                            pan_no: primaryFirm.pan_no || ''
+                        } : {
+                            firm_id: creditor.firm_id || '',
+                            firm_name: creditor.firm_name || '',
+                            gst_no: creditor.gst_no || '',
+                            pan_no: creditor.pan_no || ''
+                        },
+                        balance: -Number(Math.abs(creditor.total_balance)),
+                        balance_type: "creditor"
+                    };
+                });
 
                 const [totalCreditors] = await pool.query(
-                    `SELECT COUNT(DISTINCT client_username) AS total
-                    FROM (
-                        SELECT 
-                            CASE 
-                                WHEN party2_type = 'client' THEN party2_id
-                                WHEN party1_type = 'client' THEN party1_id
-                            END AS client_username
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND amount != 0
-                            AND (party2_type = 'client' OR party1_type = 'client')
-                            AND (
-                                (party2_type = 'client' AND party2_id NOT REGEXP '^[0-9]+$') OR
-                                (party1_type = 'client' AND party1_id NOT REGEXP '^[0-9]+$')
-                            )
-                    ) AS all_clients
-                    WHERE client_username IN (
-                        SELECT client_username FROM (
-                            SELECT 
-                                party2_id AS client_username,
-                                amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party2_type = 'client'
-                            UNION ALL
-                            SELECT 
-                                party1_id AS client_username,
-                                -amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party1_type = 'client'
-                        ) AS balances
-                        GROUP BY client_username
-                        HAVING SUM(net_amount) < 0
-                    )`,
-                    [branch_id, branch_id, branch_id]
+                    clientBalanceTotalSql("creditor", searchTerm),
+                    clientBalanceTotalParams(branch_id, searchTerm, "creditor", 0)
                 );
 
                 data = formattedCreditors;
                 total = totalCreditors[0]?.total || 0;
+                creditorMeta = {
+                    creditor_count: Number(totalCreditors[0]?.total) || 0,
+                    creditor_balance: Math.abs(Number(totalCreditors[0]?.balance_sum) || 0)
+                };
                 break;
+            }
 
-            case "debtors":
-                // Debtors: UNIQUE clients with POSITIVE net balance (they owe us money) - Show as POSITIVE
+            case "debtors": {
                 const [debtorDetails] = await pool.query(
-                    `SELECT 
-                        t.client_username AS username,
-                        MAX(p.name) AS name,
-                        MAX(p.guardian_name) AS guardian_name,
-                        MAX(p.care_of) AS care_of,
-                        MAX(p.mobile) AS mobile,
-                        MAX(p.email) AS email,
-                        MAX(p.country_code) AS country_code,
-                        MAX(f.firm_name) AS firm_name,
-                        MAX(f.firm_id) AS firm_id,
-                        MAX(f.gst_no) AS gst_no,
-                        MAX(f.pan_no) AS pan_no,
-                        SUM(t.net_amount) AS total_balance,
-                        MAX(t.transaction_date) AS last_transaction_date,
-                        DATEDIFF(CURDATE(), MAX(t.transaction_date)) AS days_since_last_payment,
-                        CASE 
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 1 THEN 'Today'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 7 THEN 'Last 7 days'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 30 THEN 'Last 30 days'
-                            WHEN DATEDIFF(CURDATE(), MAX(t.transaction_date)) <= 90 THEN 'Last 90 days'
-                            ELSE '90+ days'
-                        END AS last_received_in
-                    FROM (
-                        SELECT 
-                            party2_id AS client_username,
-                            amount AS net_amount,
-                            transaction_date
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party2_type = 'client'
-                            AND party2_id IS NOT NULL
-                            AND party2_id NOT REGEXP '^[0-9]+$'
-                        
-                        UNION ALL
-                        
-                        SELECT 
-                            party1_id AS client_username,
-                            -amount AS net_amount,
-                            transaction_date
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND party1_type = 'client'
-                            AND party1_id IS NOT NULL
-                            AND party1_id NOT REGEXP '^[0-9]+$'
-                    ) t
-                    LEFT JOIN profile p ON p.username = t.client_username
-                    LEFT JOIN firms f ON f.username = t.client_username
-                    WHERE t.client_username IS NOT NULL
-                    GROUP BY t.client_username
-                    HAVING SUM(t.net_amount) > 0
-                    ORDER BY days_since_last_payment DESC, SUM(t.net_amount) DESC
-                    LIMIT ? OFFSET ?`,
-                    [branch_id, branch_id, limitNum, offset]
+                    clientBalanceListSql("debtor", searchTerm, balanceAfter),
+                    clientBalanceListParams(branch_id, limitNum, offset, searchTerm, "debtor", balanceAfter)
                 );
 
-                const formattedDebtors = debtorDetails.map(debtor => ({
+                const debtorUsernames = debtorDetails.map((d) => d.username).filter(Boolean);
+                const firmsByUsername = await getFirmsMapForUsernames(branch_id, debtorUsernames);
+
+                const formattedDebtors = debtorDetails.map(debtor => {
+                    const firms = firmsByUsername[debtor.username] || [];
+                    const primaryFirm = firms[0] || null;
+                    return {
                     username: debtor.username,
                     name: debtor.name || debtor.username,
                     guardian_name: debtor.guardian_name || '',
@@ -2595,7 +2496,13 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                     mobile: debtor.mobile || '',
                     email: debtor.email || '',
                     country_code: debtor.country_code || '',
-                    firm: {
+                    firms,
+                    firm: primaryFirm ? {
+                        firm_id: primaryFirm.firm_id || '',
+                        firm_name: primaryFirm.firm_name || '',
+                        gst_no: primaryFirm.gst_no || '',
+                        pan_no: primaryFirm.pan_no || ''
+                    } : {
                         firm_id: debtor.firm_id || '',
                         firm_name: debtor.firm_name || '',
                         gst_no: debtor.gst_no || '',
@@ -2608,48 +2515,22 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                         days_ago: debtor.days_since_last_payment,
                         period: debtor.last_received_in
                     }
-                }));
+                };
+                });
 
                 const [totalDebtors] = await pool.query(
-                    `SELECT COUNT(DISTINCT client_username) AS total
-                    FROM (
-                        SELECT 
-                            CASE 
-                                WHEN party2_type = 'client' THEN party2_id
-                                WHEN party1_type = 'client' THEN party1_id
-                            END AS client_username
-                        FROM transactions 
-                        WHERE branch_id = ? 
-                            AND amount != 0
-                            AND (party2_type = 'client' OR party1_type = 'client')
-                            AND (
-                                (party2_type = 'client' AND party2_id NOT REGEXP '^[0-9]+$') OR
-                                (party1_type = 'client' AND party1_id NOT REGEXP '^[0-9]+$')
-                            )
-                    ) AS all_clients
-                    WHERE client_username IN (
-                        SELECT client_username FROM (
-                            SELECT 
-                                party2_id AS client_username,
-                                amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party2_type = 'client'
-                            UNION ALL
-                            SELECT 
-                                party1_id AS client_username,
-                                -amount AS net_amount
-                            FROM transactions 
-                            WHERE branch_id = ? AND party1_type = 'client'
-                        ) AS balances
-                        GROUP BY client_username
-                        HAVING SUM(net_amount) > 0
-                    )`,
-                    [branch_id, branch_id, branch_id]
+                    clientBalanceTotalSql("debtor", searchTerm, balanceAfter),
+                    clientBalanceTotalParams(branch_id, searchTerm, "debtor", balanceAfter)
                 );
 
                 data = formattedDebtors;
                 total = totalDebtors[0]?.total || 0;
+                debtorMeta = {
+                    debtor_count: Number(totalDebtors[0]?.total) || 0,
+                    debtor_balance: Number(totalDebtors[0]?.balance_sum) || 0
+                };
                 break;
+            }
 
             case "today_received":
                 // Today Received: DISTINCT transactions by transaction_id to avoid duplicates
@@ -2890,7 +2771,9 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                     total: total,
                     total_pages: Math.ceil(total / limitNum),
                     is_last_page: offset + (Array.isArray(data) ? data.length : 0) >= total
-                }
+                },
+                ...(debtorMeta ? { meta: debtorMeta } : {}),
+                ...(creditorMeta ? { meta: creditorMeta } : {})
             }
         });
 
