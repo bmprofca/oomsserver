@@ -35,7 +35,7 @@ export async function renderHtmlTemplate(type, templateName, data) {
  */
 export async function htmlToPdfBuffer(html) {
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: "shell",
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -70,7 +70,7 @@ export async function htmlToPdfBuffer(html) {
  */
 export async function htmlToPdfBufferBatch(htmlArray) {
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: "shell",
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
