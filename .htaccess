@@ -1,6 +1,1 @@
-# Ensure JS module files are served with the correct MIME type
-# This fixes errors like "Failed to load module script" for .mjs files.
-AddType application/javascript .mjs
-AddType application/javascript .js
-
-# Add additional custom Apache rules below as needed.
+# Please fill in the URLrewrite rules or custom Apache config here

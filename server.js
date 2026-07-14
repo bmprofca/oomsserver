@@ -52,27 +52,7 @@ app.use(express.json({
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function setModuleContentType(res, filePath) {
-    if (filePath && filePath.endsWith(".mjs")) {
-        res.type("application/javascript");
-    }
-}
-
 app.use("/proxy/media", mediaProxyHandler);
-
-app.use(
-    "/static",
-    express.static(path.join(__dirname, "build", "static"), {
-        setHeaders: (res, filePath) => setModuleContentType(res, filePath),
-    })
-);
-
-app.use(
-    "/static",
-    express.static(path.join(__dirname, "static"), {
-        setHeaders: (res, filePath) => setModuleContentType(res, filePath),
-    })
-);
 
 app.use("/temp", express.static(path.join(__dirname, "media", "upload", "temp")));
 app.use("/media/profile/image", express.static(path.join(__dirname, "media", "profile", "image")));
