@@ -1457,6 +1457,191 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
     }
 });
 
+/**
+ * Yet Not Started compliance periods (visible firm×period with no started task).
+ * Query: service_id, firm_id, username, compliance_year, compliance_period, search, page_no, limit
+ */
+router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { pageNum, limitNum, offset } = parseListPagination(req.query);
+        const {
+            service_id,
+            firm_id,
+            username,
+            compliance_year,
+            compliance_period,
+            search,
+            ca,
+            agent,
+        } = req.query || {};
+
+        const serviceId = parseServiceId(service_id);
+        const complianceYearRaw =
+            compliance_year != null && String(compliance_year).trim() !== ""
+                ? normalizeFinancialYear(compliance_year)
+                : null;
+        const compliancePeriodRaw =
+            compliance_period != null ? String(compliance_period).trim() : "";
+
+        if (compliancePeriodRaw && !complianceYearRaw) {
+            return res.status(400).json({
+                success: false,
+                message: "compliance_year is required when compliance_period is provided",
+            });
+        }
+
+        let periodOptions = null;
+        let serviceFrequency = null;
+        let serviceName = null;
+
+        if (serviceId) {
+            const serviceResult = await loadComplianceService(branch_id, serviceId);
+            if (serviceResult.error) {
+                return res.status(serviceResult.error.status).json({
+                    success: false,
+                    message: serviceResult.error.message,
+                });
+            }
+
+            serviceFrequency = serviceResult.service.frequency;
+            serviceName = serviceResult.service.name || null;
+            periodOptions = getCompliancePeriodOptions(serviceFrequency);
+
+            if (compliancePeriodRaw && !periodOptions.period_select_enabled) {
+                return res.status(400).json({
+                    success: false,
+                    message: "compliance_period is not applicable for yearly services",
+                    period_options: periodOptions,
+                });
+            }
+
+            if (compliancePeriodRaw && periodOptions.period_select_enabled) {
+                const matchedPeriod = periodOptions.periods.find(
+                    (item) => item.value.toLowerCase() === compliancePeriodRaw.toLowerCase()
+                );
+                if (!matchedPeriod) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `compliance_period must be one of: ${periodOptions.periods
+                            .map((item) => item.value)
+                            .join(", ")}`,
+                        period_options: periodOptions,
+                    });
+                }
+            }
+        } else if (compliancePeriodRaw) {
+            return res.status(400).json({
+                success: false,
+                message: "service_id is required when compliance_period is provided",
+            });
+        }
+
+        const { whereClause, params } = buildComplianceFirmFilters(
+            { service_id, firm_id, username, search, ca, agent },
+            branch_id
+        );
+
+        const [firmRows] = await pool.query(
+            `SELECT ${COMPLIANCE_FIRM_SELECT}
+             ${COMPLIANCE_FIRM_JOINS}
+             WHERE ${whereClause}
+             ORDER BY cf.id DESC`,
+            params
+        );
+
+        const targetYear = complianceYearRaw
+            ? normalizeFinancialYear(complianceYearRaw)
+            : getFinancialYearForDate(new Date());
+
+        const assignmentRows = expandComplianceFirmPeriods(firmRows, {
+            complianceYear: complianceYearRaw || targetYear,
+            compliancePeriod: compliancePeriodRaw || null,
+        });
+
+        const startedTaskSql = `
+            SELECT t.service_id, t.firm_id, t.compliance_year, t.compliance_period, s.frequency
+            FROM tasks t
+            INNER JOIN services s ON s.service_id = t.service_id
+            WHERE t.branch_id = ?
+              AND t.task_type = 'compliance'
+              AND t.compliance_year = ?
+        `;
+        const startedParams = [branch_id, targetYear];
+        let startedFilterSql = startedTaskSql;
+        if (serviceId) {
+            startedFilterSql += ` AND t.service_id = ?`;
+            startedParams.push(serviceId);
+        }
+        if (compliancePeriodRaw) {
+            const periodForTasks =
+                serviceFrequency && isYearlyComplianceFrequency(serviceFrequency)
+                    ? "Annual"
+                    : compliancePeriodRaw;
+            startedFilterSql += ` AND t.compliance_period = ?`;
+            startedParams.push(periodForTasks);
+        }
+
+        const [startedTasks] = await pool.query(startedFilterSql, startedParams);
+        const startedKeys = new Set(
+            startedTasks.map((task) => buildComplianceTaskLookupKey(task))
+        );
+
+        const notStartedRows = sortComplianceTaskListRows(
+            assignmentRows.filter(
+                (row) => !startedKeys.has(buildComplianceTaskLookupKey(row))
+            )
+        );
+
+        const total = notStartedRows.length;
+        const pageRows = notStartedRows.slice(offset, offset + limitNum);
+
+        const data = [];
+        for (const row of pageRows) {
+            data.push(await formatComplianceTaskListRow(row, null));
+        }
+
+        const totalPages = Math.ceil(total / limitNum) || 1;
+
+        return res.status(200).json({
+            success: true,
+            message: "Yet not started compliance list retrieved successfully",
+            total,
+            query_payload: {
+                ...req.query,
+                page_no: pageNum,
+                limit: limitNum,
+                service_id: serviceId,
+                service_name: serviceName,
+                firm_id: parseFirmId(firm_id),
+                username: username != null ? String(username).trim() || null : null,
+                search: search != null ? String(search).trim() || null : null,
+                compliance_year: targetYear,
+                compliance_period:
+                    serviceFrequency && isYearlyComplianceFrequency(serviceFrequency)
+                        ? null
+                        : compliancePeriodRaw || null,
+                period_options: periodOptions,
+            },
+            data,
+            pagination: {
+                page_no: pageNum,
+                limit: limitNum,
+                total,
+                total_pages: totalPages,
+                is_last_page: offset + pageRows.length >= total,
+            },
+        });
+    } catch (error) {
+        console.error("GET COMPLIANCE YET NOT STARTED ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch yet not started compliance list",
+            error: error.message,
+        });
+    }
+});
+
 router.get("/firms", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;

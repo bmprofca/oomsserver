@@ -163,7 +163,113 @@ function calculateAttendanceStatus(punchIn, punchOut, expectedHours = 8, gracePe
     return { status, extraMinutes, lessMinutes, totalMinutes, gracePeriodApplied };
 }
 
+const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Kolkata";
+
+function getAttendanceLocalDateString(date = new Date(), timeZone = ATTENDANCE_TIMEZONE) {
+    return new Intl.DateTimeFormat("en-CA", { timeZone }).format(date);
+}
+
+function getAttendanceLocalDayBounds(date = new Date(), timeZone = ATTENDANCE_TIMEZONE) {
+    const startDate = getAttendanceLocalDateString(date, timeZone);
+    const nextDay = new Date(date.getTime() + 24 * 60 * 60 * 1000);
+    const endExclusive = getAttendanceLocalDateString(nextDay, timeZone);
+    return {
+        start: `${startDate} 00:00:00`,
+        endExclusive: `${endExclusive} 00:00:00`,
+    };
+}
+
+function isMappingAccepted(value) {
+    return String(value) === "1";
+}
+
 // ==================== STAFF APIs (Username in BODY) ====================
+
+/**
+ * STAFF: Today's punch status for logged-in user (header profile quick actions)
+ */
+router.get('/today-status', auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+
+        if (!username) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing required header: username",
+            });
+        }
+
+        const [mapping] = await pool.query(
+            `SELECT map_id, is_accepted
+             FROM branch_mapping
+             WHERE username = ? AND branch_id = ? AND type = 'staff' AND is_deleted = '0'`,
+            [username, branch_id]
+        );
+
+        if (!mapping.length) {
+            return res.status(200).json({
+                success: true,
+                message: "User is not a staff member for this branch",
+                data: {
+                    is_staff: false,
+                    can_punch_in: false,
+                    can_punch_out: false,
+                    today: null,
+                },
+            });
+        }
+
+        const [openRows] = await pool.query(
+            `SELECT attendance_id, punch_in_time, punch_out_time, attendance_status
+             FROM attendance
+             WHERE username = ? AND branch_id = ?
+               AND punch_out_time IS NULL
+               AND is_deleted = '0'
+             ORDER BY punch_in_time DESC
+             LIMIT 1`,
+            [username, branch_id]
+        );
+
+        const { start, endExclusive } = getAttendanceLocalDayBounds();
+        const [todayRows] = await pool.query(
+            `SELECT attendance_id, punch_in_time, punch_out_time, attendance_status
+             FROM attendance
+             WHERE username = ? AND branch_id = ?
+               AND punch_in_time >= ? AND punch_in_time < ?
+               AND is_deleted = '0'
+             ORDER BY punch_in_time DESC
+             LIMIT 1`,
+            [username, branch_id, start, endExclusive]
+        );
+
+        const openSession = openRows[0] || null;
+        const todayRecord = todayRows[0] || null;
+        const today = openSession || todayRecord;
+        const isAccepted = isMappingAccepted(mapping[0].is_accepted);
+        const hasOpenSession = Boolean(openSession);
+        const completedToday = Boolean(todayRecord?.punch_out_time);
+
+        return res.status(200).json({
+            success: true,
+            message: "Today's attendance status retrieved",
+            data: {
+                is_staff: true,
+                is_accepted: isAccepted,
+                can_punch_in: isAccepted && !hasOpenSession && !completedToday,
+                can_punch_out: isAccepted && hasOpenSession,
+                today,
+            },
+        });
+    } catch (error) {
+        console.error("Today status error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch today's attendance status",
+            error: error.message,
+        });
+    }
+});
 
 /**
  * STAFF: Punch In
@@ -185,6 +291,13 @@ router.post('/punch-in', auth, validateBranch, async (req, res) => {
             });
         }
 
+        if (loggedInUser && String(username).trim() !== String(loggedInUser).trim()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only punch in for your own account",
+            });
+        }
+
         // Get staff mapping to verify they belong to this branch
         const [mapping] = await pool.query(
             `SELECT map_id, is_accepted 
@@ -200,32 +313,58 @@ router.post('/punch-in', auth, validateBranch, async (req, res) => {
             });
         }
 
-        if (mapping[0].is_accepted !== '1') {
+        if (!isMappingAccepted(mapping[0].is_accepted)) {
             return res.status(403).json({
                 success: false,
                 message: 'Please accept the invitation first'
             });
         }
 
-        // Check today's attendance
-        const today = new Date().toISOString().split('T')[0];
+        // Check today's attendance (one punch-in per calendar day)
+        const { start, endExclusive } = getAttendanceLocalDayBounds();
         const [todayAttendance] = await pool.query(
-            `SELECT * FROM attendance 
-             WHERE username = ? AND branch_id = ? AND DATE(punch_in_time) = ? AND is_deleted = '0'`,
-            [username, branch_id, today]
+            `SELECT attendance_id, punch_in_time, punch_out_time
+             FROM attendance
+             WHERE username = ? AND branch_id = ?
+               AND punch_in_time >= ? AND punch_in_time < ?
+               AND is_deleted = '0'
+             ORDER BY punch_in_time DESC
+             LIMIT 1`,
+            [username, branch_id, start, endExclusive]
         );
 
         if (todayAttendance.length > 0) {
             if (!todayAttendance[0].punch_out_time) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Already punched in. Please punch out first.',
+                    message: 'Already punched in for today. Please punch out first.',
                     data: todayAttendance[0]
                 });
             }
             return res.status(400).json({
                 success: false,
-                message: 'Attendance already completed for today'
+                message: 'Attendance already completed for today. Multiple punch-ins are not allowed.',
+                data: todayAttendance[0]
+            });
+        }
+
+        // Block if an older open session is still active
+        const [openAttendance] = await pool.query(
+            `SELECT attendance_id, punch_in_time
+             FROM attendance
+             WHERE username = ? AND branch_id = ?
+               AND punch_out_time IS NULL
+               AND is_deleted = '0'
+             ORDER BY punch_in_time DESC
+             LIMIT 1`,
+            [username, branch_id]
+        );
+
+        if (openAttendance.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'You have an open punch-in without punch-out. Please punch out first.',
+                data: openAttendance[0],
             });
         }
 
@@ -298,6 +437,13 @@ router.post('/punch-out', auth, validateBranch, async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: "Missing required field: username in body"
+            });
+        }
+
+        if (loggedInUser && String(username).trim() !== String(loggedInUser).trim()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only punch out for your own account",
             });
         }
 

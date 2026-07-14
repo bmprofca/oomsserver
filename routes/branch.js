@@ -8,8 +8,6 @@ import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 const router = express.Router();
 
 const auth = async (req, res, next) => {
-    let conn;
-
     try {
         // FIX: Check multiple header formats
         const username = req.headers.username ||
@@ -29,10 +27,8 @@ const auth = async (req, res, next) => {
             });
         }
 
-        conn = await pool.getConnection();
-
-        // Resolve software user by username or active profile contact
-        const [users] = await conn.query(
+        // Use pool.query so transient disconnects (ECONNRESET) are retried.
+        const [users] = await pool.query(
             `SELECT u.username, p.email, p.mobile
              FROM users u
              LEFT JOIN profile p ON p.username = u.username AND p.status = '1'
@@ -42,7 +38,6 @@ const auth = async (req, res, next) => {
         );
 
         if (users.length === 0) {
-            conn.release();
             return res.status(404).json({
                 success: false,
                 message: `User not found: ${username}`,
@@ -54,7 +49,7 @@ const auth = async (req, res, next) => {
         const dbUsername = users[0].username;
 
         // Verify token exists and is valid
-        const [tokens] = await conn.query(
+        const [tokens] = await pool.query(
             `SELECT * FROM tokens 
              WHERE token = ? 
                AND username = ? 
@@ -63,9 +58,7 @@ const auth = async (req, res, next) => {
             [token, dbUsername]  // FIX: Use database username
         );
 
-
         if (tokens.length === 0) {
-            conn.release();
             return res.status(401).json({
                 success: false,
                 message: "Session expired. Please login again.",
@@ -73,19 +66,15 @@ const auth = async (req, res, next) => {
             });
         }
 
-        conn.release();
-
         // Set user info in request
         req.username = dbUsername;  // Use username from database
         req.token = token;
         req.userEmail = users[0].email || users[0].mobile;
 
-
         next();
 
     } catch (error) {
         console.error('Auth middleware error:', error);
-        if (conn) conn.release();
         return res.status(500).json({
             success: false,
             message: "Authentication error",
