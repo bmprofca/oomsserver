@@ -54,6 +54,14 @@ const __dirname = path.dirname(__filename);
 
 app.use("/proxy/media", mediaProxyHandler);
 
+// Ensure .mjs module worker files are served with the correct MIME type when using Node static hosting
+app.use((req, res, next) => {
+    if (req.path.endsWith(".mjs") || req.path.endsWith(".js")) {
+        res.type("application/javascript");
+    }
+    return next();
+});
+
 app.use("/temp", express.static(path.join(__dirname, "media", "upload", "temp")));
 app.use("/media/profile/image", express.static(path.join(__dirname, "media", "profile", "image")));
 
