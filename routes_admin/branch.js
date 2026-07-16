@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { authAdmin } from "../middleware/authAdmin.js";
 import { FORMAT_DATE } from "../helpers/function.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { buildBranchLogoUrl, buildBranchSignUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
 
@@ -13,8 +13,8 @@ function formatBranchRow(row) {
         branch_id: row.branch_id,
         name: row.name,
         status: row.status === "1",
-        logo: row.logo ? `${BASE_DOMAIN}/media/logo/${row.logo}` : null,
-        sign: row.sign ? `${BASE_DOMAIN}/media/sign/${row.sign}` : null,
+        logo: buildBranchLogoUrl(row.logo),
+        sign: buildBranchSignUrl(row.sign),
         address: {
             address_line_1: row.address_line_1,
             address_line_2: row.address_line_2,
@@ -34,7 +34,6 @@ function formatBranchRow(row) {
             pan: row.pan,
             is_pan_verified: row.is_pan_verified === "1",
             gst: row.gst,
-            gst_rate: row.gst_rate,
             is_gst_verified: row.is_gst_verified === "1",
         },
         create_by: row.create_by,
@@ -225,7 +224,6 @@ router.get("/list", authAdmin, async (req, res) => {
                 bl.pan,
                 bl.is_pan_verified,
                 bl.gst,
-                bl.gst_rate,
                 bl.is_gst_verified,
                 bl.mobile_1,
                 bl.mobile_2,
@@ -305,7 +303,6 @@ router.get("/details/:branch_id", authAdmin, async (req, res) => {
                 bl.pan,
                 bl.is_pan_verified,
                 bl.gst,
-                bl.gst_rate,
                 bl.is_gst_verified,
                 bl.mobile_1,
                 bl.mobile_2,

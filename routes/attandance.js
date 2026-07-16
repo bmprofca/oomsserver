@@ -6864,7 +6864,6 @@ async function getCompanyDetails(branch_id) {
             pan,
             is_pan_verified,
             gst,
-            gst_rate,
             is_gst_verified,
             mobile_1,
             mobile_2,

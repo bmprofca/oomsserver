@@ -32,7 +32,6 @@ export async function runPhaseA(ctx) {
                 state = COALESCE(NULLIF(?, ''), state),
                 pincode = COALESCE(NULLIF(?, ''), pincode),
                 gst = COALESCE(NULLIF(?, ''), gst),
-                gst_rate = COALESCE(?, gst_rate),
                 whatsapp_channel = CASE WHEN ? != '' THEN 'ooms system' ELSE whatsapp_channel END,
                 whatsappweb_session = COALESCE(NULLIF(?, ''), whatsappweb_session),
                 modify_date = NOW()
@@ -49,7 +48,6 @@ export async function runPhaseA(ctx) {
                 app.state,
                 app.pincode,
                 app.gst_number || branch.gst_no,
-                Number(branch.gst_rate ?? app.gst_rate ?? 0),
                 branch.wp_ooms_session || "",
                 branch.wp_ooms_session,
                 NEW_BRANCH_ID,

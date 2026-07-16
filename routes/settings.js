@@ -1,151 +1,112 @@
 import express from "express";
-import crypto from "crypto";
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
-import { RANDOM_STRING, TODAY_DATE } from "../helpers/function.js";
+import { TODAY_DATE } from "../helpers/function.js";
+import {
+    deleteBranchAsset,
+    downloadAndUploadBranchLogo,
+    downloadAndUploadBranchSign,
+} from "../helpers/b2Storage.js";
+import { buildBranchLogoUrl, buildBranchSignUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const MEDIA_DIR = path.resolve(__dirname, "../media");
 
-const getExtensionFromContentType = (contentType = "") => {
-    const normalized = String(contentType).toLowerCase();
-    if (normalized.includes("image/jpeg")) return ".jpg";
-    if (normalized.includes("image/png")) return ".png";
-    if (normalized.includes("image/webp")) return ".webp";
-    if (normalized.includes("image/gif")) return ".gif";
-    if (normalized.includes("image/svg+xml")) return ".svg";
-    return "";
-};
+const isVerifiedFlag = (value) => value === "1" || value === 1 || value === true;
 
-const getExtensionFromUrl = (url = "") => {
-    try {
-        const pathname = new URL(url).pathname;
-        const ext = path.extname(pathname || "").toLowerCase();
-        if ([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"].includes(ext)) {
-            return ext === ".jpeg" ? ".jpg" : ext;
-        }
-        return "";
-    } catch {
-        return "";
-    }
-};
+function formatBranchDetailsPayload(row) {
+    const {
+        name,
+        legal_name,
+        address_line_1,
+        address_line_2,
+        city,
+        state,
+        country,
+        pincode,
+        mobile_1,
+        mobile_2,
+        email_1,
+        email_2,
+        invoice_address,
+        pan,
+        gst,
+        logo,
+        sign,
+        is_pan_verified,
+        is_gst_verified,
+    } = row;
 
-const downloadAndSaveImageFromUrl = async (imageUrl, subFolder) => {
-    if (!imageUrl || typeof imageUrl !== "string") {
-        throw new Error("A valid image URL is required");
-    }
+    return {
+        basic: {
+            name,
+            legal_name: legal_name || null,
+            address: {
+                address_line_1,
+                address_line_2,
+                city,
+                state,
+                pincode,
+                country,
+            },
+            mobile: {
+                mobile_1,
+                mobile_2,
+            },
+            email: {
+                email_1,
+                email_2,
+            },
+            pan: {
+                is_pan_verified: isVerifiedFlag(is_pan_verified),
+                pan,
+            },
+            gst: {
+                gst,
+                is_gst_verified: isVerifiedFlag(is_gst_verified),
+            },
+        },
+        image: {
+            logo: buildBranchLogoUrl(logo),
+            sign: buildBranchSignUrl(sign),
+        },
+        invoice: {
+            address: invoice_address,
+        },
+    };
+}
 
-    let parsedUrl;
-    try {
-        parsedUrl = new URL(imageUrl);
-    } catch {
-        throw new Error("Invalid image URL");
-    }
-
-    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-        throw new Error("Only http/https image URLs are allowed");
-    }
-
-    const response = await fetch(parsedUrl.toString());
-    if (!response.ok) {
-        throw new Error(`Unable to fetch image. Status: ${response.status}`);
-    }
-
-    const contentType = String(response.headers.get("content-type") || "");
-    if (!contentType.toLowerCase().startsWith("image/")) {
-        throw new Error("Provided URL does not point to an image");
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    if (!buffer || buffer.length === 0) {
-        throw new Error("Fetched image is empty");
-    }
-
-    const ext = getExtensionFromContentType(contentType) || getExtensionFromUrl(parsedUrl.toString()) || ".jpg";
-    const fileName = `${RANDOM_STRING(30)}.${ext}`;
-    const targetDir = path.join(MEDIA_DIR, subFolder);
-    const targetPath = path.join(targetDir, fileName);
-
-    await fs.mkdir(targetDir, { recursive: true });
-    await fs.writeFile(targetPath, buffer);
-
-    return fileName;
-};
-
+async function getBranchRow(branch_id) {
+    const [rows] = await pool.query(
+        "SELECT * FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
+        [branch_id]
+    );
+    return rows?.[0] || null;
+}
 
 router.get("/branch/details", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const caller = String(req.headers["username"] || req.headers["Username"] || "");
-
-
-        const [branch_list_row] = await pool.query("SELECT * FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'", [branch_id]);
-        if (!branch_list_row || branch_list_row.length === 0) {
+        const branch = await getBranchRow(branch_id);
+        if (!branch) {
             return res.status(404).json({ success: false, message: "Branch not found" });
         }
-
-        const branch_list_data = branch_list_row[0];
-
-        const { name, address_line_1, address_line_2, city, state, country, pincode, mobile_1, mobile_2, email_1, email_2, invoice_address, pan, gst, logo, sign, gst_rate, is_pan_verified, is_gst_verified } = branch_list_data;
-
-        const logo_url = logo ? `${BASE_DOMAIN}/media/logo/${logo}` : null;
-        const sign_url = sign ? `${BASE_DOMAIN}/media/sign/${sign}` : null;
 
         return res.status(200).json({
             success: true,
             message: "Branch details retrieved successfully",
-            data: {
-                basic: {
-                    name,
-                    address: {
-                        address_line_1,
-                        address_line_2,
-                        city,
-                        state,
-                        pincode,
-                        country,
-                    },
-                    mobile: {
-                        mobile_1,
-                        mobile_2,
-                    },
-                    email: {
-                        email_1,
-                        email_2,
-                    },
-                    pan: {
-                        is_pan_verified: is_pan_verified === '1' ? true : false,
-                        pan,
-                    },
-                    gst: {
-                        gst,
-                        gst_rate,
-                        is_gst_verified: is_gst_verified === '1' ? true : false,
-                    }
-                },
-                image: {
-                    logo: logo_url,
-                    sign: sign_url,
-                },
-                invoice: {
-                    address: invoice_address,
-                }
-            }
+            data: formatBranchDetailsPayload(branch),
         });
     } catch (error) {
         console.error("Branch details GET error:", error);
-        return res.status(500).json({ success: false, message: "Failed to retrieve branch details", error: error.message });
+        return res.status(500).json({
+            success: false,
+            message: "Failed to retrieve branch details",
+            error: error.message,
+        });
     }
 });
 
-router.put("/branch/details", auth, validateBranch, async (req, res) => {
+async function updateBranchDetailsHandler(req, res) {
     try {
         const branch_id = req.branch_id;
         const caller = String(req.headers["username"] || req.headers["Username"] || "");
@@ -157,18 +118,36 @@ router.put("/branch/details", auth, validateBranch, async (req, res) => {
         const gstData = body.gst || {};
         const invoice = body.invoice || {};
 
-        const [branch_list_row] = await pool.query(
-            "SELECT * FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [branch_id]
-        );
-        if (!branch_list_row || branch_list_row.length === 0) {
+        const existing = await getBranchRow(branch_id);
+        if (!existing) {
             return res.status(404).json({ success: false, message: "Branch not found" });
         }
+
+        const panVerified = isVerifiedFlag(existing.is_pan_verified);
+        const gstVerified = isVerifiedFlag(existing.is_gst_verified);
+
+        if (panVerified && panData.pan !== undefined && String(panData.pan || "") !== String(existing.pan || "")) {
+            return res.status(400).json({
+                success: false,
+                message: "PAN is verified and cannot be updated",
+            });
+        }
+
+        if (gstVerified && gstData.gst !== undefined && String(gstData.gst || "") !== String(existing.gst || "")) {
+            return res.status(400).json({
+                success: false,
+                message: "GST is verified and cannot be updated",
+            });
+        }
+
+        const nextPan = panVerified ? existing.pan : (panData.pan ?? existing.pan ?? null);
+        const nextGst = gstVerified ? existing.gst : (gstData.gst ?? existing.gst ?? null);
 
         await pool.query(
             `UPDATE \`branch_list\`
              SET
                 \`name\` = ?,
+                \`legal_name\` = ?,
                 \`address_line_1\` = ?,
                 \`address_line_2\` = ?,
                 \`city\` = ?,
@@ -181,13 +160,13 @@ router.put("/branch/details", auth, validateBranch, async (req, res) => {
                 \`email_2\` = ?,
                 \`pan\` = ?,
                 \`gst\` = ?,
-                \`gst_rate\` = ?,
                 \`invoice_address\` = ?,
                 \`modify_by\` = ?,
                 \`modify_date\` = ?
              WHERE \`branch_id\` = ? AND \`is_deleted\` = '0'`,
             [
-                body.name ?? null,
+                body.name ?? existing.name ?? null,
+                body.legal_name ?? existing.legal_name ?? null,
                 address.address_line_1 ?? null,
                 address.address_line_2 ?? null,
                 address.city ?? null,
@@ -198,127 +177,76 @@ router.put("/branch/details", auth, validateBranch, async (req, res) => {
                 mobile.mobile_2 ?? null,
                 email.email_1 ?? null,
                 email.email_2 ?? null,
-                panData.pan ?? null,
-                gstData.gst ?? null,
-                gstData.gst_rate ?? 0,
-                invoice.address ?? null,
+                nextPan,
+                nextGst,
+                invoice.address ?? existing.invoice_address ?? null,
                 caller || null,
                 TODAY_DATE(),
-                branch_id
+                branch_id,
             ]
         );
 
-        const [updated_branch_list_row] = await pool.query(
-            "SELECT * FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [branch_id]
-        );
-
-        const branch_list_data = updated_branch_list_row[0];
-        const {
-            name,
-            address_line_1,
-            address_line_2,
-            city,
-            state,
-            country,
-            pincode,
-            mobile_1,
-            mobile_2,
-            email_1,
-            email_2,
-            invoice_address,
-            pan,
-            gst,
-            logo,
-            sign,
-            gst_rate,
-            is_pan_verified,
-            is_gst_verified
-        } = branch_list_data;
-
-        const logo_url = logo ? `${BASE_DOMAIN}/media/logo/${logo}` : null;
-        const sign_url = sign ? `${BASE_DOMAIN}/media/sign/${sign}` : null;
+        const updated = await getBranchRow(branch_id);
 
         return res.status(200).json({
             success: true,
             message: "Branch details updated successfully",
-            data: {
-                basic: {
-                    name,
-                    address: {
-                        address_line_1,
-                        address_line_2,
-                        city,
-                        state,
-                        pincode,
-                        country,
-                    },
-                    mobile: {
-                        mobile_1,
-                        mobile_2,
-                    },
-                    email: {
-                        email_1,
-                        email_2,
-                    },
-                    pan: {
-                        is_pan_verified: is_pan_verified === '1' ? true : false,
-                        pan,
-                    },
-                    gst: {
-                        gst,
-                        gst_rate,
-                        is_gst_verified: is_gst_verified === '1' ? true : false,
-                    }
-                },
-                image: {
-                    logo: logo_url,
-                    sign: sign_url,
-                },
-                invoice: {
-                    address: invoice_address,
-                }
-            }
+            data: formatBranchDetailsPayload(updated),
         });
-
     } catch (error) {
         console.error("Branch details UPDATE error:", error);
-        return res.status(500).json({ success: false, message: "Failed to update branch details", error: error.message });
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update branch details",
+            error: error.message,
+        });
     }
-});
+}
+
+router.put("/branch/details", auth, validateBranch, updateBranchDetailsHandler);
+router.put("/branch/update", auth, validateBranch, updateBranchDetailsHandler);
 
 router.post("/branch/logo", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const caller = String(req.headers["username"] || req.headers["Username"] || "");
-        const body = req.body || {};
-        const logoUrl = body.logo;
+        const logoUrl = req.body?.logo;
 
-        const [branch_list_row] = await pool.query(
-            "SELECT `branch_id` FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [branch_id]
-        );
-        if (!branch_list_row || branch_list_row.length === 0) {
+        const existing = await getBranchRow(branch_id);
+        if (!existing) {
             return res.status(404).json({ success: false, message: "Branch not found" });
         }
 
-        const fileName = await downloadAndSaveImageFromUrl(logoUrl, "logo");
+        const uploaded = await downloadAndUploadBranchLogo(logoUrl, branch_id);
 
         await pool.query(
             "UPDATE `branch_list` SET `logo` = ?, `modify_by` = ?, `modify_date` = ? WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [fileName, caller || null, TODAY_DATE(), branch_id]
+            [uploaded.filename, caller || null, TODAY_DATE(), branch_id]
         );
+
+        // Clean up any legacy random filename that is no longer used.
+        if (existing.logo && existing.logo !== uploaded.filename) {
+            try {
+                await deleteBranchAsset("logo", existing.logo);
+            } catch (cleanupError) {
+                console.warn("Failed to delete previous branch logo from B2:", cleanupError?.message || cleanupError);
+            }
+        }
 
         return res.status(200).json({
             success: true,
             message: "Branch logo updated successfully",
             data: {
-                logo: `${BASE_DOMAIN}/media/logo/${fileName}`,
+                logo: buildBranchLogoUrl(uploaded.filename),
             },
         });
     } catch (error) {
         console.error("Branch logo POST error:", error);
-        return res.status(500).json({ success: false, message: "Failed to upload branch logo", error: error.message });
+        return res.status(500).json({
+            success: false,
+            message: "Failed to upload branch logo",
+            error: error.message,
+        });
     }
 });
 
@@ -326,34 +254,42 @@ router.post("/branch/sign", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const caller = String(req.headers["username"] || req.headers["Username"] || "");
-        const body = req.body || {};
-        const signUrl = body.sign;
+        const signUrl = req.body?.sign;
 
-        const [branch_list_row] = await pool.query(
-            "SELECT `branch_id` FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [branch_id]
-        );
-        if (!branch_list_row || branch_list_row.length === 0) {
+        const existing = await getBranchRow(branch_id);
+        if (!existing) {
             return res.status(404).json({ success: false, message: "Branch not found" });
         }
 
-        const fileName = await downloadAndSaveImageFromUrl(signUrl, "sign");
+        const uploaded = await downloadAndUploadBranchSign(signUrl, branch_id);
 
         await pool.query(
             "UPDATE `branch_list` SET `sign` = ?, `modify_by` = ?, `modify_date` = ? WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [fileName, caller || null, TODAY_DATE(), branch_id]
+            [uploaded.filename, caller || null, TODAY_DATE(), branch_id]
         );
+
+        if (existing.sign && existing.sign !== uploaded.filename) {
+            try {
+                await deleteBranchAsset("sign", existing.sign);
+            } catch (cleanupError) {
+                console.warn("Failed to delete previous branch sign from B2:", cleanupError?.message || cleanupError);
+            }
+        }
 
         return res.status(200).json({
             success: true,
             message: "Branch sign updated successfully",
             data: {
-                sign: `${BASE_DOMAIN}/media/sign/${fileName}`,
+                sign: buildBranchSignUrl(uploaded.filename),
             },
         });
     } catch (error) {
         console.error("Branch sign POST error:", error);
-        return res.status(500).json({ success: false, message: "Failed to upload branch sign", error: error.message });
+        return res.status(500).json({
+            success: false,
+            message: "Failed to upload branch sign",
+            error: error.message,
+        });
     }
 });
 
@@ -361,14 +297,10 @@ router.post("/branch/invoice-address", auth, validateBranch, async (req, res) =>
     try {
         const branch_id = req.branch_id;
         const caller = String(req.headers["username"] || req.headers["Username"] || "");
-        const body = req.body || {};
-        const address = body.address;
+        const address = req.body?.address;
 
-        const [branch_list_row] = await pool.query(
-            "SELECT `branch_id` FROM `branch_list` WHERE `branch_id` = ? AND `is_deleted` = '0'",
-            [branch_id]
-        );
-        if (!branch_list_row || branch_list_row.length === 0) {
+        const existing = await getBranchRow(branch_id);
+        if (!existing) {
             return res.status(404).json({ success: false, message: "Branch not found" });
         }
 
@@ -381,12 +313,16 @@ router.post("/branch/invoice-address", auth, validateBranch, async (req, res) =>
             success: true,
             message: "Branch invoice address updated successfully",
             data: {
-                address: address,
+                address,
             },
         });
     } catch (error) {
         console.error("Branch invoice address POST error:", error);
-        return res.status(500).json({ success: false, message: "Failed to upload branch invoice address", error: error.message });
+        return res.status(500).json({
+            success: false,
+            message: "Failed to upload branch invoice address",
+            error: error.message,
+        });
     }
 });
 

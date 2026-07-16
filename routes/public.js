@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { USER_SNIPPED_DATA } from "../helpers/function.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { buildBranchLogoUrl } from "../helpers/mediaUrl.js";
 
 const router = express.Router();
 
@@ -70,7 +70,7 @@ function formatBranchDetails(invitation) {
         name: invitation.branch_name,
         logo:
             invitation.logo != null && invitation.logo !== ""
-                ? `${BASE_DOMAIN}/media/logo/${invitation.logo}`
+                ? buildBranchLogoUrl(invitation.logo)
                 : null,
         address: {
             address_line_1: invitation.address_line_1,

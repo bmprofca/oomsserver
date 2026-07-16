@@ -6,7 +6,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
 import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
-import { buildProfileImageUrl } from '../helpers/mediaUrl.js';
+import { buildBranchLogoUrl, buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
 import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
 
@@ -904,9 +904,7 @@ router.get('/search-by-name', auth, async (req, res) => {
         const formattedData = await Promise.all(rows.map(async (row) => {
             const profileImage = buildProfileImageUrl(row.image);
 
-            const branchLogo = row.branch_logo && row.branch_logo !== '' && row.branch_logo !== null
-                ? `${BASE_DOMAIN}/media/branch/logo/${row.branch_logo}`
-                : null;
+            const branchLogo = buildBranchLogoUrl(row.branch_logo);
 
             // Get modifier user data if available
             const modifyUser = row.modify_by ? await USER_DATA(row.modify_by) : null;
@@ -1090,9 +1088,7 @@ router.get('/profile/:username', auth, validateBranch, async (req, res) => {
         const profile = rows[0];
 
         // Format branch logo URL if exists
-        const branchLogo = profile.branch_logo && profile.branch_logo !== '' && profile.branch_logo !== null
-            ? `${BASE_DOMAIN}/media/branch/logo/${profile.branch_logo}`
-            : null;
+        const branchLogo = buildBranchLogoUrl(profile.branch_logo);
 
         // Format profile image URL if exists
         const profileImage = buildProfileImageUrl(profile.image);

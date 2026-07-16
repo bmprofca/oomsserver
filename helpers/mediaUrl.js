@@ -61,6 +61,24 @@ export function buildProfileImageUrl(filename) {
 }
 
 /**
+ * Branch logo stored as filename in DB -> proxied URL (B2: media/branch/logo/).
+ */
+export function buildBranchLogoUrl(filename) {
+    const clean = String(filename || "").trim();
+    if (!clean) return null;
+    return buildMediaProxyUrl("branch", "logo", clean);
+}
+
+/**
+ * Branch signature stored as filename in DB -> proxied URL (B2: media/branch/sign/).
+ */
+export function buildBranchSignUrl(filename) {
+    const clean = String(filename || "").trim();
+    if (!clean) return null;
+    return buildMediaProxyUrl("branch", "sign", clean);
+}
+
+/**
  * Profile document stored under category folder + filename.
  */
 export function buildProfileDocumentUrl(categoryFolder, filename) {

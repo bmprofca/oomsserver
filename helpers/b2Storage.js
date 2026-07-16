@@ -12,6 +12,8 @@ const MAX_DOCUMENT_SIZE = 50 * 1024 * 1024;
 const MAX_PROFILE_IMAGE_SIZE = 5 * 1024 * 1024;
 const DOCUMENT_BASE_PREFIX = "media/profile/document";
 const PROFILE_IMAGE_BASE_PREFIX = "media/profile/image";
+const BRANCH_LOGO_BASE_PREFIX = "media/branch/logo";
+const BRANCH_SIGN_BASE_PREFIX = "media/branch/sign";
 const ALLOWED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
 const ALLOWED_IMAGE_MIME_TYPES = [
     "image/jpeg",
@@ -442,6 +444,215 @@ async function downloadAndUploadProfileImage(imageUrl) {
     }
 }
 
+function getBranchAssetObjectKey(kind, filename) {
+    const prefix = kind === "sign" ? BRANCH_SIGN_BASE_PREFIX : BRANCH_LOGO_BASE_PREFIX;
+    return `${prefix}/${filename}`;
+}
+
+function sanitizeBranchIdForFilename(branchId) {
+    const clean = String(branchId || "").trim();
+    if (!clean) {
+        throw new Error("branch_id is required for branch media upload");
+    }
+    // Branch IDs are stable identifiers used as the reusable B2 object name.
+    return clean.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+function buildBranchAssetFilename(branchId, ext) {
+    const safeBranchId = sanitizeBranchIdForFilename(branchId);
+    const safeExt = String(ext || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+    return `${safeBranchId}.${safeExt}`;
+}
+
+async function deleteB2ObjectVersions(objectKey) {
+    if (!objectKey) return;
+
+    const bucketId = await getBucketId();
+    let startFileName = objectKey;
+    let startFileId = null;
+
+    // Delete every version of this exact object key.
+    for (let page = 0; page < 20; page++) {
+        const payload = {
+            bucketId,
+            startFileName,
+            maxFileCount: 100,
+            prefix: objectKey,
+        };
+        if (startFileId) {
+            payload.startFileId = startFileId;
+        }
+
+        const listResponse = await b2Post("/b2api/v2/b2_list_file_versions", payload);
+        const files = listResponse.files || [];
+        if (!files.length) break;
+
+        let matched = 0;
+        for (const file of files) {
+            if (file.fileName !== objectKey) continue;
+            matched += 1;
+            await b2Post("/b2api/v2/b2_delete_file_version", {
+                fileName: file.fileName,
+                fileId: file.fileId,
+            });
+        }
+
+        if (!listResponse.nextFileName || matched === 0) break;
+        startFileName = listResponse.nextFileName;
+        startFileId = listResponse.nextFileId || null;
+    }
+}
+
+async function deleteBranchAssetsForBranch(kind, branchId) {
+    const safeBranchId = sanitizeBranchIdForFilename(branchId);
+    const prefix = kind === "sign" ? BRANCH_SIGN_BASE_PREFIX : BRANCH_LOGO_BASE_PREFIX;
+    const namePrefix = `${prefix}/${safeBranchId}.`;
+    const bucketId = await getBucketId();
+
+    const listResponse = await b2Post("/b2api/v2/b2_list_file_names", {
+        bucketId,
+        startFileName: namePrefix,
+        maxFileCount: 100,
+        prefix: namePrefix,
+    });
+
+    const files = listResponse.files || [];
+    for (const file of files) {
+        if (!String(file.fileName || "").startsWith(namePrefix)) continue;
+        await deleteB2ObjectVersions(file.fileName);
+    }
+}
+
+async function uploadBranchAssetBuffer(kind, filename, buffer, mimeType) {
+    const key = getBranchAssetObjectKey(kind, filename);
+    // Replace any existing object at this exact key before upload.
+    await deleteB2ObjectVersions(key);
+
+    const uploadUrlData = await getUploadUrl();
+    const sha1 = crypto.createHash("sha1").update(buffer).digest("hex");
+
+    await axios.post(uploadUrlData.uploadUrl, buffer, {
+        headers: {
+            Authorization: uploadUrlData.authorizationToken,
+            "X-Bz-File-Name": key.split("/").map(encodeURIComponent).join("/"),
+            "X-Bz-Content-Sha1": sha1,
+            "Content-Type": mimeType || "application/octet-stream",
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 120000,
+    });
+
+    return {
+        filename,
+        key,
+        mimeType: mimeType || "application/octet-stream",
+        size: buffer.length,
+    };
+}
+
+async function deleteBranchAsset(kind, filename) {
+    if (!filename) return;
+    await deleteB2ObjectVersions(getBranchAssetObjectKey(kind, filename));
+}
+
+async function downloadAndUploadBranchAsset(imageUrl, kind = "logo", branchId) {
+    if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.trim()) {
+        throw new Error("Invalid image URL");
+    }
+    if (!branchId) {
+        throw new Error("branch_id is required for branch media upload");
+    }
+
+    const assetKind = kind === "sign" ? "sign" : "logo";
+
+    let response;
+    try {
+        response = await axios({
+            method: "GET",
+            url: imageUrl,
+            responseType: "arraybuffer",
+            maxContentLength: MAX_PROFILE_IMAGE_SIZE,
+            timeout: 30000,
+            validateStatus: (status) => status === 200,
+        });
+    } catch (error) {
+        if (error.response) {
+            throw new Error(`Failed to download image: HTTP ${error.response.status}`);
+        }
+        if (error.code === "ECONNABORTED") {
+            throw new Error("Image download timeout");
+        }
+        if (error.message?.includes("maxContentLength")) {
+            throw new Error("Image size exceeds maximum allowed size of 5MB");
+        }
+        throw new Error(error.message || "Failed to download image");
+    }
+
+    const buffer = Buffer.from(response.data);
+    const contentType = response.headers["content-type"] || "";
+    const mimeType = contentType.split(";")[0].trim().toLowerCase();
+
+    if (buffer.length > MAX_PROFILE_IMAGE_SIZE) {
+        throw new Error("Image size exceeds maximum allowed size of 5MB");
+    }
+
+    if (!ALLOWED_IMAGE_MIME_TYPES.includes(mimeType)) {
+        throw new Error(`Invalid image MIME type: ${contentType}`);
+    }
+
+    let ext = "jpg";
+    if (mimeType.includes("jpeg")) ext = "jpg";
+    else if (mimeType.includes("png")) ext = "png";
+    else if (mimeType.includes("gif")) ext = "gif";
+    else if (mimeType.includes("webp")) ext = "webp";
+    else if (mimeType.includes("bmp")) ext = "bmp";
+    else {
+        const urlExt = imageUrl.split(".").pop()?.toLowerCase().split("?")[0];
+        if (urlExt && ALLOWED_IMAGE_EXTENSIONS.includes(urlExt)) {
+            ext = urlExt === "jpeg" ? "jpg" : urlExt;
+        }
+    }
+
+    if (!validateProfileImageFile(buffer, ext)) {
+        throw new Error("Invalid image file. File content does not match the image type.");
+    }
+
+    const filename = buildBranchAssetFilename(branchId, ext);
+
+    // Remove all previous extensions for this branch (e.g. .png when uploading .jpg).
+    try {
+        await deleteBranchAssetsForBranch(assetKind, branchId);
+    } catch (cleanupError) {
+        console.warn(
+            `Failed to clear previous branch ${assetKind} assets:`,
+            cleanupError?.message || cleanupError
+        );
+    }
+
+    try {
+        const uploaded = await uploadBranchAssetBuffer(assetKind, filename, buffer, mimeType);
+        return {
+            filename: uploaded.filename,
+            mimeType: uploaded.mimeType,
+            size: uploaded.size,
+            key: uploaded.key,
+            kind: assetKind,
+        };
+    } catch (error) {
+        const message = error.response?.data?.message || error.response?.data?.code || error.message;
+        throw new Error(`Failed to upload to B2: ${message}`);
+    }
+}
+
+async function downloadAndUploadBranchLogo(imageUrl, branchId) {
+    return downloadAndUploadBranchAsset(imageUrl, "logo", branchId);
+}
+
+async function downloadAndUploadBranchSign(imageUrl, branchId) {
+    return downloadAndUploadBranchAsset(imageUrl, "sign", branchId);
+}
+
 async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
     if (!fileUrl || typeof fileUrl !== "string" || !fileUrl.trim()) {
         throw new Error("Invalid file URL");
@@ -501,15 +712,24 @@ async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
 }
 
 export {
+    BRANCH_LOGO_BASE_PREFIX,
+    BRANCH_SIGN_BASE_PREFIX,
     DOCUMENT_BASE_PREFIX,
     PROFILE_IMAGE_BASE_PREFIX,
+    buildBranchAssetFilename,
+    deleteBranchAsset,
+    deleteBranchAssetsForBranch,
     deleteProfileDocument,
     deleteProfileImage,
+    downloadAndUploadBranchAsset,
+    downloadAndUploadBranchLogo,
+    downloadAndUploadBranchSign,
     downloadAndUploadProfileDocument,
     downloadAndUploadProfileImage,
     downloadB2Object,
     downloadProfileDocument,
     downloadProfileImage,
+    getBranchAssetObjectKey,
     getProfileDocumentAccessUrl,
     getProfileDocumentObjectKey,
     getProfileImageAccessUrl,

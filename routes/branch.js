@@ -182,10 +182,10 @@ router.post("/create", auth, async (req, res) => {
                 branch_id, name, legal_name, username, logo, sign,
                 create_by, modify_by, status,
                 address_line_1, address_line_2, city, state, country, pincode,
-                invoice_address, pan, is_pan_verified, gst, gst_rate, is_gst_verified,
+                invoice_address, pan, is_pan_verified, gst, is_gst_verified,
                 mobile_1, mobile_2, email_1, email_2,
                 create_date, modify_date, is_deleted, deleted_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 branch_id,
                 name,
@@ -206,7 +206,6 @@ router.post("/create", auth, async (req, res) => {
                 trimOrNull(pan),
                 "0",
                 trimOrNull(gst),
-                0,
                 "0",
                 trimOrNull(mobile_1),
                 trimOrNull(mobile_2),
@@ -393,9 +392,9 @@ router.get("/:branch_id", auth, async (req, res) => {
         // Fetch branch details
         const [branches] = await conn.query(
             `SELECT 
-                branch_id, name as branch_name,
+                branch_id, name as branch_name, legal_name,
                 address_line_1, address_line_2, city, state, country, pincode,
-                invoice_address, pan, gst, gst_rate,
+                invoice_address, pan, gst,
                 mobile_1, mobile_2, email_1, email_2,
                 username as created_by, create_date, status
              FROM branch_list 
@@ -458,10 +457,47 @@ router.put("/:branch_id", auth, async (req, res) => {
             });
         }
 
+        // Fetch current branch to enforce verified PAN/GST locks
+        const [existingBranches] = await conn.query(
+            `SELECT pan, gst, is_pan_verified, is_gst_verified
+             FROM branch_list
+             WHERE branch_id = ? AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id]
+        );
+
+        if (existingBranches.length === 0) {
+            await conn.rollback();
+            return res.status(404).json({
+                success: false,
+                message: "Branch not found"
+            });
+        }
+
+        const existingBranch = existingBranches[0];
+        const panVerified = existingBranch.is_pan_verified === "1" || existingBranch.is_pan_verified === 1;
+        const gstVerified = existingBranch.is_gst_verified === "1" || existingBranch.is_gst_verified === 1;
+
+        if (panVerified && updates.pan !== undefined && String(updates.pan || "") !== String(existingBranch.pan || "")) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "PAN is verified and cannot be updated"
+            });
+        }
+
+        if (gstVerified && updates.gst !== undefined && String(updates.gst || "") !== String(existingBranch.gst || "")) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "GST is verified and cannot be updated"
+            });
+        }
+
         // Build dynamic update query
         const allowedFields = [
-            'name', 'address_line_1', 'address_line_2', 'city', 'state',
-            'country', 'pincode', 'invoice_address', 'pan', 'gst', 'gst_rate',
+            'name', 'legal_name', 'address_line_1', 'address_line_2', 'city', 'state',
+            'country', 'pincode', 'invoice_address', 'pan', 'gst',
             'mobile_1', 'mobile_2', 'email_1', 'email_2', 'status'
         ];
 
@@ -469,10 +505,11 @@ router.put("/:branch_id", auth, async (req, res) => {
         const updateValues = [];
 
         for (const field of allowedFields) {
-            if (updates[field] !== undefined) {
-                updateFields.push(`${field} = ?`);
-                updateValues.push(updates[field]);
-            }
+            if (updates[field] === undefined) continue;
+            if (field === 'pan' && panVerified) continue;
+            if (field === 'gst' && gstVerified) continue;
+            updateFields.push(`${field} = ?`);
+            updateValues.push(updates[field]);
         }
 
         if (updateFields.length === 0) {
