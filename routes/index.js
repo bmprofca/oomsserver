@@ -41,6 +41,7 @@ import walletRoutes from "./wallet.js";
 import complianceRoutes from "./compliance.js";
 import whatsappRoutes from "./whatsapp.js";
 import backupRoutes from "./backup.js";
+import accountRoutes from "./account.js";
 
 
 router.use("/auth", authRoutes);
@@ -86,5 +87,6 @@ router.use("/wallet", walletRoutes);
 router.use("/compliance", complianceRoutes);
 router.use("/recurring-task", complianceRoutes);
 router.use("/backup", backupRoutes);
+router.use("/account", accountRoutes);
 
 export default router;

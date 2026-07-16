@@ -13,6 +13,25 @@ const router = express.Router();
 
 const isVerifiedFlag = (value) => value === "1" || value === 1 || value === true;
 
+function toDateOnlyString(value) {
+    if (value == null || value === "") return null;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        const y = value.getFullYear();
+        const m = String(value.getMonth() + 1).padStart(2, "0");
+        const d = String(value.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
+    }
+    const raw = String(value).trim();
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : null;
+}
+
+function normalizeGstApplicable(value) {
+    if (value === true || value === 1 || value === "1") return "1";
+    if (value === false || value === 0 || value === "0") return "0";
+    return null;
+}
+
 function formatBranchDetailsPayload(row) {
     const {
         name,
@@ -34,6 +53,8 @@ function formatBranchDetailsPayload(row) {
         sign,
         is_pan_verified,
         is_gst_verified,
+        gst_applicable,
+        gst_applicable_after,
     } = row;
 
     return {
@@ -71,6 +92,10 @@ function formatBranchDetailsPayload(row) {
         },
         invoice: {
             address: invoice_address,
+        },
+        gst_config: {
+            gst_applicable: isVerifiedFlag(gst_applicable) ? "1" : "0",
+            gst_applicable_after: toDateOnlyString(gst_applicable_after),
         },
     };
 }
@@ -321,6 +346,86 @@ router.post("/branch/invoice-address", auth, validateBranch, async (req, res) =>
         return res.status(500).json({
             success: false,
             message: "Failed to upload branch invoice address",
+            error: error.message,
+        });
+    }
+});
+
+router.put("/branch/gst-config", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const caller = String(req.headers["username"] || req.headers["Username"] || "");
+        const body = req.body || {};
+
+        const existing = await getBranchRow(branch_id);
+        if (!existing) {
+            return res.status(404).json({ success: false, message: "Branch not found" });
+        }
+
+        const nextApplicable = normalizeGstApplicable(body.gst_applicable);
+        if (nextApplicable == null) {
+            return res.status(400).json({
+                success: false,
+                message: "gst_applicable must be '0' or '1'",
+            });
+        }
+
+        let nextAfter = existing.gst_applicable_after;
+        if (Object.prototype.hasOwnProperty.call(body, "gst_applicable_after")) {
+            const raw = body.gst_applicable_after;
+            if (raw == null || raw === "") {
+                nextAfter = null;
+            } else {
+                nextAfter = toDateOnlyString(raw);
+                if (!nextAfter) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "gst_applicable_after must be a valid date (YYYY-MM-DD)",
+                    });
+                }
+            }
+        }
+
+        if (nextApplicable === "1" && !toDateOnlyString(nextAfter)) {
+            return res.status(400).json({
+                success: false,
+                message: "gst_applicable_after is required when GST is applicable",
+            });
+        }
+
+        // When GST is disabled, always clear the date back to NULL.
+        const storedAfter =
+            nextApplicable === "1" ? toDateOnlyString(nextAfter) : null;
+
+        await pool.query(
+            `UPDATE \`branch_list\`
+             SET \`gst_applicable\` = ?,
+                 \`gst_applicable_after\` = ?,
+                 \`modify_by\` = ?,
+                 \`modify_date\` = ?
+             WHERE \`branch_id\` = ? AND \`is_deleted\` = '0'`,
+            [
+                nextApplicable,
+                storedAfter,
+                caller || null,
+                TODAY_DATE(),
+                branch_id,
+            ]
+        );
+
+        const updated = await getBranchRow(branch_id);
+        const payload = formatBranchDetailsPayload(updated);
+
+        return res.status(200).json({
+            success: true,
+            message: "Branch GST config updated successfully",
+            data: payload.gst_config,
+        });
+    } catch (error) {
+        console.error("Branch GST config PUT error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update branch GST config",
             error: error.message,
         });
     }

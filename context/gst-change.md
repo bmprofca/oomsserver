@@ -204,6 +204,16 @@ When adding a feature that involves money + tax:
 
 ## Ops: enable GST for a branch
 
+Prefer **Branch Settings → GST Config** in the app (`PUT /settings/branch/gst-config`).
+
+Also supported via `PUT /branch/:branch_id` with:
+
+```json
+{ "gst_applicable": "1", "gst_applicable_after": "2026-07-01" }
+```
+
+Or SQL:
+
 ```sql
 UPDATE branch_list
 SET gst_applicable = '1',
@@ -219,6 +229,8 @@ SET gst_applicable = '0'
 WHERE branch_id = 'YOUR_BRANCH_ID';
 ```
 
+`GET /branch/:branch_id` and `GET /settings/branch/details` both return `gst_applicable` / `gst_applicable_after` (settings wraps them under `gst_config`).
+
 ---
 
 ## Key files (server)
@@ -226,6 +238,8 @@ WHERE branch_id = 'YOUR_BRANCH_ID';
 | Path | Role |
 |------|------|
 | `helpers/gst.js` | **Canonical** GST logic |
+| `routes/settings.js` | Branch settings GET + `PUT /branch/gst-config` |
+| `routes/branch.js` | Branch GET/PUT includes `gst_applicable` fields |
 | `routes/task.js` | Task create/edit/detail/list |
 | `routes/billing.js` | Generate billable from tasks |
 | `routes/sale.js` | Sale invoices |

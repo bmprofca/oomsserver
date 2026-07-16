@@ -394,7 +394,8 @@ router.get("/:branch_id", auth, async (req, res) => {
             `SELECT 
                 branch_id, name as branch_name, legal_name,
                 address_line_1, address_line_2, city, state, country, pincode,
-                invoice_address, pan, gst,
+                invoice_address, pan, gst, is_gst_verified,
+                gst_applicable, gst_applicable_after,
                 mobile_1, mobile_2, email_1, email_2,
                 username as created_by, create_date, status
              FROM branch_list 
@@ -409,9 +410,23 @@ router.get("/:branch_id", auth, async (req, res) => {
             });
         }
 
+        const branch = branches[0];
+        if (branch.gst_applicable_after instanceof Date) {
+            const y = branch.gst_applicable_after.getFullYear();
+            const m = String(branch.gst_applicable_after.getMonth() + 1).padStart(2, "0");
+            const d = String(branch.gst_applicable_after.getDate()).padStart(2, "0");
+            branch.gst_applicable_after = `${y}-${m}-${d}`;
+        } else if (branch.gst_applicable_after) {
+            const match = String(branch.gst_applicable_after).match(/^(\d{4}-\d{2}-\d{2})/);
+            branch.gst_applicable_after = match ? match[1] : branch.gst_applicable_after;
+        }
+
+        branch.gst_applicable =
+            branch.gst_applicable === "1" || branch.gst_applicable === 1 ? "1" : "0";
+
         return res.status(200).json({
             success: true,
-            data: branches[0]
+            data: branch
         });
 
     } catch (err) {
@@ -459,7 +474,8 @@ router.put("/:branch_id", auth, async (req, res) => {
 
         // Fetch current branch to enforce verified PAN/GST locks
         const [existingBranches] = await conn.query(
-            `SELECT pan, gst, is_pan_verified, is_gst_verified
+            `SELECT pan, gst, is_pan_verified, is_gst_verified,
+                    gst_applicable, gst_applicable_after
              FROM branch_list
              WHERE branch_id = ? AND is_deleted = '0'
              LIMIT 1`,
@@ -498,18 +514,100 @@ router.put("/:branch_id", auth, async (req, res) => {
         const allowedFields = [
             'name', 'legal_name', 'address_line_1', 'address_line_2', 'city', 'state',
             'country', 'pincode', 'invoice_address', 'pan', 'gst',
-            'mobile_1', 'mobile_2', 'email_1', 'email_2', 'status'
+            'mobile_1', 'mobile_2', 'email_1', 'email_2', 'status',
+            'gst_applicable', 'gst_applicable_after',
         ];
 
         const updateFields = [];
         const updateValues = [];
 
+        const normalizeGstApplicable = (value) => {
+            if (value === true || value === 1 || value === "1") return "1";
+            if (value === false || value === 0 || value === "0") return "0";
+            return null;
+        };
+
+        const toDateOnly = (value) => {
+            if (value == null || value === "") return null;
+            if (value instanceof Date && !Number.isNaN(value.getTime())) {
+                const y = value.getFullYear();
+                const m = String(value.getMonth() + 1).padStart(2, "0");
+                const d = String(value.getDate()).padStart(2, "0");
+                return `${y}-${m}-${d}`;
+            }
+            const match = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+            return match ? match[1] : null;
+        };
+
         for (const field of allowedFields) {
             if (updates[field] === undefined) continue;
             if (field === 'pan' && panVerified) continue;
             if (field === 'gst' && gstVerified) continue;
+
+            let value = updates[field];
+            if (field === "gst_applicable") {
+                value = normalizeGstApplicable(value);
+                if (value == null) {
+                    await conn.rollback();
+                    return res.status(400).json({
+                        success: false,
+                        message: "gst_applicable must be '0' or '1'",
+                    });
+                }
+            }
+            if (field === "gst_applicable_after") {
+                if (value == null || value === "") {
+                    value = null;
+                } else {
+                    value = toDateOnly(value);
+                    if (!value) {
+                        await conn.rollback();
+                        return res.status(400).json({
+                            success: false,
+                            message: "gst_applicable_after must be a valid date (YYYY-MM-DD)",
+                        });
+                    }
+                }
+            }
+
             updateFields.push(`${field} = ?`);
-            updateValues.push(updates[field]);
+            updateValues.push(value);
+        }
+
+        const nextApplicable =
+            updates.gst_applicable !== undefined
+                ? normalizeGstApplicable(updates.gst_applicable)
+                : (existingBranch.gst_applicable === "1" || existingBranch.gst_applicable === 1
+                    ? "1"
+                    : "0");
+        const nextAfter =
+            updates.gst_applicable_after !== undefined
+                ? (updates.gst_applicable_after == null || updates.gst_applicable_after === ""
+                    ? null
+                    : toDateOnly(updates.gst_applicable_after))
+                : toDateOnly(existingBranch.gst_applicable_after);
+
+        if (
+            (updates.gst_applicable !== undefined || updates.gst_applicable_after !== undefined) &&
+            nextApplicable === "1" &&
+            !nextAfter
+        ) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "gst_applicable_after is required when GST is applicable",
+            });
+        }
+
+        // When GST is disabled, always clear gst_applicable_after to NULL.
+        if (updates.gst_applicable !== undefined && nextApplicable === "0") {
+            const afterIdx = updateFields.findIndex((f) => f.startsWith("gst_applicable_after"));
+            if (afterIdx >= 0) {
+                updateValues[afterIdx] = null;
+            } else {
+                updateFields.push("gst_applicable_after = ?");
+                updateValues.push(null);
+            }
         }
 
         if (updateFields.length === 0) {

@@ -8,6 +8,7 @@ import {
 export const USER_OTP_TYPE = "login";
 export const ADMIN_OTP_TYPE = "admin_login";
 export const REGISTER_OTP_TYPE = "register";
+export const CONTACT_CHANGE_OTP_TYPE = "contact_change";
 
 export function getQueryExecutor(connOrPool) {
     return connOrPool?.query ? connOrPool : { query: connOrPool.execute?.bind(connOrPool) };
