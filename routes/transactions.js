@@ -878,15 +878,15 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             if (row.transaction_type === "sale") {
                 const [saleRows] = await pool.query(
-                    "SELECT services.name, sale_items.tax_perc, sale_items.fees, sale_items.tax_value, sale_items.total, sale_items.remark FROM `sale_items` JOIN `services` ON `sale_items`.`service_id` = `services`.`service_id` WHERE `sale_items`.`branch_id` = ? AND `sale_items`.`invoice_id` = ? ORDER BY `sale_items`.`id` ASC",
+                    "SELECT services.name, sale_items.fees, sale_items.total, sale_items.remark FROM `sale_items` JOIN `services` ON `sale_items`.`service_id` = `services`.`service_id` WHERE `sale_items`.`branch_id` = ? AND `sale_items`.`invoice_id` = ? ORDER BY `sale_items`.`id` ASC",
                     [branch_id, row.invoice_id]
                 );
                 const sale_items = saleRows.map(item => {
                     return {
                         name: item.name,
                         fees: Number(item.fees),
-                        tax_rate: Number(item.tax_perc),
-                        tax_value: Number(item.tax_value),
+                        tax_rate: 0,
+                        tax_value: 0,
                         total: Number(item.total),
                         remark: item.remark ?? null
                     }
@@ -3165,7 +3165,7 @@ router.post("/payment/discount", auth, validateBranch, async (req, res) => {
                 `INSERT INTO invoice (
                     invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id,
                     subtotal, discount_type, discount_perc_rate, discount_value,
-                    tax_rate, tax_value, additional_charge, total, round_off, grand_total
+                    additional_charge, total, round_off, grand_total
                  )
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [

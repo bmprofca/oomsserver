@@ -78,9 +78,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
             await connection.query(
-                `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [invoice_id, branch_id, invoice_no, username, username, "contra", transaction_id, roundedAmount, "not applicable", 0, 0, 0, 0, 0, roundedAmount, 0, roundedAmount]
+                `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, additional_charge, total, round_off, grand_total)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [invoice_id, branch_id, invoice_no, username, username, "contra", transaction_id, roundedAmount, "not applicable", 0, 0, 0, roundedAmount, 0, roundedAmount]
             );
 
             await connection.query(

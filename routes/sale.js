@@ -1,4 +1,5 @@
 import express from "express";
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
@@ -237,7 +238,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             firm_id,
             transaction_date,
             remark,
-            tax_rate,
             discount_type,
             discount_perc_rate,
             discount_value,
@@ -254,9 +254,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         }
         if (!transaction_date || String(transaction_date).trim() === "") {
             return res.status(400).json({ success: false, message: "transaction_date is required" });
-        }
-        if (tax_rate == null || String(tax_rate).trim?.() === "") {
-            return res.status(400).json({ success: false, message: "tax_rate is required" });
         }
 
         let normalizedItems;
@@ -286,14 +283,11 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             firm_id != null && String(firm_id).trim() !== "" && partyTypeVal === "client"
                 ? String(firm_id).trim()
                 : null;
-        const taxRateNum = Number(tax_rate);
 
-        if (!Number.isFinite(taxRateNum) || taxRateNum < 0) {
-            return res.status(400).json({
-                success: false,
-                message: "tax_rate must be a valid number greater than or equal to 0",
-            });
-        }
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const asOfDate = toDateOnly(txnDate);
+        const sampleGst = resolveGst({ fees: 100, asOfDate, settings: gstSettings });
+        const taxRateNum = sampleGst.tax_rate;
 
         const saleItemsToInsert = [];
         let amountTotal = 0;
@@ -301,8 +295,13 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         for (let index = 0; index < normalizedItems.length; index++) {
             const current = normalizedItems[index];
-            const taxValue = Number(((current.feesNum * taxRateNum) / 100).toFixed(2));
-            const itemTotal = Number((current.feesNum + taxValue).toFixed(2));
+            const lineGst = resolveGst({
+                fees: current.feesNum,
+                asOfDate,
+                settings: gstSettings,
+            });
+            const taxValue = lineGst.tax_value;
+            const itemTotal = lineGst.total;
 
             amountTotal += current.feesNum;
             itemsTaxTotal += taxValue;
@@ -310,7 +309,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             saleItemsToInsert.push({
                 service_id: current.service_id,
                 fees: Number(current.feesNum.toFixed(2)),
-                tax_perc: Number(taxRateNum.toFixed(2)),
+                tax_perc: taxRateNum,
                 tax_value: taxValue,
                 total: itemTotal,
                 remark: current.itemRemark,
@@ -318,7 +317,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         }
 
         amountTotal = Number(amountTotal.toFixed(2));
-        const effectiveTaxRate = Number(taxRateNum.toFixed(2));
+        const effectiveTaxRate = taxRateNum;
         let pricing;
         try {
             pricing = normalizeDiscountAndTotals({
@@ -358,8 +357,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             const invoice_no = `${invoiceData?.prefix}${serial}`;
 
             await connection.query(
-                `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, additional_charge, total, round_off, grand_total)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     invoice_id,
                     branch_id,
@@ -372,8 +371,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     pricing.discountType,
                     pricing.discountPercRate,
                     pricing.discountValue,
-                    effectiveTaxRate,
-                    pricing.taxValue,
                     pricing.additionalCharge,
                     pricing.totalBeforeRound,
                     pricing.roundOffValue,
@@ -433,8 +430,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const row = saleItemsToInsert[index];
                 const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
                 await connection.query(
-                    `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, total, remark)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                     [
                         branch_id,
                         item_id,
@@ -442,8 +439,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         invoice_id,
                         row.service_id,
                         row.fees,
-                        row.tax_perc,
-                        row.tax_value,
                         row.total,
                         row.remark,
                     ]
@@ -653,7 +648,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const listParams = [...params, limit, offset];
 
         const listSelect = `
-            SELECT invoice.invoice_id, invoice.invoice_no, invoice.subtotal, invoice.discount_type, invoice.discount_perc_rate, invoice.discount_value, invoice.tax_rate, invoice.tax_value, invoice.additional_charge, invoice.total, invoice.round_off, invoice.grand_total,
+            SELECT invoice.invoice_id, invoice.invoice_no, invoice.subtotal, invoice.discount_type, invoice.discount_perc_rate, invoice.discount_value, invoice.additional_charge, invoice.total, invoice.round_off, invoice.grand_total,
                 se.sale_id, se.is_task, se.sale_date AS sale_entry_date, se.total AS sale_entry_total,
                 se.party_id AS entry_party_id, se.party_type AS entry_party_type, se.firm_id AS entry_firm_id,
                 se.create_by AS entry_create_by, se.modify_by AS entry_modify_by,
@@ -673,7 +668,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         if (saleIds.length > 0) {
             const ph = saleIds.map(() => "?").join(", ");
             const [itemRows] = await pool.query(
-                `SELECT si.sale_id, si.item_id, si.service_id, si.fees, si.tax_perc, si.tax_value, si.total, si.remark,
+                `SELECT si.sale_id, si.item_id, si.service_id, si.fees, si.total, si.remark,
                         svc.service_id AS svc_id, svc.name AS svc_name, svc.sac_code AS svc_sac_code, svc.type AS svc_type
                  FROM sale_items si
                  LEFT JOIN services svc ON svc.service_id = si.service_id
@@ -698,8 +693,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     item_id: ir.item_id,
                     service_id: ir.service_id,
                     fees: ir.fees != null ? Number(ir.fees) : null,
-                    tax_perc: ir.tax_perc != null ? Number(ir.tax_perc) : null,
-                    tax_value: ir.tax_value != null ? Number(ir.tax_value) : null,
+                    tax_perc: null,
+                    tax_value: null,
                     total: ir.total != null ? Number(ir.total) : null,
                     remark: ir.remark,
                     service: svc
@@ -765,8 +760,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[amountStats]] = await pool.query(
             `SELECT
                 COALESCE(SUM(invoice.grand_total), 0) AS amount_total,
-                COALESCE(SUM(invoice.tax_value), 0) AS amount_tax,
-                COALESCE(SUM(invoice.total - invoice.tax_value), 0) AS amount_net
+                COALESCE(SUM(invoice.grand_total), 0) AS amount_tax,
+                COALESCE(SUM(invoice.subtotal), 0) AS amount_net
              FROM sale_entries se
              INNER JOIN invoice ON invoice.invoice_id = se.invoice_id
              LEFT JOIN transactions ON transactions.transaction_id = invoice.transaction_id

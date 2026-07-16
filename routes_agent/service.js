@@ -140,8 +140,6 @@ function formatServiceDetails(row, margin) {
         branch: branchBlock,
         charges: {
             fees,
-            gst_rate,
-            gst_value,
             total: Number((fees + gst_value).toFixed(2)),
         },
         margin: formatMarginBlock(fees, margin),
@@ -158,7 +156,7 @@ const SERVICE_SELECT_FIELDS = `
     s.default_amount,
     s.remark AS service_remark,
     bs.fees,
-    bs.gst_rate,
+    0,
     bs.gst_value,
     bs.remark,
     bs.due_date
@@ -265,8 +263,6 @@ function formatServiceRequestDetails(row) {
         },
         charges: {
             fees,
-            tax_rate,
-            tax_value,
             amount: Number(row.amount) || Number((fees + tax_value).toFixed(2)),
         },
         margin: {
@@ -310,8 +306,6 @@ function formatServiceListItem(row, margin) {
         type: row.type,
         charges: {
             fees,
-            gst_rate,
-            gst_value,
             total,
         },
         margin: {
@@ -402,7 +396,7 @@ router.get("/list", validateAgentSession, async (req, res) => {
                 s.frequency,
                 s.default_due_date,
                 bs.fees,
-                bs.gst_rate,
+                0,
                 bs.gst_value,
                 bs.due_date
              ${baseQuery}
@@ -556,7 +550,7 @@ router.post("/service-request/create", validateAgentSession, async (req, res) =>
         const [serviceRows] = await pool.query(
             `SELECT
                 bs.fees,
-                bs.gst_rate,
+                0,
                 bs.gst_value,
                 s.type
              FROM branch_services bs
@@ -602,8 +596,6 @@ router.post("/service-request/create", validateAgentSession, async (req, res) =>
                 firm_id,
                 service_id,
                 fees,
-                tax_rate,
-                tax_value,
                 amount,
                 agent,
                 margin_type,
@@ -620,8 +612,6 @@ router.post("/service-request/create", validateAgentSession, async (req, res) =>
                 resolvedFirmId,
                 resolvedServiceId,
                 fees,
-                tax_rate,
-                tax_value,
                 amount,
                 agent_username,
                 margin.margin_type,
@@ -644,8 +634,6 @@ router.post("/service-request/create", validateAgentSession, async (req, res) =>
                 client_remark: clientRemark,
                 charges: {
                     fees,
-                    tax_rate,
-                    tax_value,
                     amount,
                 },
                 margin: formatMarginBlock(fees, margin),

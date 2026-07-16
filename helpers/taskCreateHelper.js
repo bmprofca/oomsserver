@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "./gst.js";
 import { RANDOM_STRING } from "./function.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "./NoteFile.js";
 import { notifyTaskCreatedEmail } from "./taskStaticEmail.js";
@@ -68,8 +69,6 @@ async function createSingleTask(conn, options) {
         firm_username,
         service_id,
         fees,
-        tax_rate,
-        tax_value,
         total,
         due_date,
         service_category_id = null,
@@ -126,8 +125,6 @@ async function createSingleTask(conn, options) {
         has_agent,
         agent_id,
         fees,
-        tax_rate,
-        tax_value,
         total,
         create_by: createdBy,
         is_recurring: "0",
@@ -260,8 +257,6 @@ async function createSingleTask(conn, options) {
         service_id,
         service_category_id,
         fees,
-        tax_rate,
-        tax_value,
         total,
         due_date,
         assignment: {
@@ -338,7 +333,7 @@ async function createTaskFromQuotation({
         }
 
         const [itemRows] = await conn.query(
-            `SELECT service_id, fees, tax_rate, tax_value, total
+            `SELECT service_id, fees, total
              FROM quotation_items
              WHERE branch_id = ? AND quotation_id = ?
              ORDER BY id ASC
@@ -391,8 +386,9 @@ async function createTaskFromQuotation({
             firm_username: firmRows[0].username,
             service_id,
             fees: Number(item.fees || 0),
-            tax_rate: Number(item.tax_rate || 0),
-            tax_value: Number(item.tax_value || 0),
+            // tax computed by caller via resolveGst
+            tax_rate: 0,
+            tax_value: 0,
             total: Number(item.total || 0),
             due_date: parsed.due_date,
             service_category_id: parsed.service_category_id,
@@ -460,7 +456,7 @@ async function createTaskFromServiceRequest({
 
     try {
         const [requestRows] = await conn.query(
-            `SELECT request_id, username, firm_id, service_id, fees, tax_rate, tax_value, amount,
+            `SELECT request_id, username, firm_id, service_id, fees, amount,
                     client_remark, status, task_id
              FROM service_requests
              WHERE branch_id = ? AND request_id = ?
@@ -547,9 +543,9 @@ async function createTaskFromServiceRequest({
         }
 
         const fees = Number(serviceRequest.fees || 0);
-        const tax_rate = Number(serviceRequest.tax_rate || 0);
-        const tax_value = Number(serviceRequest.tax_value || 0);
-        const total = Number(serviceRequest.amount || fees + tax_value);
+        const tax_rate = 0;
+        const tax_value = 0;
+        const total = Number(serviceRequest.amount || fees);
 
         let notesPayload = parsed.notesPayload;
         const clientRemark =
@@ -585,8 +581,6 @@ async function createTaskFromServiceRequest({
             firm_username: firm_username || firmRows[0].username,
             service_id,
             fees,
-            tax_rate,
-            tax_value,
             total,
             due_date: parsed.due_date,
             service_category_id: parsed.service_category_id,

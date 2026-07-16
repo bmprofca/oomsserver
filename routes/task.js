@@ -13,6 +13,11 @@ import {
     getProfileDocumentAccessUrl,
 } from "../helpers/b2Storage.js";
 import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
+import {
+    fetchBranchGstSettings,
+    resolveGst,
+    toDateOnly,
+} from "../helpers/gst.js";
 
 const router = express.Router();
 
@@ -287,13 +292,16 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const firmMap = new Map((validFirmRows || []).map(r => [String(r.firm_id), r]));
 
                 const [serviceRows] = await conn.query(
-                    "SELECT fees AS default_fees, gst_rate FROM branch_services WHERE service_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1",
+                    "SELECT fees AS default_fees FROM branch_services WHERE service_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1",
                     [service_id, branch_id]
                 );
-                const gst_rate = Number(serviceRows?.[0]?.gst_rate ?? 0) || 0;
                 const finalFees = Number(fees ?? serviceRows?.[0]?.default_fees ?? 0) || 0;
-                const tax_value = Number(((finalFees * gst_rate) / 100).toFixed(2));
-                const total = Number((finalFees + tax_value).toFixed(2));
+                const gstSettings = await fetchBranchGstSettings(conn, branch_id);
+                const asOfDate = toDateOnly(new Date());
+                const gst = resolveGst({ fees: finalFees, asOfDate, settings: gstSettings });
+                const gst_rate = gst.tax_rate;
+                const tax_value = gst.tax_value;
+                const total = gst.total;
 
                 const ca_id = assignmentPayload.ca_id ?? assignmentPayload.ca ?? null;
                 const agent_id = assignmentPayload.agent_id ?? assignmentPayload.agent ?? null;
@@ -354,8 +362,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         has_agent,
                         agent_id,
                         fees: finalFees,
-                        tax_rate: gst_rate,
-                        tax_value,
                         total,
                         create_by: username,
                         is_recurring: "0",
@@ -617,13 +623,16 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             const firm_username = firmRows[0]?.username ?? null;
 
             const [serviceRows] = await conn.query(
-                "SELECT fees AS default_fees, gst_rate FROM branch_services WHERE service_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1",
+                "SELECT fees AS default_fees FROM branch_services WHERE service_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1",
                 [service_id_legacy, branch_id]
             );
-            const gst_rate = Number(serviceRows?.[0]?.gst_rate ?? 0) || 0;
             const finalFees = Number(legacyFees ?? serviceRows?.[0]?.default_fees ?? 0) || 0;
-            const tax_value = Number(((finalFees * gst_rate) / 100).toFixed(2));
-            const total = Number((finalFees + tax_value).toFixed(2));
+            const gstSettings = await fetchBranchGstSettings(conn, branch_id);
+            const asOfDate = toDateOnly(new Date());
+            const gst = resolveGst({ fees: finalFees, asOfDate, settings: gstSettings });
+            const gst_rate = gst.tax_rate;
+            const tax_value = gst.tax_value;
+            const total = gst.total;
 
             const task_id = await UNIQUE_RANDOM_STRING("tasks", "task_id", { length: ID_LENGTH, conn });
             const ca_id = legacyAssignment?.ca_id ?? legacyAssignment?.ca ?? null;
@@ -644,8 +653,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 has_agent,
                 agent_id,
                 fees: finalFees,
-                tax_rate: gst_rate,
-                tax_value,
                 total,
                 create_by: username,
                 is_recurring: "0",
@@ -942,8 +949,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.has_agent,
                 t.agent_id,
                 t.fees,
-                t.tax_rate,
-                t.tax_value,
                 t.total,
                 t.due_date,
                 t.target_date,
@@ -964,6 +969,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const listParams = [...params, limitNum, offset];
         const [rows] = await pool.query(listQuery, listParams);
 
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+
         const list = [];
         for (let index = 0; index < rows.length; index++) {
             const element = rows[index];
@@ -975,6 +982,12 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             const service_data = await SINGLE_SERVICE_DATA(element?.service_id);
 
             const staffs = await SINGLE_TASK_STAFF_LIST(element?.task_id);
+            const feesNum = Number(element?.fees) || 0;
+            const gst = resolveGst({
+                fees: feesNum,
+                asOfDate: element?.create_date,
+                settings: gstSettings,
+            });
             const object = {
                 task_id: element?.task_id,
                 client: {
@@ -990,10 +1003,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     name: service_data?.name
                 },
                 charges: {
-                    fees: Number(element?.fees) || 0,
-                    tax_rate: Number(element?.tax_rate) || 0,
-                    tax_value: Number(element?.tax_value) || 0,
-                    total: Number(element?.total) || 0,
+                    fees: feesNum,
+                    tax_rate: gst.tax_rate,
+                    tax_value: gst.tax_value,
+                    total: gst.total,
                 },
                 dates: {
                     due_date: element?.due_date,
@@ -1229,7 +1242,6 @@ router.put("/details/get-out/:task_id", auth, validateBranch, async (req, res) =
 router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
     try {
-        const username = req.headers["username"] || "";
         const branch_id = req.branch_id;
         const task_id = req.params.task_id;
 
@@ -1246,7 +1258,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             firm_id,
             service_id,
             fees,
-            tax_rate,
             ca,
             agent,
             due_date,
@@ -1264,34 +1275,43 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         const task_data = task_row[0];
 
-        const PrevTaskBillingStatus = task_data.billing_status;
+        const PrevTaskBillingStatus = task_data.billing_status == null
+            ? ""
+            : String(task_data.billing_status).trim();
         const PrevTaskInvoiceId = task_data.invoice_id;
+
+        const isBillingPending =
+            PrevTaskBillingStatus === "0" || PrevTaskBillingStatus === "pending";
+        const isBillingComplete =
+            PrevTaskBillingStatus === "1" ||
+            PrevTaskBillingStatus === "complete" ||
+            PrevTaskBillingStatus === "completed";
+        const isNonBillable =
+            PrevTaskBillingStatus === "2" ||
+            PrevTaskBillingStatus === "non billable" ||
+            PrevTaskBillingStatus === "non_billable";
 
         let AllowFirmIdChange = false;
         let AllowServiceIdChange = false;
         let AllowFeesChange = false;
-        let AllowTaxRateChange = false;
         let AllowCaChange = false;
         let AllowAgentChange = false;
         let AllowDueDateChange = false;
         let AllowTargetDateChange = false;
 
-        if (PrevTaskBillingStatus == "0") {
+        if (isBillingPending) {
             AllowFirmIdChange = true;
             AllowServiceIdChange = true;
             AllowFeesChange = true;
-            AllowTaxRateChange = true;
             AllowCaChange = true;
             AllowAgentChange = true;
             AllowDueDateChange = true;
             AllowTargetDateChange = true;
-        } else if (PrevTaskBillingStatus == "1") {
+        } else if (isBillingComplete || isNonBillable) {
             AllowFeesChange = true;
-            AllowTaxRateChange = true;
-        } else if (PrevTaskBillingStatus == "2") {
-            AllowFeesChange = true;
-            AllowTaxRateChange = true;
         }
+
+        await conn.beginTransaction();
 
         if (firm_id && firm_id !== task_data.firm_id && AllowFirmIdChange) {
             await conn.query("UPDATE tasks SET firm_id = ? WHERE task_id = ? AND branch_id = ?", [firm_id, task_id, branch_id]);
@@ -1312,30 +1332,63 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         if (agent && !agent.has_agent && AllowAgentChange) {
             await conn.query("UPDATE tasks SET agent_id = NULL WHERE task_id = ? AND branch_id = ?", [task_id, branch_id]);
         }
-        if (due_date && due_date !== task_data.due_date && AllowDueDateChange) {
-            await conn.query("UPDATE tasks SET due_date = ? WHERE task_id = ? AND branch_id = ?", [due_date, task_id, branch_id]);
+
+        const normalizeDate = (value) => {
+            if (!value) return "";
+            if (value instanceof Date && !Number.isNaN(value.getTime())) {
+                return value.toISOString().slice(0, 10);
+            }
+            const str = String(value).trim();
+            if (!str) return "";
+            return str.length >= 10 ? str.slice(0, 10) : str;
+        };
+
+        if (due_date !== undefined && AllowDueDateChange) {
+            const nextDue = normalizeDate(due_date);
+            const prevDue = normalizeDate(task_data.due_date);
+            if (nextDue && nextDue !== prevDue) {
+                await conn.query("UPDATE tasks SET due_date = ? WHERE task_id = ? AND branch_id = ?", [nextDue, task_id, branch_id]);
+            }
         }
-        if (target_date && target_date !== task_data.target_date && AllowTargetDateChange) {
-            await conn.query("UPDATE tasks SET target_date = ? WHERE task_id = ? AND branch_id = ?", [target_date, task_id, branch_id]);
+        if (target_date !== undefined && AllowTargetDateChange) {
+            const nextTarget = normalizeDate(target_date);
+            const prevTarget = normalizeDate(task_data.target_date);
+            if (nextTarget && nextTarget !== prevTarget) {
+                await conn.query("UPDATE tasks SET target_date = ? WHERE task_id = ? AND branch_id = ?", [nextTarget, task_id, branch_id]);
+            }
         }
 
+        // Fees only — tax is computed from branch GST settings (never from client).
+        const feesProvided = fees !== undefined && fees !== null && fees !== "";
 
-        if (fees && AllowFeesChange && tax_rate && AllowTaxRateChange) {
-            const tax_value = (fees * tax_rate) / 100;
-            const total = fees + tax_value;
-            await conn.query("UPDATE tasks SET fees = ?, tax_rate = ?, tax_value = ?, total = ? WHERE task_id = ? AND branch_id = ?", [fees, tax_rate, tax_value, total, task_id, branch_id]);
+        if (AllowFeesChange && feesProvided) {
+            const feesNum = Number(fees);
 
-            if (PrevTaskBillingStatus == "1") {
-                const saleEntriesBranchId = await resolveSaleEntriesBranchId(conn, branch_id);
-                if (saleEntriesBranchId != null) {
-                    await conn.query("UPDATE sale_entries SET total = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, saleEntriesBranchId]);
+            if (!Number.isNaN(feesNum)) {
+                const gstSettings = await fetchBranchGstSettings(conn, branch_id);
+                const gst = resolveGst({
+                    fees: feesNum,
+                    asOfDate: task_data.create_date,
+                    settings: gstSettings,
+                });
+                const total = gst.total;
+                await conn.query(
+                    "UPDATE tasks SET fees = ?, total = ? WHERE task_id = ? AND branch_id = ?",
+                    [feesNum, total, task_id, branch_id]
+                );
+
+                if (isBillingComplete && PrevTaskInvoiceId) {
+                    const saleEntriesBranchId = await resolveSaleEntriesBranchId(conn, branch_id);
+                    if (saleEntriesBranchId != null) {
+                        await conn.query("UPDATE sale_entries SET total = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, saleEntriesBranchId]);
+                    }
+
+                    await conn.query("UPDATE transactions SET amount = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, branch_id]);
+
+                    await conn.query("UPDATE sale_items SET fees = ?, total = ? WHERE invoice_id = ? AND branch_id = ?", [feesNum, total, PrevTaskInvoiceId, branch_id]);
+
+                    await conn.query("UPDATE invoice SET subtotal = ?, total = ?, grand_total = ? WHERE invoice_id = ? AND branch_id = ?", [feesNum, total, total, PrevTaskInvoiceId, branch_id]);
                 }
-
-                await conn.query("UPDATE transactions SET amount = ? WHERE invoice_id = ? AND branch_id = ?", [total, PrevTaskInvoiceId, branch_id]);
-
-                await conn.query("UPDATE sale_items SET fees = ?, tax_perc = ?, tax_value = ?, total = ? WHERE invoice_id = ? AND branch_id = ?", [fees, tax_rate, tax_value, total, PrevTaskInvoiceId, branch_id]);
-
-                await conn.query("UPDATE invoice SET subtotal = ?, tax_value = ?, tax_rate = ?, total = ?, grand_total = ? WHERE invoice_id = ? AND branch_id = ?", [fees, tax_value, tax_rate, total, total, PrevTaskInvoiceId, branch_id]);
             }
         }
 
@@ -1401,8 +1454,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
           t.has_agent,
           t.agent_id,
           t.fees,
-          t.tax_rate,
-          t.tax_value,
           t.total,
           t.due_date,
           t.target_date,
@@ -1438,7 +1489,8 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             client_profile,
             firm_data,
             service_data,
-            staffs
+            staffs,
+            gstSettings
         ] = await Promise.all([
             safeTaskLookup("create_by", () => USER_SNIPPED_DATA(element?.create_by)),
             safeTaskLookup("modify_by", () => USER_SNIPPED_DATA(element?.modify_by || element?.create_by)),
@@ -1446,7 +1498,15 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             safeTaskLookup("firm_data", () => SINGLE_FIRM_DATA(element?.firm_id), {}),
             safeTaskLookup("service_data", () => SINGLE_SERVICE_DATA(element?.service_id), {}),
             safeTaskLookup("staffs", () => SINGLE_TASK_STAFF_LIST(element?.task_id), []),
+            fetchBranchGstSettings(pool, branch_id),
         ]);
+
+        const feesNum = Number(element?.fees) || 0;
+        const gst = resolveGst({
+            fees: feesNum,
+            asOfDate: element?.create_date,
+            settings: gstSettings,
+        });
 
         const object = {
             task_id: element?.task_id,
@@ -1463,10 +1523,10 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 name: service_data?.name
             },
             charges: {
-                fees: Number(element?.fees) || 0,
-                tax_rate: Number(element?.tax_rate) || 0,
-                tax_value: Number(element?.tax_value) || 0,
-                total: Number(element?.total) || 0
+                fees: feesNum,
+                tax_rate: gst.tax_rate,
+                tax_value: gst.tax_value,
+                total: gst.total
             },
             dates: {
                 due_date: element?.due_date,
@@ -3645,8 +3705,6 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
                 t.firm_id,
                 t.service_id,
                 t.fees,
-                t.tax_rate,
-                t.tax_value,
                 t.total,
                 t.due_date,
                 t.target_date,
@@ -3747,9 +3805,16 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
         // Format results - Group by status
         const tasksByStatus = {};
         const tasks = [];
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
 
         for (const row of rows) {
             const formattedStatus = formatStatus(row.task_status);
+            const feesNum = Number(row.fees) || 0;
+            const gst = resolveGst({
+                fees: feesNum,
+                asOfDate: row.task_create_date,
+                settings: gstSettings,
+            });
 
             const taskData = {
                 task_id: row.task_id,
@@ -3757,10 +3822,10 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
                 status: formattedStatus,  // Return formatted status
                 status_raw: row.task_status,  // Also return raw status if needed
                 financials: {
-                    fees: Number(row.fees) || 0,
-                    tax_rate: Number(row.tax_rate) || 0,
-                    tax_value: Number(row.tax_value) || 0,
-                    total: Number(row.total) || 0
+                    fees: feesNum,
+                    tax_rate: gst.tax_rate,
+                    tax_value: gst.tax_value,
+                    total: gst.total
                 },
                 dates: {
                     due_date: row.due_date,
@@ -3825,12 +3890,19 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
 
         // Get service details
         const [serviceDetails] = await pool.query(
-            `SELECT s.name, s.sac_code, s.type, bs.fees as default_fees, bs.gst_rate
+            `SELECT s.name, s.sac_code, s.type, bs.fees as default_fees
              FROM services s
              LEFT JOIN branch_services bs ON bs.service_id = s.service_id AND bs.branch_id = ? AND bs.is_deleted = '0'
              WHERE s.service_id = ?`,
             [branch_id, service_id]
         );
+
+        const serviceFees = Number(serviceDetails[0]?.default_fees || 0) || 0;
+        const serviceGst = resolveGst({
+            fees: serviceFees,
+            asOfDate: new Date(),
+            settings: gstSettings,
+        });
 
         // Get summary by status with formatted status keys
         const summary = {};
@@ -3866,7 +3938,7 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
                     sac_code: serviceDetails[0]?.sac_code || '',
                     type: serviceDetails[0]?.type || '',
                     default_fees: serviceDetails[0]?.default_fees || 0,
-                    gst_rate: serviceDetails[0]?.gst_rate || 0
+                    gst_rate: serviceGst.tax_rate
                 },
                 summary_by_status: summary,
                 total_tasks: tasks.length,

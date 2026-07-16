@@ -1,3 +1,4 @@
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import express from 'express';
 const router = express.Router();
 
@@ -22,22 +23,17 @@ function parseDueDate(value) {
     return dueDate;
 }
 
-function parseFeesGst(fees, gst_rate, defaultFees = 0) {
+function parseFeesOnly(fees, defaultFees = 0) {
     const feesNum =
         fees != null && fees !== ""
             ? Number(fees)
             : Number(defaultFees || 0);
-    const gstRateNum = gst_rate != null && gst_rate !== "" ? Number(gst_rate) : 0;
 
     if (Number.isNaN(feesNum) || feesNum < 0) {
         return { error: "fees must be a valid non-negative number" };
     }
-    if (Number.isNaN(gstRateNum) || gstRateNum < 0) {
-        return { error: "gst_rate must be a valid non-negative number" };
-    }
 
-    const gst_value = Number(((feesNum * gstRateNum) / 100).toFixed(2));
-    return { feesNum, gstRateNum, gst_value };
+    return { feesNum };
 }
 
 const ALLOWED_SERVICE_TYPES = ["general", "compliance"];
@@ -126,8 +122,6 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 s.default_due_date,
                 CASE WHEN bs.service_id IS NOT NULL THEN 1 ELSE 0 END AS is_added,
                 bs.fees,
-                bs.gst_rate,
-                bs.gst_value,
                 bs.remark,
                 bs.due_date,
                 bs.create_by,
@@ -138,6 +132,8 @@ router.get('/list', auth, validateBranch, async (req, res) => {
         `;
 
         const [rows] = await pool.query(dataQuery, [...queryParams, limitNum, offset]);
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const asOfDate = toDateOnly(new Date());
 
         const data = [];
         for (let i = 0; i < rows.length; i++) {
@@ -166,10 +162,12 @@ router.get('/list', auth, validateBranch, async (req, res) => {
 
             const create_by = await USER_SNIPPED_DATA(el.create_by);
             const modify_by = await USER_SNIPPED_DATA(el.modify_by);
+            const feesNum = Number(el.fees) || 0;
+            const gst = resolveGst({ fees: feesNum, asOfDate, settings: gstSettings });
 
-            item.fees = el.fees;
-            item.gst_rate = el.gst_rate;
-            item.gst_value = el.gst_value;
+            item.fees = feesNum;
+            item.gst_rate = gst.tax_rate;
+            item.gst_value = gst.tax_value;
             item.create_date = el.create_date;
             item.modify_date = el.modify_date;
             item.create_by = create_by;
@@ -219,13 +217,13 @@ router.get('/list', auth, validateBranch, async (req, res) => {
 });
 
 // POST /add - Add a global service to this branch
-// General payload: { service_id, fees, gst_rate, remark }
-// Compliance payload: { service_id, fees, gst_rate, due_date }
+// General payload: { service_id, fees, remark }
+// Compliance payload: { service_id, fees, due_date }
 router.post("/add", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const createdBy = req.headers["username"] || "";
-        const { service_id, fees, gst_rate, remark, due_date } = req.body || {};
+        const { service_id, fees, remark, due_date } = req.body || {};
 
         const sid = parseServiceId(service_id);
         if (!sid) {
@@ -260,11 +258,17 @@ router.post("/add", auth, validateBranch, async (req, res) => {
         );
 
         const defaultFees = isCompliance ? service.default_amount : 0;
-        const parsedFees = parseFeesGst(fees, gst_rate, defaultFees);
+        const parsedFees = parseFeesOnly(fees, defaultFees);
         if (parsedFees.error) {
             return res.status(400).json({ success: false, message: parsedFees.error });
         }
-        const { feesNum, gstRateNum, gst_value } = parsedFees;
+        const { feesNum } = parsedFees;
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const gst = resolveGst({
+            fees: feesNum,
+            asOfDate: new Date(),
+            settings: gstSettings,
+        });
 
         let remarkVal = null;
         let dueDateVal = 10;
@@ -285,29 +289,29 @@ router.post("/add", auth, validateBranch, async (req, res) => {
             if (isCompliance) {
                 await pool.query(
                     `UPDATE branch_services
-                     SET is_deleted = '0', deleted_by = NULL, fees = ?, gst_rate = ?, gst_value = ?, due_date = ?, modify_by = ?, modify_date = NOW()
+                     SET is_deleted = '0', deleted_by = NULL, fees = ?, due_date = ?, modify_by = ?, modify_date = NOW()
                      WHERE service_id = ? AND branch_id = ?`,
-                    [feesNum, gstRateNum, gst_value, dueDateVal, createdBy, sid, branch_id]
+                    [feesNum, dueDateVal, createdBy, sid, branch_id]
                 );
             } else {
                 await pool.query(
                     `UPDATE branch_services
-                     SET is_deleted = '0', deleted_by = NULL, fees = ?, gst_rate = ?, gst_value = ?, remark = ?, modify_by = ?, modify_date = NOW()
+                     SET is_deleted = '0', deleted_by = NULL, fees = ?, remark = ?, modify_by = ?, modify_date = NOW()
                      WHERE service_id = ? AND branch_id = ?`,
-                    [feesNum, gstRateNum, gst_value, remarkVal, createdBy, sid, branch_id]
+                    [feesNum, remarkVal, createdBy, sid, branch_id]
                 );
             }
         } else if (isCompliance) {
             await pool.query(
-                `INSERT INTO branch_services (branch_id, service_id, fees, gst_rate, gst_value, due_date, create_by, modify_by, is_deleted)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0')`,
-                [branch_id, sid, feesNum, gstRateNum, gst_value, dueDateVal, createdBy, createdBy]
+                `INSERT INTO branch_services (branch_id, service_id, fees, due_date, create_by, modify_by, is_deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, '0')`,
+                [branch_id, sid, feesNum, dueDateVal, createdBy, createdBy]
             );
         } else {
             await pool.query(
-                `INSERT INTO branch_services (branch_id, service_id, fees, gst_rate, gst_value, remark, create_by, modify_by, is_deleted)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0')`,
-                [branch_id, sid, feesNum, gstRateNum, gst_value, remarkVal, createdBy, createdBy]
+                `INSERT INTO branch_services (branch_id, service_id, fees, remark, create_by, modify_by, is_deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, '0')`,
+                [branch_id, sid, feesNum, remarkVal, createdBy, createdBy]
             );
         }
 
@@ -317,8 +321,8 @@ router.post("/add", auth, validateBranch, async (req, res) => {
             name: service.name,
             type: service.type,
             fees: feesNum,
-            gst_rate: gstRateNum,
-            gst_value,
+            gst_rate: gst.tax_rate,
+            gst_value: gst.tax_value,
         };
 
         if (isCompliance) {
@@ -343,13 +347,13 @@ router.post("/add", auth, validateBranch, async (req, res) => {
 });
 
 // PUT /edit - Edit a branch service
-// General payload: { service_id, fees, gst_rate, remark }
-// Compliance payload: { service_id, fees, gst_rate, due_date }
+// General payload: { service_id, fees, remark }
+// Compliance payload: { service_id, fees, due_date }
 router.put("/edit", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const modifyBy = req.headers["username"] || "";
-        const { service_id, fees, gst_rate, remark, due_date } = req.body || {};
+        const { service_id, fees, remark, due_date } = req.body || {};
 
         const sid = parseServiceId(service_id);
         if (!sid) {
@@ -371,11 +375,17 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         const service = existing[0];
         const isCompliance = service.type === "compliance";
 
-        const parsedFees = parseFeesGst(fees, gst_rate, isCompliance ? service.default_amount : 0);
+        const parsedFees = parseFeesOnly(fees, isCompliance ? service.default_amount : 0);
         if (parsedFees.error) {
             return res.status(400).json({ success: false, message: parsedFees.error });
         }
-        const { feesNum, gstRateNum, gst_value } = parsedFees;
+        const { feesNum } = parsedFees;
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const gst = resolveGst({
+            fees: feesNum,
+            asOfDate: new Date(),
+            settings: gstSettings,
+        });
 
         let remarkVal = null;
         let dueDateVal = 10;
@@ -391,18 +401,18 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
 
             await pool.query(
                 `UPDATE branch_services
-                 SET fees = ?, gst_rate = ?, gst_value = ?, due_date = ?, modify_by = ?, modify_date = NOW()
+                 SET fees = ?, due_date = ?, modify_by = ?, modify_date = NOW()
                  WHERE service_id = ? AND branch_id = ? AND is_deleted = '0'`,
-                [feesNum, gstRateNum, gst_value, dueDateVal, modifyBy, sid, branch_id]
+                [feesNum, dueDateVal, modifyBy, sid, branch_id]
             );
         } else {
             remarkVal = remark != null && remark !== "" ? String(remark).trim() : null;
 
             await pool.query(
                 `UPDATE branch_services
-                 SET fees = ?, gst_rate = ?, gst_value = ?, remark = ?, modify_by = ?, modify_date = NOW()
+                 SET fees = ?, remark = ?, modify_by = ?, modify_date = NOW()
                  WHERE service_id = ? AND branch_id = ? AND is_deleted = '0'`,
-                [feesNum, gstRateNum, gst_value, remarkVal, modifyBy, sid, branch_id]
+                [feesNum, remarkVal, modifyBy, sid, branch_id]
             );
         }
 
@@ -412,8 +422,8 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
             name: service.name,
             type: service.type,
             fees: feesNum,
-            gst_rate: gstRateNum,
-            gst_value,
+            gst_rate: gst.tax_rate,
+            gst_value: gst.tax_value,
         };
 
         if (isCompliance) {
@@ -676,7 +686,7 @@ router.put("/status", auth, validateBranch, async (req, res) => {
                     );
                 } else {
                     await connection.query(
-                        `INSERT INTO branch_services (branch_id, service_id, fees, gst_rate, gst_value, remark, create_by, modify_by, is_deleted)
+                        `INSERT INTO branch_services (branch_id, service_id, fees, remark, create_by, modify_by, is_deleted)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0')`,
                         [branch_id, sid, Number(service.default_amount || 0), 0, 0, null, username, username]
                     );
@@ -763,8 +773,8 @@ function formatServiceRequestListItem(row) {
         },
         charges: {
             fees: Number(row.fees) || 0,
-            tax_rate: Number(row.tax_rate) || 0,
-            tax_value: Number(row.tax_value) || 0,
+            tax_rate: 0,
+            tax_value: 0,
             amount: Number(row.amount) || 0,
         },
         create_date: row.create_date,
@@ -862,8 +872,7 @@ router.get("/service-request/list", auth, validateBranch, async (req, res) => {
                 sr.firm_id,
                 sr.service_id,
                 sr.fees,
-                sr.tax_rate,
-                sr.tax_value,
+                
                 sr.amount,
                 sr.task_id,
                 sr.client_remark,

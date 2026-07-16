@@ -625,9 +625,9 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
                 `INSERT INTO invoice (
                     invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id,
                     subtotal, discount_type, discount_perc_rate, discount_value,
-                    tax_rate, tax_value, additional_charge, total, round_off, grand_total
+                    additional_charge, total, round_off, grand_total
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     invoice_id,
                     branch_id,
@@ -638,8 +638,6 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
                     transaction_id,
                     amountTotal,
                     "not applicable",
-                    0,
-                    0,
                     0,
                     0,
                     0,
@@ -1171,9 +1169,9 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
                 `INSERT INTO invoice (
                     invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id,
                     subtotal, discount_type, discount_perc_rate, discount_value,
-                    tax_rate, tax_value, additional_charge, total, round_off, grand_total
+                    additional_charge, total, round_off, grand_total
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     invoice_id,
                     branch_id,
@@ -1184,8 +1182,6 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
                     transaction_id,
                     amountNum,
                     "not applicable",
-                    0,
-                    0,
                     0,
                     0,
                     0,

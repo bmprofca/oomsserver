@@ -145,7 +145,7 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
     } else {
         await runner.query(
             `INSERT INTO branch_services (
-                branch_id, service_id, fees, gst_rate, gst_value, remark,
+                branch_id, service_id, fees, remark,
                 create_by, modify_by, is_deleted, create_date, modify_date
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?)`,
             [

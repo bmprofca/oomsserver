@@ -87,8 +87,6 @@ function formatServiceDetails(row) {
         branch: branchBlock,
         charges: {
             fees,
-            gst_rate,
-            gst_value,
             total: Number((fees + gst_value).toFixed(2)),
         },
     };
@@ -104,7 +102,7 @@ const SERVICE_SELECT_FIELDS = `
     s.default_amount,
     s.remark AS service_remark,
     bs.fees,
-    bs.gst_rate,
+    0,
     bs.gst_value,
     bs.remark,
     bs.due_date

@@ -110,9 +110,9 @@ async function createPurchase({
         const invoice_no = `${invoiceData?.prefix}${serial}`;
 
         await connection.query(
-            `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [invoice_id, branch_id, invoice_no, username, username, "purchase", transaction_id, subtotal, "not applicable", 0, 0, 0, 0, 0, total, 0, total]
+            `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, additional_charge, total, round_off, grand_total)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [invoice_id, branch_id, invoice_no, username, username, "purchase", transaction_id, subtotal, "not applicable", 0, 0, 0, total, 0, total]
         );
 
         const purchase_entry_id = await UNIQUE_RANDOM_STRING("purchase_entries", "purchase_id", { length: ID_LENGTH, conn: connection });
@@ -333,7 +333,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const params = [branch_id, branch_id, "purchase", fromD, toD, ...searchFilterParams];
 
         const [rows] = await pool.query(
-            `SELECT invoice.invoice_id, invoice.invoice_no, invoice.subtotal, invoice.discount_type, invoice.discount_perc_rate, invoice.discount_value, invoice.tax_rate, invoice.tax_value, invoice.additional_charge, invoice.total, invoice.round_off, invoice.grand_total, transactions.*
+            `SELECT invoice.invoice_id, invoice.invoice_no, invoice.subtotal, invoice.discount_type, invoice.discount_perc_rate, invoice.discount_value, invoice.additional_charge, invoice.total, invoice.round_off, invoice.grand_total, transactions.*
              FROM purchase_entries pe
              INNER JOIN invoice ON invoice.invoice_id = pe.invoice_id
              LEFT JOIN transactions ON transactions.transaction_id = invoice.transaction_id

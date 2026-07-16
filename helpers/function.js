@@ -177,8 +177,8 @@ async function SET_OPENING_BALANCE({
 
         const absAmount = Math.abs(Number(amount));
         await connection.query(
-            "INSERT INTO `invoice` (`invoice_id`, `branch_id`, `invoice_no`, `create_by`, `modify_by`, `type`, `transaction_id`, `subtotal`, `discount_type`, `discount_perc_rate`, `discount_value`, `tax_rate`, `tax_value`, `additional_charge`, `total`, `round_off`, `grand_total`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [invoice_id, branch_id, invoice_no, username, username, "opening balance", transaction_id, absAmount, "not applicable", 0, 0, 0, 0, 0, absAmount, 0, absAmount]
+            "INSERT INTO `invoice` (`invoice_id`, `branch_id`, `invoice_no`, `create_by`, `modify_by`, `type`, `transaction_id`, `subtotal`, `discount_type`, `discount_perc_rate`, `discount_value`, `additional_charge`, `total`, `round_off`, `grand_total`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [invoice_id, branch_id, invoice_no, username, username, "opening balance", transaction_id, absAmount, "not applicable", 0, 0, 0, absAmount, 0, absAmount]
         );
 
         // Opening balance: debit → party2, credit → party1; amount always positive.

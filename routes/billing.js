@@ -5,6 +5,7 @@ import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 
 const router = express.Router();
 
@@ -133,9 +134,10 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
             : "client";
 
     const amountTotal = Number(Number(taskRow.fees || 0).toFixed(2));
-    const sumTax = Number(Number(taskRow.tax_value || 0).toFixed(2));
-    const effectiveTaxRate =
-        amountTotal > 0 ? Number(((sumTax / amountTotal) * 100).toFixed(2)) : 0;
+    const gstSettings = await fetchBranchGstSettings(connection, branch_id);
+    const asOfDate = toDateOnly(TODAY_DATE()) || toDateOnly(new Date());
+    const gst = resolveGst({ fees: amountTotal, asOfDate, settings: gstSettings });
+    const effectiveTaxRate = gst.tax_rate;
 
     let pricing;
     try {
@@ -175,8 +177,8 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
     const invoice_no = `${invoiceData?.prefix}${serial}`;
 
     await connection.query(
-        `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, tax_rate, tax_value, additional_charge, total, round_off, grand_total)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO invoice (invoice_id, branch_id, invoice_no, create_by, modify_by, type, transaction_id, subtotal, discount_type, discount_perc_rate, discount_value, additional_charge, total, round_off, grand_total)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             invoice_id,
             branch_id,
@@ -189,8 +191,6 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
             pricing.discountType,
             pricing.discountPercRate,
             pricing.discountValue,
-            effectiveTaxRate,
-            pricing.taxValue,
             pricing.additionalCharge,
             pricing.totalBeforeRound,
             pricing.roundOffValue,
@@ -242,14 +242,13 @@ async function generateBillForSingleTask(connection, { username, branch_id, task
 
     const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", { length: ID_LENGTH, conn: connection });
     const fees = Number(Number(taskRow.fees).toFixed(2));
-    const tax_perc = Number(Number(taskRow.tax_rate).toFixed(2));
-    const tax_value = Number(Number(taskRow.tax_value).toFixed(2));
-    const lineTotal = Number(Number(taskRow.total).toFixed(2));
+    const lineGst = resolveGst({ fees, asOfDate, settings: gstSettings });
+    const lineTotal = lineGst.total;
     const itemRemark = `task:${taskRow.task_id}`;
     await connection.query(
-        `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, tax_perc, tax_value, total, remark)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [branch_id, item_id, sale_entry_id, invoice_id, taskRow.service_id, fees, tax_perc, tax_value, lineTotal, itemRemark]
+        `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, total, remark)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [branch_id, item_id, sale_entry_id, invoice_id, taskRow.service_id, fees, lineTotal, itemRemark]
     );
 
     await connection.query("UPDATE `invoice_prefix` SET `current` = ? WHERE `id` = ?", [serial, invoicePrimaryId]);
@@ -384,7 +383,6 @@ async function handleBillingTaskList(req, res) {
                   OR IFNULL(t.invoice_id, '') LIKE ?
                   OR CAST(t.fees AS CHAR) LIKE ?
                   OR CAST(t.total AS CHAR) LIKE ?
-                  OR CAST(IFNULL(t.tax_value, 0) AS CHAR) LIKE ?
                   OR f.username LIKE ?
                   OR f.firm_name LIKE ?
                   OR IFNULL(f.gst_no, '') LIKE ?
@@ -406,7 +404,7 @@ async function handleBillingTaskList(req, res) {
                   )
               )
             `;
-            for (let i = 0; i < 17; i++) {
+            for (let i = 0; i < 16; i++) {
                 params.push(searchPattern);
             }
             params.push(searchPattern, searchPattern, searchPattern);
@@ -429,8 +427,6 @@ async function handleBillingTaskList(req, res) {
                 t.has_agent,
                 t.agent_id,
                 t.fees,
-                t.tax_rate,
-                t.tax_value,
                 t.total,
                 t.due_date,
                 t.target_date,
@@ -475,12 +471,11 @@ async function handleBillingTaskList(req, res) {
                     service_id: service_data?.service_id,
                     name: service_data?.name
                 },
-                charges: {
-                    fees: Number(element?.fees) || 0,
-                    tax_rate: Number(element?.tax_rate) || 0,
-                    tax_value: Number(element?.tax_value) || 0,
-                    total: Number(element?.total) || 0,
-                },
+                charges: (() => {
+                    const feesNum = Number(element?.fees) || 0;
+                    const g = resolveGst({ fees: feesNum, asOfDate: element?.create_date, settings: gstSettingsList });
+                    return { fees: feesNum, tax_rate: g.tax_rate, tax_value: g.tax_value, total: g.total };
+                })(),
                 dates: {
                     due_date: element?.due_date,
                     create_date: element?.create_date,
@@ -591,7 +586,7 @@ router.post("/generate/billable", auth, validateBranch, async (req, res) => {
 
         const placeholders = normalizedIds.map(() => "?").join(", ");
         const [taskRows] = await pool.query(
-            `SELECT task_id, username, firm_id, service_id, fees, tax_rate, tax_value, total, status, billing_status
+            `SELECT task_id, username, firm_id, service_id, fees, total, status, billing_status
              FROM tasks
              WHERE branch_id = ?
                AND task_id IN (${placeholders})

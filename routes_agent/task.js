@@ -113,7 +113,7 @@ function calculateAgentCharges(taskFees, taskTaxRate, margin) {
     const gst_value = Number(((fees * gst_rate) / 100).toFixed(2));
     const total = Number((fees + gst_value).toFixed(2));
 
-    return { fees, gst_rate, gst_value, total };
+    return { fees, total };
 }
 
 async function getAgentMarginContext(branch_id, agent_username) {
@@ -240,8 +240,8 @@ router.get("/list", validateAgentSession, async (req, res) => {
                 t.status,
                 t.due_date,
                 t.fees,
-                t.tax_rate,
-                t.tax_value,
+                0,
+                0,
                 t.total,
                 f.firm_name,
                 f.firm_type,

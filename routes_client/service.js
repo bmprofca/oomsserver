@@ -88,8 +88,6 @@ function formatServiceDetails(row) {
         branch: branchBlock,
         charges: {
             fees,
-            gst_rate,
-            gst_value,
             total: Number((fees + gst_value).toFixed(2)),
         },
     };
@@ -105,7 +103,7 @@ const SERVICE_SELECT_FIELDS = `
     s.default_amount,
     s.remark AS service_remark,
     bs.fees,
-    bs.gst_rate,
+    0,
     bs.gst_value,
     bs.remark,
     bs.due_date
@@ -159,8 +157,6 @@ function formatServiceRequestDetails(row) {
         },
         charges: {
             fees,
-            tax_rate,
-            tax_value,
             amount: Number(row.amount) || Number((fees + tax_value).toFixed(2)),
         },
         create_date: row.create_date,
@@ -376,7 +372,7 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
         const [serviceRows] = await pool.query(
             `SELECT
                 bs.fees,
-                bs.gst_rate,
+                0,
                 bs.gst_value,
                 s.type
              FROM branch_services bs
@@ -416,8 +412,6 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
                 firm_id,
                 service_id,
                 fees,
-                tax_rate,
-                tax_value,
                 amount,
                 client_remark,
                 status,
@@ -431,8 +425,6 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
                 resolvedFirmId,
                 resolvedServiceId,
                 fees,
-                tax_rate,
-                tax_value,
                 amount,
                 clientRemark,
                 username,
@@ -451,8 +443,6 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
                 client_remark: clientRemark,
                 charges: {
                     fees,
-                    tax_rate,
-                    tax_value,
                     amount,
                 },
             },

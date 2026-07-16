@@ -1,3 +1,4 @@
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "./gst.js";
 import nodemailer from "nodemailer";
 import pool from "../db.js";
 import { getConfigWithDecryptedPassword } from "../services/emailConfigService.js";
@@ -67,7 +68,7 @@ async function isUnsubscribed(branch_id, email) {
 // Get sale invoice items
 async function getSaleItems(sale_id) {
     const [rows] = await pool.query(
-        `SELECT si.service_id, si.fees, si.tax_perc, si.tax_value, si.total, si.remark,
+        `SELECT si.service_id, si.fees, si.total, si.remark,
                 s.name as service_name, s.sac_code
          FROM sale_items si
          LEFT JOIN services s ON s.service_id = si.service_id

@@ -1,3 +1,4 @@
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import express from "express";
 import fs from "fs/promises";
 import path from "path";
@@ -16,7 +17,7 @@ const QUOTATION_PDF_DIR = path.join(__dirname, "..", "media", "quotation");
 
 const router = express.Router();
 
-function normalizeSingleQuotationItem(requestItems) {
+function normalizeSingleQuotationItem(requestItems, gstSettings = {}, asOfDate = null) {
     if (!Array.isArray(requestItems) || requestItems.length === 0) {
         return { error: "items is required and must contain exactly one service" };
     }
@@ -27,8 +28,6 @@ function normalizeSingleQuotationItem(requestItems) {
     const item = requestItems[0] || {};
     const service_id = item?.service_id != null ? String(item.service_id).trim() : "";
     const feesNum = Number(item?.fees);
-    const taxRateNum =
-        item?.tax_rate == null || String(item.tax_rate).trim?.() === "" ? 0 : Number(item.tax_rate);
 
     if (!service_id) {
         return { error: "items[0].service_id is required" };
@@ -36,20 +35,20 @@ function normalizeSingleQuotationItem(requestItems) {
     if (!Number.isFinite(feesNum) || feesNum < 0) {
         return { error: "items[0].fees must be a valid number greater than or equal to 0" };
     }
-    if (!Number.isFinite(taxRateNum) || taxRateNum < 0) {
-        return { error: "items[0].tax_rate must be a valid number greater than or equal to 0" };
-    }
 
-    const taxValue = Number(((feesNum * taxRateNum) / 100).toFixed(2));
-    const total = Number((feesNum + taxValue).toFixed(2));
+    const gst = resolveGst({
+        fees: feesNum,
+        asOfDate: asOfDate || new Date(),
+        settings: gstSettings,
+    });
 
     return {
         item: {
             service_id,
             fees: Number(feesNum.toFixed(2)),
-            tax_rate: Number(taxRateNum.toFixed(2)),
-            tax_value: taxValue,
-            total,
+            tax_rate: gst.tax_rate,
+            tax_value: gst.tax_value,
+            total: gst.total,
         },
     };
 }
@@ -66,8 +65,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "username is required" });
         }
 
-        const parsedItems = normalizeSingleQuotationItem(requestItems);
+        const gstSettingsCreate = await fetchBranchGstSettings(connection, branch_id);
+        const parsedItems = normalizeSingleQuotationItem(requestItems, gstSettingsCreate, new Date());
         if (parsedItems.error) {
+            connection.release();
             return res.status(400).json({ success: false, message: parsedItems.error });
         }
         const normalizedItems = [parsedItems.item];
@@ -112,8 +113,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         for (let index = 0; index < normalizedItems.length; index++) {
             const item = normalizedItems[index];
             await connection.query(
-                `INSERT INTO quotation_items (branch_id, quotation_id, service_id, create_by, modify_by, fees, tax_rate, tax_value, total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO quotation_items (branch_id, quotation_id, service_id, create_by, modify_by, fees, total)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     quotation_id,
@@ -121,8 +122,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     createdBy,
                     createdBy,
                     item.fees,
-                    item.tax_rate,
-                    item.tax_value,
                     item.total
                 ]
             );
@@ -234,8 +233,10 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "username is required" });
         }
 
-        const parsedItems = normalizeSingleQuotationItem(requestItems);
+        const gstSettingsEdit = await fetchBranchGstSettings(connection, branch_id);
+        const parsedItems = normalizeSingleQuotationItem(requestItems, gstSettingsEdit, new Date());
         if (parsedItems.error) {
+            connection.release();
             return res.status(400).json({ success: false, message: parsedItems.error });
         }
         const normalizedItems = [parsedItems.item];
@@ -294,8 +295,8 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         for (let index = 0; index < normalizedItems.length; index++) {
             const item = normalizedItems[index];
             await connection.query(
-                `INSERT INTO quotation_items (branch_id, quotation_id, service_id, create_by, modify_by, fees, tax_rate, tax_value, total)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO quotation_items (branch_id, quotation_id, service_id, create_by, modify_by, fees, total)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     normalizedQuotationId,
@@ -303,8 +304,6 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
                     modifiedBy,
                     modifiedBy,
                     item.fees,
-                    item.tax_rate,
-                    item.tax_value,
                     item.total
                 ]
             );
@@ -630,7 +629,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 q.modify_by,
                 q.modify_date,
                 COALESCE(SUM(qi.fees), 0) AS subtotal,
-                COALESCE(SUM(qi.tax_value), 0) AS tax_total,
+                0 AS tax_total,
                 COALESCE(SUM(qi.total), 0) AS grand_total
             FROM quotations q
             LEFT JOIN quotation_items qi ON q.branch_id = qi.branch_id AND q.quotation_id = qi.quotation_id
@@ -654,7 +653,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             const modify_by = await USER_SNIPPED_DATA(row.modify_by);
 
             const [itemRows] = await pool.query(
-                `SELECT quotation_id, service_id, fees, tax_rate, tax_value, total, create_date
+                `SELECT quotation_id, service_id, fees, total, create_date
                  FROM quotation_items
                  WHERE branch_id = ? AND quotation_id = ?
                  ORDER BY id ASC`,
@@ -757,7 +756,7 @@ router.post("/download", auth, validateBranch, async (req, res) => {
         const qrow = qrows[0];
 
         const [itemRows] = await pool.query(
-            `SELECT service_id, fees, tax_rate, tax_value, total
+            `SELECT service_id, fees, total
              FROM quotation_items
              WHERE branch_id = ? AND quotation_id = ?
              ORDER BY id ASC`,

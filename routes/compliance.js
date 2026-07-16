@@ -1,3 +1,4 @@
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
@@ -461,8 +462,7 @@ const COMPLIANCE_FIRM_SELECT = `
     cf.username,
     cf.firm_id,
     cf.fees,
-    cf.tax_rate,
-    cf.tax_value,
+    
     cf.staffs,
     cf.ca,
     cf.agent,
@@ -756,8 +756,7 @@ async function fetchExistingComplianceTaskRows(branch_id, query, { complianceYea
                 t.firm_id,
                 t.username,
                 t.fees,
-                t.tax_rate,
-                t.tax_value,
+                
                 t.compliance_year,
                 t.compliance_period,
                 t.create_date,
@@ -831,7 +830,7 @@ async function fetchComplianceTasksMap(branch_id, rows) {
 
     const [tasks] = await pool.query(
         `SELECT task_id, service_id, firm_id, compliance_year, compliance_period, username,
-                fees, tax_rate, tax_value, total, status, due_date, target_date,
+                fees, total, status, due_date, target_date,
                 complete_date, complete_by, create_date, create_by, in_user,
                 billing_status, has_ca, ca_id, has_agent, agent_id, is_recurring
          FROM tasks
@@ -879,9 +878,7 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
         if (fees == null || fees === "") {
             return res.status(400).json({ success: false, message: "fees is required" });
         }
-        if (tax_rate == null || tax_rate === "") {
-            return res.status(400).json({ success: false, message: "tax_rate is required" });
-        }
+        // tax_rate ignored — computed from branch GST settings
 
         const dueDateVal = parseDueDate(due_date);
         if (dueDateVal === null) {
@@ -899,7 +896,7 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const parsedAmounts = parseFeesTax(fees, tax_rate);
+        const parsedAmounts = parseFeesTax(fees, 0);
         if (parsedAmounts.error) {
             return res.status(400).json({ success: false, message: parsedAmounts.error });
         }
@@ -981,8 +978,8 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
 
         const [insertResult] = await pool.query(
             `INSERT INTO compliance_firms
-             (branch_id, service_id, username, firm_id, effective_from, fees, tax_rate, tax_value, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
+             (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
             [
                 branch_id,
                 serviceId,
@@ -990,8 +987,6 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 firmId,
                 parsedEffectiveFrom.value,
                 feesNum,
-                taxRateNum,
-                tax_value,
                 staffsVal,
                 caVal,
                 agentVal,
@@ -1139,10 +1134,16 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
 
             const caId = splitCsvFirst(complianceFirm.ca);
             const agentId = splitCsvFirst(complianceFirm.agent);
-            const feesNum = Number(complianceFirm.fees);
-            const taxRateNum = Number(complianceFirm.tax_rate);
-            const taxValueNum = Number(complianceFirm.tax_value);
-            const totalNum = Number((feesNum + taxValueNum).toFixed(2));
+            const feesNum = Number(complianceFirm.fees) || 0;
+            const gstSettingsSpawn = await fetchBranchGstSettings(conn, branch_id);
+            const spawnGst = resolveGst({
+                fees: feesNum,
+                asOfDate: new Date(),
+                settings: gstSettingsSpawn,
+            });
+            const taxRateNum = spawnGst.tax_rate;
+            const taxValueNum = spawnGst.tax_value;
+            const totalNum = spawnGst.total;
 
             const completeDate = statusVal === "complete" ? new Date() : null;
             const completeBy = statusVal === "complete" ? username || null : null;
@@ -1152,7 +1153,7 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
             await conn.query(
                 `INSERT INTO tasks
                  (branch_id, task_id, task_type, compliance_year, compliance_period, username, firm_id, service_id,
-                  has_ca, ca_id, has_agent, agent_id, fees, tax_rate, tax_value, total, create_by, is_recurring,
+                  has_ca, ca_id, has_agent, agent_id, fees, total, create_by, is_recurring,
                   due_date, target_date, billing_status, status, complete_date, complete_by, cancelled_date, cancelled_by)
                  VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
                 [
@@ -1749,9 +1750,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
         if (fees == null || fees === "") {
             return res.status(400).json({ success: false, message: "fees is required" });
         }
-        if (tax_rate == null || tax_rate === "") {
-            return res.status(400).json({ success: false, message: "tax_rate is required" });
-        }
+        // tax_rate ignored — computed from branch GST settings
 
         const dueDateVal = parseDueDate(due_date);
         if (dueDateVal === null) {
@@ -1769,7 +1768,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const parsedAmounts = parseFeesTax(fees, tax_rate);
+        const parsedAmounts = parseFeesTax(fees, 0);
         if (parsedAmounts.error) {
             return res.status(400).json({ success: false, message: parsedAmounts.error });
         }
@@ -1854,8 +1853,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                  firm_id = ?,
                  username = ?,
                  fees = ?,
-                 tax_rate = ?,
-                 tax_value = ?,
                  due_date = ?,
                  visibility_offset = ?,
                  effective_from = ?,
@@ -1872,8 +1869,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                 firmId,
                 clientUsername,
                 feesNum,
-                taxRateNum,
-                tax_value,
                 dueDateVal,
                 visibilityOffsetVal,
                 parsedEffectiveFrom.value,
