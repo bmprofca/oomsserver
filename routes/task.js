@@ -3890,4 +3890,218 @@ router.get("/tasks/filter", auth, validateBranch, async (req, res) => {
     }
 });
 
+/**
+ * Pending Task Summary (Staffwise)
+ * GET /task/staff-pending-summary
+ * Query: service_id?, search?, staff_username?
+ */
+router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { staff_username, search, service_id } = req.query;
+
+        let staffQuery = `
+            SELECT DISTINCT
+                bm.username,
+                bm.designation,
+                bm.status AS map_status,
+                bm.is_accepted,
+                p.name,
+                p.email,
+                p.mobile,
+                p.care_of,
+                p.image
+            FROM branch_mapping bm
+            LEFT JOIN profile p ON p.username = bm.username
+            WHERE bm.branch_id = ?
+              AND bm.is_deleted = '0'
+              AND bm.status = '1'
+              AND bm.is_accepted = '1'
+        `;
+        const staffParams = [branch_id];
+
+        if (staff_username && staff_username !== "all") {
+            staffQuery += ` AND bm.username = ?`;
+            staffParams.push(staff_username);
+        }
+
+        if (search && String(search).trim()) {
+            const q = `%${String(search).trim()}%`;
+            staffQuery += ` AND (bm.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ?)`;
+            staffParams.push(q, q, q, q);
+        }
+
+        staffQuery += ` ORDER BY p.name ASC, bm.username ASC`;
+
+        const [staffMembers] = await pool.query(staffQuery, staffParams);
+
+        if (!staffMembers.length) {
+            return res.status(200).json({
+                success: true,
+                message: "No active staff members found",
+                data: [],
+                summary: {
+                    total_staff: 0,
+                    total_active_tasks: 0,
+                    counts: { OD: 0, DT: 0, D7: 0, FT: 0, WIP: 0, PFC: 0, PFD: 0 },
+                },
+            });
+        }
+
+        const staffUsernames = staffMembers.map((s) => s.username);
+        const placeholders = staffUsernames.map(() => "?").join(",");
+
+        let tasksQuery = `
+            SELECT
+                t.task_id,
+                t.due_date,
+                t.status AS task_status,
+                ts.username AS assigned_staff
+            FROM task_staffs ts
+            INNER JOIN tasks t
+                ON t.task_id = ts.task_id
+               AND t.branch_id = ts.branch_id
+            WHERE ts.branch_id = ?
+              AND ts.username IN (${placeholders})
+              AND (ts.is_deleted = '0' OR ts.is_deleted = 0)
+        `;
+        const tasksParams = [branch_id, ...staffUsernames];
+
+        if (service_id && service_id !== "all") {
+            tasksQuery += ` AND t.service_id = ?`;
+            tasksParams.push(service_id);
+        }
+
+        const [tasks] = await pool.query(tasksQuery, tasksParams);
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const emptyCounts = () => ({
+            OD: 0,
+            DT: 0,
+            D7: 0,
+            FT: 0,
+            WIP: 0,
+            PFC: 0,
+            PFD: 0,
+        });
+
+        const byStaff = new Map();
+        for (const staff of staffMembers) {
+            byStaff.set(staff.username, {
+                staff: {
+                    username: staff.username,
+                    name: staff.name || staff.username,
+                    designation: staff.designation || null,
+                    care_of: staff.care_of || null,
+                    email: staff.email || null,
+                    mobile: staff.mobile || null,
+                    image: staff.image || null,
+                },
+                counts: emptyCounts(),
+                active_tasks: 0,
+                total_tasks: 0,
+            });
+        }
+
+        for (const task of tasks) {
+            const row = byStaff.get(task.assigned_staff);
+            if (!row) continue;
+
+            row.total_tasks += 1;
+
+            const status = String(task.task_status || "").toLowerCase();
+            if (status === "in process") row.counts.WIP += 1;
+            else if (status === "pending from client") row.counts.PFC += 1;
+            else if (status === "pending from department") row.counts.PFD += 1;
+
+            const isActive = status !== "complete" && status !== "cancel";
+            if (!isActive || !task.due_date) continue;
+
+            row.active_tasks += 1;
+
+            const dueDateObj = new Date(task.due_date);
+            dueDateObj.setHours(0, 0, 0, 0);
+            const diffDays = Math.ceil((dueDateObj - today) / (1000 * 60 * 60 * 24));
+
+            if (diffDays < 0) row.counts.OD += 1;
+            else if (diffDays === 0) row.counts.DT += 1;
+            else if (diffDays <= 7) row.counts.D7 += 1;
+            else row.counts.FT += 1;
+        }
+
+        const data = [];
+        const globalCounts = emptyCounts();
+        let totalActiveTasks = 0;
+
+        for (const row of byStaff.values()) {
+            const c = row.counts;
+            const hasCounts =
+                c.OD || c.DT || c.D7 || c.FT || c.WIP || c.PFC || c.PFD;
+            if (!hasCounts && row.total_tasks === 0) continue;
+
+            totalActiveTasks += row.active_tasks;
+            globalCounts.OD += c.OD;
+            globalCounts.DT += c.DT;
+            globalCounts.D7 += c.D7;
+            globalCounts.FT += c.FT;
+            globalCounts.WIP += c.WIP;
+            globalCounts.PFC += c.PFC;
+            globalCounts.PFD += c.PFD;
+
+            data.push({
+                staff: row.staff,
+                counts: c,
+                summary: {
+                    total_tasks: row.total_tasks,
+                    active_tasks: row.active_tasks,
+                },
+            });
+        }
+
+        data.sort((a, b) => {
+            const aTotal =
+                a.counts.OD + a.counts.DT + a.counts.D7 + a.counts.FT +
+                a.counts.WIP + a.counts.PFC + a.counts.PFD;
+            const bTotal =
+                b.counts.OD + b.counts.DT + b.counts.D7 + b.counts.FT +
+                b.counts.WIP + b.counts.PFC + b.counts.PFD;
+            return bTotal - aTotal;
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Staff pending task summary retrieved successfully",
+            data,
+            summary: {
+                total_staff: data.length,
+                total_active_tasks: totalActiveTasks,
+                counts: globalCounts,
+            },
+            filters_applied: {
+                staff_username: staff_username || "all",
+                search: search || null,
+                service_id: service_id || "all",
+            },
+            legend: {
+                OD: "Overdue",
+                DT: "Due Today",
+                D7: "Due in 7 Days",
+                FT: "Future Tasks",
+                WIP: "Work in Progress",
+                PFC: "Pending from Client",
+                PFD: "Pending from Department",
+            },
+        });
+    } catch (error) {
+        console.error("Staff pending summary error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch staff pending task summary",
+            error: error.message,
+        });
+    }
+});
+
 export default router;

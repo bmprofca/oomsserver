@@ -7,6 +7,30 @@ const router = express.Router();
 const statesAndDistricts = JSON.parse(
     readFileSync(new URL("../media/utils/states-and-districts.json", import.meta.url), "utf8")
 );
+const FIRM_TYPES = [
+    { value: "individual", label: "Individual" },
+    { value: "partnership firm", label: "Partnership Firm" },
+    { value: "limited liability partnership", label: "Limited Liability Partnership (LLP)" },
+    { value: "one person company", label: "One Person Company (OPC)" },
+    { value: "private limited company", label: "Private Limited Company" },
+    { value: "public limited company", label: "Public Limited Company" },
+    { value: "section 8 company", label: "Section 8 Company" },
+    { value: "hindu undivided family", label: "Hindu Undivided Family (HUF)" },
+    { value: "trust", label: "Trust" },
+    { value: "society", label: "Society" },
+    { value: "cooperative society", label: "Cooperative Society" },
+    { value: "producer company", label: "Producer Company" },
+    { value: "government department", label: "Government Department" },
+    { value: "public sector undertaking", label: "Public Sector Undertaking (PSU)" },
+    { value: "statutory corporation", label: "Statutory Corporation" },
+    { value: "local authority", label: "Local Authority" },
+    { value: "foreign company", label: "Foreign Company" },
+    { value: "branch office", label: "Branch Office" },
+    { value: "liaison office", label: "Liaison Office" },
+    { value: "joint venture", label: "Joint Venture (JV)" },
+    { value: "artificial judicial person", label: "Artificial Judicial Person" },
+    { value: "other", label: "Other" },
+];
 
 const WHATSAPP_CHANNELS = ["disabled", "ooms system", "ooms web", "onechatting"];
 
@@ -255,6 +279,13 @@ router.get("/states-and-districts", auth, validateBranch, async (req, res) => {
     return res.status(200).json({
         success: true,
         data: statesAndDistricts
+    });
+});
+
+router.get("/firm-types", auth, validateBranch, async (req, res) => {
+    return res.status(200).json({
+        success: true,
+        data: FIRM_TYPES,
     });
 });
 

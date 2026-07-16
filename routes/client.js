@@ -1717,7 +1717,7 @@ router.post("/details/firms/create", auth, validateBranch, async (req, res) => {
                 firm_id,
                 branch_id,
                 username.trim(),
-                isIndividual ? null : (firm || null),
+                (firm || null),
                 type.trim(),
                 pan.trim(),
                 isIndividual ? null : (gst || null),
@@ -1770,7 +1770,7 @@ router.post("/details/firms/create", auth, validateBranch, async (req, res) => {
             message: 'Firm created successfully',
             data: {
                 firm_id,
-                firm_name: isIndividual ? null : firm,
+                firm_name: firm || null,
                 business_type: type
             }
         });
@@ -1879,7 +1879,7 @@ router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
                 modify_date = CURRENT_TIMESTAMP
             WHERE firm_id = ? AND username = ? AND branch_id = ? AND is_deleted = '0'`,
             [
-                isIndividual ? null : (firm || null),
+                (firm || null),
                 type.trim(),
                 pan.trim(),
                 isIndividual ? null : (gst || null),
@@ -1938,7 +1938,7 @@ router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
             message: 'Firm updated successfully',
             data: {
                 firm_id: firm_id.trim(),
-                firm_name: isIndividual ? null : firm,
+                firm_name: firm || null,
                 business_type: type
             }
         });
@@ -1950,6 +1950,134 @@ router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
             success: false,
             message: 'Failed to update firm',
             error: error.message
+        });
+    } finally {
+        conn.release();
+    }
+});
+
+// Soft delete a firm (client flow)
+router.delete(
+    "/details/firms/delete/:firm_id",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        const conn = await pool.getConnection();
+        try {
+            const branch_id = req.branch_id;
+            const firm_id = String(req.params.firm_id || "").trim();
+            const username = String(req.body?.username || "").trim();
+            const deletedBy = req.headers["username"] || "";
+
+            if (!firm_id) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Firm ID is required",
+                });
+            }
+            if (!username) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Username is required",
+                });
+            }
+
+            await conn.beginTransaction();
+
+            const [firmRows] = await conn.query(
+                `SELECT firm_id
+                 FROM firms
+                 WHERE firm_id = ?
+                   AND username = ?
+                   AND branch_id = ?
+                   AND (is_deleted = '0' OR is_deleted = 0)
+                 LIMIT 1`,
+                [firm_id, username, branch_id]
+            );
+
+            if (!firmRows?.length) {
+                await conn.rollback();
+                return res.status(404).json({
+                    success: false,
+                    message: "Firm not found",
+                });
+            }
+
+            await conn.query(
+                `UPDATE firms
+                 SET is_deleted = '1',
+                     deleted_by = ?,
+                     modify_by = ?,
+                     modify_date = NOW()
+                 WHERE firm_id = ?
+                   AND username = ?
+                   AND branch_id = ?`,
+                [deletedBy, deletedBy, firm_id, username, branch_id]
+            );
+
+            await conn.commit();
+            return res.status(200).json({
+                success: true,
+                message: "Firm deleted successfully",
+                data: { firm_id },
+            });
+        } catch (error) {
+            await conn.rollback();
+            console.error("CLIENT FIRM DELETE ERROR:", error);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to delete firm",
+                error: error.message,
+            });
+        } finally {
+            conn.release();
+        }
+    }
+);
+
+// Toggle firm active/inactive (client flow)
+router.post("/details/firms/status", auth, validateBranch, async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+        const branch_id = req.branch_id;
+        const { firm_id = "", username = "", status } = req.body || {};
+        const modifyBy = req.headers["username"] || "";
+
+        const firmIdStr = String(firm_id || "").trim();
+        const usernameStr = String(username || "").trim();
+
+        if (!firmIdStr) {
+            return res.status(400).json({ success: false, message: "firm_id is required" });
+        }
+        if (!usernameStr) {
+            return res.status(400).json({ success: false, message: "username is required" });
+        }
+
+        const nextStatus = Boolean(status) ? "1" : "0";
+
+        const [updateRes] = await conn.query(
+            `UPDATE firms
+             SET status = ?,
+                 modify_by = ?,
+                 modify_date = NOW()
+             WHERE firm_id = ?
+               AND username = ?
+               AND branch_id = ?
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [nextStatus, modifyBy, firmIdStr, usernameStr, branch_id]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Firm status updated successfully",
+            data: { firm_id: firmIdStr, status: nextStatus === "1" },
+        });
+    } catch (error) {
+        console.error("CLIENT FIRM STATUS UPDATE ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update firm status",
+            error: error.message,
         });
     } finally {
         conn.release();

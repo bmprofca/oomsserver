@@ -771,7 +771,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             page_no = 1,
             limit = 20,
             search,
-            status_filter
+            status_filter,
+            staff_username
         } = req.query;
 
         const categoryDescriptions = {
@@ -888,6 +889,22 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             }
         }
 
+        // Apply staff filter if provided (tasks assigned to this staff)
+        const staffUsernameFilter = staff_username && String(staff_username).trim() !== "" && String(staff_username).trim() !== "all"
+            ? String(staff_username).trim()
+            : null;
+
+        if (staffUsernameFilter) {
+            whereConditions += ` AND EXISTS (
+                SELECT 1 FROM task_staffs ts
+                WHERE ts.task_id = t.task_id
+                  AND ts.branch_id = t.branch_id
+                  AND ts.username = ?
+                  AND (ts.is_deleted = '0' OR ts.is_deleted = 0)
+            )`;
+            queryParams.push(staffUsernameFilter);
+        }
+
         // Apply category-specific filters in SQL
         if (category !== 'ALL') {
             if (['WIP', 'PFC', 'PFD', 'CPL', 'CNL'].includes(category)) {
@@ -975,6 +992,11 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             } else {
                 complianceConditions += ` AND 1 = 0`; // Force empty result
             }
+        }
+
+        if (staffUsernameFilter) {
+            complianceConditions += ` AND FIND_IN_SET(?, REPLACE(IFNULL(ca.employee_username, ''), ' ', '')) > 0`;
+            complianceParams.push(staffUsernameFilter);
         }
 
         if (category !== 'ALL' && ['WIP', 'PFC', 'PFD', 'CPL', 'CNL'].includes(category)) {
@@ -1376,6 +1398,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             filters_applied: {
                 category: category,
                 service_id: service_id || "all",
+                staff_username: staffUsernameFilter || "all",
                 search: search || null,
                 status_filter: status_filter || null
             },
