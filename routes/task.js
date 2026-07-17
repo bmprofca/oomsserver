@@ -12,6 +12,7 @@ import {
     downloadAndUploadProfileDocument,
     getProfileDocumentAccessUrl,
 } from "../helpers/b2Storage.js";
+import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 import {
     fetchBranchGstSettings,
@@ -3984,7 +3985,15 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
                 p.care_of,
                 p.image
             FROM branch_mapping bm
-            LEFT JOIN profile p ON p.username = bm.username
+            LEFT JOIN profile p
+                ON p.username = bm.username
+               AND p.status = '1'
+               AND p.id = (
+                   SELECT MAX(p2.id)
+                   FROM profile p2
+                   WHERE p2.username = bm.username
+                     AND p2.status = '1'
+               )
             WHERE bm.branch_id = ?
               AND bm.is_deleted = '0'
               AND bm.status = '1'
@@ -4014,6 +4023,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
                 data: [],
                 summary: {
                     total_staff: 0,
+                    total_tasks: 0,
                     total_active_tasks: 0,
                     counts: { OD: 0, DT: 0, D7: 0, FT: 0, WIP: 0, PFC: 0, PFD: 0 },
                 },
@@ -4069,7 +4079,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
                     care_of: staff.care_of || null,
                     email: staff.email || null,
                     mobile: staff.mobile || null,
-                    image: staff.image || null,
+                    image: buildProfileImageUrl(staff.image),
                 },
                 counts: emptyCounts(),
                 active_tasks: 0,
@@ -4106,6 +4116,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
         const data = [];
         const globalCounts = emptyCounts();
         let totalActiveTasks = 0;
+        let totalTasks = 0;
 
         for (const row of byStaff.values()) {
             const c = row.counts;
@@ -4114,6 +4125,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
             if (!hasCounts && row.total_tasks === 0) continue;
 
             totalActiveTasks += row.active_tasks;
+            totalTasks += row.total_tasks;
             globalCounts.OD += c.OD;
             globalCounts.DT += c.DT;
             globalCounts.D7 += c.D7;
@@ -4148,6 +4160,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
             data,
             summary: {
                 total_staff: data.length,
+                total_tasks: totalTasks,
                 total_active_tasks: totalActiveTasks,
                 counts: globalCounts,
             },

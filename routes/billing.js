@@ -322,6 +322,8 @@ function parseBillingStatusFilter(statusRaw) {
  * Complete tasks filtered by billing_status ('0' pending, '1' generated, '2' non-billable).
  * Optional query `status` — empty/null returns all billing statuses.
  * Optional query `username` — exact match on task client username when provided.
+ * Optional query `service_id` — filter by task service.
+ * Optional query `completed_by` — filter by task modify_by (staff who completed).
  */
 async function handleBillingTaskList(req, res) {
     try {
@@ -332,6 +334,8 @@ async function handleBillingTaskList(req, res) {
             search = "",
             status,
             username,
+            service_id,
+            completed_by,
         } = req.query || {};
 
         const statusFilter = parseBillingStatusFilter(status);
@@ -350,6 +354,10 @@ async function handleBillingTaskList(req, res) {
         const hasSearch = String(searchRaw).trim() !== "";
         const usernameFilter =
             username != null && String(username).trim() !== "" ? String(username).trim() : "";
+        const serviceIdFilter =
+            service_id != null && String(service_id).trim() !== "" ? String(service_id).trim() : "";
+        const completedByFilter =
+            completed_by != null && String(completed_by).trim() !== "" ? String(completed_by).trim() : "";
 
         const billingPlaceholders = statusFilter.billingStatuses.map(() => "?").join(", ");
         const params = [branch_id, ...statusFilter.billingStatuses];
@@ -370,6 +378,16 @@ async function handleBillingTaskList(req, res) {
         if (usernameFilter !== "") {
             baseQuery += " AND t.username = ?";
             params.push(usernameFilter);
+        }
+
+        if (serviceIdFilter !== "") {
+            baseQuery += " AND t.service_id = ?";
+            params.push(serviceIdFilter);
+        }
+
+        if (completedByFilter !== "") {
+            baseQuery += " AND t.modify_by = ?";
+            params.push(completedByFilter);
         }
 
         if (hasSearch) {
@@ -446,6 +464,8 @@ async function handleBillingTaskList(req, res) {
         const listParams = [...params, limitNum, offset];
         const [rows] = await pool.query(listQuery, listParams);
 
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+
         const list = [];
         for (let index = 0; index < rows.length; index++) {
             const element = rows[index];
@@ -465,7 +485,15 @@ async function handleBillingTaskList(req, res) {
                 },
                 firm: {
                     firm_id: firm_data?.firm_id,
-                    firm_name: firm_data?.firm_name
+                    firm_name: firm_data?.firm_name,
+                    firm_type: firm_data?.firm_type,
+                    username: firm_data?.username,
+                    gst_no: firm_data?.gst_no,
+                    pan_no: firm_data?.pan_no,
+                    file_no: firm_data?.file_no,
+                    cin_no: firm_data?.cin_no,
+                    tan_no: firm_data?.tan_no,
+                    address: firm_data?.address,
                 },
                 service: {
                     service_id: service_data?.service_id,
@@ -473,13 +501,14 @@ async function handleBillingTaskList(req, res) {
                 },
                 charges: (() => {
                     const feesNum = Number(element?.fees) || 0;
-                    const g = resolveGst({ fees: feesNum, asOfDate: element?.create_date, settings: gstSettingsList });
+                    const g = resolveGst({ fees: feesNum, asOfDate: element?.create_date, settings: gstSettings });
                     return { fees: feesNum, tax_rate: g.tax_rate, tax_value: g.tax_value, total: g.total };
                 })(),
                 dates: {
                     due_date: element?.due_date,
                     create_date: element?.create_date,
                     target_date: element?.target_date,
+                    complete_date: element?.target_date,
                 },
                 billing_status: formatBillingStatus(element?.billing_status),
                 status: element?.status,

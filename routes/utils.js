@@ -295,7 +295,9 @@ router.get("/care-of-types", auth, validateBranch, async (req, res) => {
         data: [
             "S/O",
             "W/O",
-            "D/O"
+            "D/O",
+            "C/O",
+            "H/O"
         ]
     });
 });

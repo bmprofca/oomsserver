@@ -402,6 +402,8 @@ async function USER_SNIPPED_DATA(username = "") {
         email: data?.email,
         mobile: data?.mobile,
         country_code: data?.country_code,
+        care_of: data?.care_of,
+        guardian_name: data?.guardian_name,
     };
 }
 
