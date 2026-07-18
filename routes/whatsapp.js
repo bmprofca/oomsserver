@@ -33,6 +33,11 @@ import {
     unsetTemplateMapping,
     getActiveMapping,
 } from "../services/wpSystemTemplateService.js";
+import {
+    persistComponentMedia,
+    resolveComponentMedia,
+    cleanupPreviousMedia,
+} from "../helpers/onechattingTemplateMedia.js";
 
 const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
 const ONECHATTING_CHAT_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-list`;
@@ -927,32 +932,41 @@ router.get("/onechatting/template-map-list", auth, validateBranch, async (req, r
             }
         }
 
-        const data = TEMPLATELIST.map((item) => {
-            const mapping = mappingByTemplate.get(item.name);
-            const isActive = mapping && Number(mapping.status) === 1;
-            if (isActive) {
+        const data = await Promise.all(
+            TEMPLATELIST.map(async (item) => {
+                const mapping = mappingByTemplate.get(item.name);
+                const isActive = mapping && Number(mapping.status) === 1;
+                const rawComponent = mapping
+                    ? parseStoredComponent(mapping.component)
+                    : null;
+                const component = rawComponent
+                    ? await resolveComponentMedia(rawComponent)
+                    : null;
+
+                if (isActive) {
+                    return {
+                        name: item.name,
+                        description: item.description,
+                        available_variables: item.available_variables ?? [],
+                        is_set: true,
+                        map_id: mapping.map_id,
+                        onechatting_template_name: mapping.onechatting_template_name,
+                        component,
+                        status: mapping.status,
+                    };
+                }
+
                 return {
                     name: item.name,
                     description: item.description,
                     available_variables: item.available_variables ?? [],
-                    is_set: true,
-                    map_id: mapping.map_id,
-                    onechatting_template_name: mapping.onechatting_template_name,
-                    component: parseStoredComponent(mapping.component),
-                    status: mapping.status,
+                    is_set: false,
+                    onechatting_template_name: mapping?.onechatting_template_name ?? null,
+                    component,
+                    status: mapping?.status ?? 0,
                 };
-            }
-
-            return {
-                name: item.name,
-                description: item.description,
-                available_variables: item.available_variables ?? [],
-                is_set: false,
-                onechatting_template_name: mapping?.onechatting_template_name ?? null,
-                component: mapping ? parseStoredComponent(mapping.component) : null,
-                status: mapping?.status ?? 0,
-            };
-        });
+            })
+        );
 
         return res.status(200).json({
             success: true,
@@ -998,8 +1012,6 @@ router.put("/onechatting/template-map/set", auth, validateBranch, async (req, re
             });
         }
 
-        const componentJson = JSON.stringify(parsedComponent.value);
-
         const systemTemplate = TEMPLATELIST.find((item) => item.name === templateName);
         if (!systemTemplate) {
             return res.status(400).json({
@@ -1009,13 +1021,36 @@ router.put("/onechatting/template-map/set", auth, validateBranch, async (req, re
         }
 
         const [existing] = await pool.query(
-            `SELECT id, map_id
+            `SELECT id, map_id, component
              FROM onechatting_template_mapping
              WHERE branch_id = ?
                AND template = ?
              LIMIT 1`,
             [branch_id, templateName]
         );
+
+        let persistedComponent;
+        try {
+            persistedComponent = await persistComponentMedia(parsedComponent.value);
+        } catch (mediaError) {
+            console.error("ONECHATTING TEMPLATE MEDIA PERSIST ERROR:", mediaError);
+            return res.status(502).json({
+                success: false,
+                message:
+                    mediaError?.message ||
+                    "Failed to store template media. Please re-upload and try again.",
+                details: mediaError?.details || undefined,
+            });
+        }
+
+        if (existing.length) {
+            const previousComponent = parseStoredComponent(existing[0].component);
+            await cleanupPreviousMedia(previousComponent, persistedComponent);
+        }
+
+        const componentJson = JSON.stringify(persistedComponent);
+        // Return signed URLs to the client for immediate preview after save
+        const resolvedForClient = await resolveComponentMedia(persistedComponent);
 
         if (existing.length) {
             await pool.query(
@@ -1034,7 +1069,7 @@ router.put("/onechatting/template-map/set", auth, validateBranch, async (req, re
                     map_id: existing[0].map_id,
                     name: templateName,
                     template_name: onechattingTemplateName,
-                    component: parsedComponent.value,
+                    component: resolvedForClient,
                     status: 1,
                 },
             });
@@ -1056,7 +1091,7 @@ router.put("/onechatting/template-map/set", auth, validateBranch, async (req, re
                 map_id,
                 name: templateName,
                 template_name: onechattingTemplateName,
-                component: parsedComponent.value,
+                component: resolvedForClient,
                 status: 1,
             },
         });

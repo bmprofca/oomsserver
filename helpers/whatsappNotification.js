@@ -4,6 +4,7 @@ import { GET_BALANCE, USER_SNIPPED_DATA } from "./function.js";
 import { sendWhatsappWebMessage } from "./whatsappWeb.js";
 import { getTemplateBySystemName } from "../services/whatsappWebTemplateMappingService.js";
 import { sendOomsSystemTemplateMessage } from "../services/wpSystemWhatsappSendService.js";
+import { resolveComponentMedia } from "./onechattingTemplateMedia.js";
 
 const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
 const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
@@ -385,7 +386,8 @@ async function sendOnechattingByChannel({
     const senderToken = await getUserOnechattingToken(senderUsername, branch_id);
     if (!senderToken) return;
 
-    const component = replaceVariablesInValue(storedComponent, variables);
+    const withVariables = replaceVariablesInValue(storedComponent, variables);
+    const component = await resolveComponentMedia(withVariables);
 
     await sendOnechattingTemplateMessage({
         token: senderToken,

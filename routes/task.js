@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { fetchPermissionRoleById } from "../helpers/permissionRole.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA, GET_FIRMS_BY_USERNAME } from "../helpers/function.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
@@ -1462,13 +1462,15 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
           t.status,
           t.create_date,
           t.create_by,
+          t.complete_date,
+          t.complete_by,
           t.is_recurring,
   
           f.username AS firm_username,
           f.firm_name,
           s.name AS service_name,
   
-          td.*   -- optional: keeps extra fields from tasks (won't affect list-structure)
+          td.*
         ${baseQuery}
       `;
 
@@ -1484,22 +1486,42 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
         const element = rows[0];
 
         // fetch related objects (parallel)
+        // Note: tasks table has no modify_by column — Modified By falls back to create_by.
         const [
             create_by,
             modify_by,
+            complete_by,
             client_profile,
             firm_data,
             service_data,
             staffs,
-            gstSettings
+            gstSettings,
+            client_firms
         ] = await Promise.all([
             safeTaskLookup("create_by", () => USER_SNIPPED_DATA(element?.create_by)),
-            safeTaskLookup("modify_by", () => USER_SNIPPED_DATA(element?.modify_by || element?.create_by)),
+            safeTaskLookup("modify_by", () => USER_SNIPPED_DATA(element?.create_by)),
+            safeTaskLookup(
+                "complete_by",
+                () =>
+                    element?.complete_by
+                        ? USER_SNIPPED_DATA(element.complete_by)
+                        : Promise.resolve(null),
+                null
+            ),
             safeTaskLookup("client_profile", () => USER_SNIPPED_DATA(element?.username)),
             safeTaskLookup("firm_data", () => SINGLE_FIRM_DATA(element?.firm_id), {}),
             safeTaskLookup("service_data", () => SINGLE_SERVICE_DATA(element?.service_id), {}),
             safeTaskLookup("staffs", () => SINGLE_TASK_STAFF_LIST(element?.task_id), []),
             fetchBranchGstSettings(pool, branch_id),
+            safeTaskLookup(
+                "client_firms",
+                () =>
+                    GET_FIRMS_BY_USERNAME({
+                        username: element?.username,
+                        branch_id,
+                    }),
+                []
+            ),
         ]);
 
         const feesNum = Number(element?.fees) || 0;
@@ -1515,10 +1537,17 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 username: element?.username,
                 profile: client_profile
             },
-            firm: {
-                firm_id: firm_data?.firm_id || element?.firm_id,
-                firm_name: firm_data?.firm_name || element?.firm_name || null,
-            },
+            firm: (() => {
+                // Prefer the full firm record (same shape as client firms tab / FirmViewDetails)
+                const full = Array.isArray(client_firms)
+                    ? client_firms.find((f) => f?.firm_id === (firm_data?.firm_id || element?.firm_id))
+                    : null;
+                if (full) return full;
+                return {
+                    firm_id: firm_data?.firm_id || element?.firm_id,
+                    firm_name: firm_data?.firm_name || element?.firm_name || null,
+                };
+            })(),
             service: {
                 service_id: service_data?.service_id,
                 name: service_data?.name
@@ -1532,7 +1561,8 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             dates: {
                 due_date: element?.due_date,
                 create_date: element?.create_date,
-                target_date: element?.target_date
+                target_date: element?.target_date,
+                complete_date: element?.complete_date || null,
             },
             billing_status:
                 element?.billing_status == "0"
@@ -1543,6 +1573,7 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             status: element?.status,
             create_by,
             modify_by,
+            complete_by,
             is_recurring: element?.is_recurring == "1",
             staffs
         };

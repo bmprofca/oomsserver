@@ -459,7 +459,7 @@ async function handleBillingTaskList(req, res) {
                 f.firm_name,
                 s.name AS service_name
             ${baseQuery}
-            ORDER BY t.create_date DESC, t.id DESC
+            ORDER BY t.complete_date DESC, t.id DESC
             LIMIT ? OFFSET ?
         `;
 
