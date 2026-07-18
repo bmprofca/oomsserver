@@ -323,7 +323,7 @@ function parseBillingStatusFilter(statusRaw) {
  * Optional query `status` — empty/null returns all billing statuses.
  * Optional query `username` — exact match on task client username when provided.
  * Optional query `service_id` — filter by task service.
- * Optional query `completed_by` — filter by task modify_by (staff who completed).
+ * Optional query `completed_by` — filter by task complete_by (staff who completed).
  */
 async function handleBillingTaskList(req, res) {
     try {
@@ -386,7 +386,7 @@ async function handleBillingTaskList(req, res) {
         }
 
         if (completedByFilter !== "") {
-            baseQuery += " AND t.modify_by = ?";
+            baseQuery += " AND t.complete_by = ?";
             params.push(completedByFilter);
         }
 
@@ -452,6 +452,8 @@ async function handleBillingTaskList(req, res) {
                 t.status,
                 t.create_date,
                 t.create_by,
+                t.complete_date,
+                t.complete_by,
                 t.is_recurring,
                 f.username AS firm_username,
                 f.firm_name,
@@ -471,7 +473,9 @@ async function handleBillingTaskList(req, res) {
             const element = rows[index];
 
             const create_by = await USER_SNIPPED_DATA(element?.create_by);
-            const modify_by = await USER_SNIPPED_DATA(element?.modify_by || element?.create_by);
+            const complete_by = element?.complete_by
+                ? await USER_SNIPPED_DATA(element?.complete_by)
+                : null;
             const client_profile = await USER_SNIPPED_DATA(element?.username);
             const firm_data = await SINGLE_FIRM_DATA(element?.firm_id);
             const service_data = await SINGLE_SERVICE_DATA(element?.service_id);
@@ -508,12 +512,12 @@ async function handleBillingTaskList(req, res) {
                     due_date: element?.due_date,
                     create_date: element?.create_date,
                     target_date: element?.target_date,
-                    complete_date: element?.target_date,
+                    complete_date: element?.complete_date || element?.target_date,
                 },
                 billing_status: formatBillingStatus(element?.billing_status),
                 status: element?.status,
                 create_by,
-                modify_by,
+                complete_by,
                 is_recurring: element?.is_recurring == "1",
                 staffs
             };
