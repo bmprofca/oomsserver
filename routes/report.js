@@ -22,6 +22,12 @@ import {
 const router = express.Router();
 // ========== GLOBAL HELPER FUNCTIONS (Available to all routes) ==========
 
+// Same normalization as routes/task.js so in_user is returned identically
+function normalizeInUser(value) {
+    if (value === undefined || value === null) return "";
+    return String(value).trim();
+}
+
 // Helper function to get due date category (OD, DT, D7, FT)
 function getDueDateCategory(dueDate) {
     if (!dueDate) return null;
@@ -942,6 +948,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.has_agent,
                 t.agent_id,
                 t.target_date,
+                t.in_user,
                 s.name as service_name,
                 f.firm_name,
                 f.username as firm_username,
@@ -1031,6 +1038,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 '0' AS has_agent,
                 NULL AS agent_id,
                 NULL AS target_date,
+                NULL AS in_user,
                 s.name AS service_name,
                 f.firm_name,
                 f.username AS firm_username,
@@ -1301,6 +1309,10 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             const createdByUser = await USER_SNIPPED_DATA(task.create_by);
             const completedByUser = task.complete_by ? await USER_SNIPPED_DATA(task.complete_by) : null;
 
+            // Same shape as routes/task.js list endpoint: snipped profile or null
+            const inUser = normalizeInUser(task.in_user);
+            const inUserData = inUser ? await USER_SNIPPED_DATA(inUser) : null;
+
             finalData.push({
                 task_id: task.task_id,
                 service: {
@@ -1332,6 +1344,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                     completed_by: completedByUser,
                     task_kind: task.task_kind
                 },
+                in_user: inUserData,
                 financials: {
                     fees: parseFloat(task.fees || 0),
                     tax_rate: 0,
@@ -2642,33 +2655,33 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                     const firms = firmsByUsername[debtor.username] || [];
                     const primaryFirm = firms[0] || null;
                     return {
-                    username: debtor.username,
-                    name: debtor.name || debtor.username,
-                    guardian_name: debtor.guardian_name || '',
-                    care_of: debtor.care_of || '',
-                    mobile: debtor.mobile || '',
-                    email: debtor.email || '',
-                    country_code: debtor.country_code || '',
-                    firms,
-                    firm: primaryFirm ? {
-                        firm_id: primaryFirm.firm_id || '',
-                        firm_name: primaryFirm.firm_name || '',
-                        gst_no: primaryFirm.gst_no || '',
-                        pan_no: primaryFirm.pan_no || ''
-                    } : {
-                        firm_id: debtor.firm_id || '',
-                        firm_name: debtor.firm_name || '',
-                        gst_no: debtor.gst_no || '',
-                        pan_no: debtor.pan_no || ''
-                    },
-                    balance: Number(debtor.total_balance),
-                    balance_type: "debtor",
-                    last_transaction: {
-                        date: debtor.last_transaction_date,
-                        days_ago: debtor.days_since_last_payment,
-                        period: debtor.last_received_in
-                    }
-                };
+                        username: debtor.username,
+                        name: debtor.name || debtor.username,
+                        guardian_name: debtor.guardian_name || '',
+                        care_of: debtor.care_of || '',
+                        mobile: debtor.mobile || '',
+                        email: debtor.email || '',
+                        country_code: debtor.country_code || '',
+                        firms,
+                        firm: primaryFirm ? {
+                            firm_id: primaryFirm.firm_id || '',
+                            firm_name: primaryFirm.firm_name || '',
+                            gst_no: primaryFirm.gst_no || '',
+                            pan_no: primaryFirm.pan_no || ''
+                        } : {
+                            firm_id: debtor.firm_id || '',
+                            firm_name: debtor.firm_name || '',
+                            gst_no: debtor.gst_no || '',
+                            pan_no: debtor.pan_no || ''
+                        },
+                        balance: Number(debtor.total_balance),
+                        balance_type: "debtor",
+                        last_transaction: {
+                            date: debtor.last_transaction_date,
+                            days_ago: debtor.days_since_last_payment,
+                            period: debtor.last_received_in
+                        }
+                    };
                 });
 
                 const [totalDebtors] = await pool.query(

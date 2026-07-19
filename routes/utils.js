@@ -84,10 +84,10 @@ async function checkSmsAvailability(branch_id, notificationType) {
              FROM sms_templates
              WHERE branch_id = ?
                AND status = 'active'
-               AND LOWER(TRIM(template_name)) = ?
+               AND LOWER(TRIM(template_name)) IN (?, REPLACE(?, ' ', '_'), REPLACE(?, ' ', '-'))
              ORDER BY id DESC
              LIMIT 1`,
-            [branch_id, notificationType]
+            [branch_id, notificationType, notificationType, notificationType]
         );
         if (!activeTemplate?.template_id) {
             return channelResult(false, `SMS template is not configured for type '${notificationType}'`);
@@ -119,10 +119,10 @@ async function checkEmailAvailability(branch_id, notificationType) {
              FROM email_static_templates
              WHERE branch_id = ?
                AND status = 'active'
-               AND LOWER(TRIM(template_type)) = ?
+               AND LOWER(TRIM(template_type)) IN (?, REPLACE(?, ' ', '_'), REPLACE(?, ' ', '-'))
              ORDER BY is_default DESC, id DESC
              LIMIT 1`,
-            [branch_id, notificationType]
+            [branch_id, notificationType, notificationType, notificationType]
         );
         if (!activeTemplate?.template_id) {
             return channelResult(false, `Email template is not configured for type '${notificationType}'`);

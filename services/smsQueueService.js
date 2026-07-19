@@ -275,6 +275,91 @@ async function sendSmsViaFast2SMS({ auth_token, route, sender_id, message, varia
     }
 }
 
+async function sendSingleSmsNotification({
+    branch_id,
+    mobile,
+    templateName,
+    variables = {},
+}) {
+    const normalizedType = String(templateName || "").trim().toLowerCase();
+    const normalizedMobile = String(mobile || "").replace(/\D/g, "").slice(-10);
+    if (!branch_id || !normalizedType || normalizedMobile.length !== 10) {
+        throw new Error("A valid branch, template and mobile number are required");
+    }
+
+    const [[config]] = await pool.query(
+        `SELECT config_id
+         FROM sms_configs
+         WHERE branch_id = ? AND status = 'active'
+         ORDER BY is_default DESC, id DESC
+         LIMIT 1`,
+        [branch_id]
+    );
+    if (!config?.config_id) {
+        throw new Error("SMS config is not active");
+    }
+
+    const [[template]] = await pool.query(
+        `SELECT template_id, message, dlt_template_id
+         FROM sms_templates
+         WHERE branch_id = ?
+           AND status = 'active'
+           AND LOWER(TRIM(template_name)) IN (?, REPLACE(?, ' ', '_'), REPLACE(?, ' ', '-'))
+         ORDER BY id DESC
+         LIMIT 1`,
+        [branch_id, normalizedType, normalizedType, normalizedType]
+    );
+    if (!template?.template_id) {
+        throw new Error(`SMS template is not configured for type '${normalizedType}'`);
+    }
+
+    const availableConfigs = await getAvailableConfigs(branch_id, config.config_id);
+    const configInfo = availableConfigs.find(
+        (item) => item.config?.config_id === config.config_id
+    );
+    if (!configInfo?.config) {
+        throw new Error("SMS config is unavailable or its daily limit is reached");
+    }
+
+    await getOrCreateWallet(branch_id);
+    await debitWallet({
+        branch_id,
+        amount: 0.15,
+        purpose: "SMS Billing (Pending)",
+        details: `Payment reminder SMS pending to ${normalizedMobile}`,
+    });
+
+    const smsConfig = configInfo.config;
+    const payload = renderSmsPayload({
+        messageTemplate: template.message,
+        dltTemplateId: template.dlt_template_id,
+        variables,
+        route: smsConfig.route,
+    });
+
+    const result = await sendSmsViaFast2SMS({
+        auth_token: smsConfig.auth_token,
+        route: smsConfig.route,
+        sender_id: smsConfig.sender_id,
+        message: payload.message,
+        variables_values: payload.variables_values,
+        numbers: normalizedMobile,
+    });
+
+    if (!result.success) {
+        await creditWallet({
+            branch_id,
+            amount: 0.15,
+            purpose: "SMS Refund",
+            details: `Refund for failed payment reminder SMS to ${normalizedMobile}`,
+        });
+        throw new Error(result.error || "SMS send failed");
+    }
+
+    await incrementDailyCount(smsConfig.config_id, branch_id);
+    return result;
+}
+
 async function processDueBroadcasts(batchSize = 5) {
     const now = new Date();
     const year = now.getFullYear();
@@ -545,5 +630,6 @@ async function updateBroadcastStatusAndCounts(broadcast_id, branch_id) {
 export {
     processDueBroadcasts,
     processBroadcastRecipients,
-    updateBroadcastStatusAndCounts
+    updateBroadcastStatusAndCounts,
+    sendSingleSmsNotification,
 };

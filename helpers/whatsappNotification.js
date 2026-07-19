@@ -13,6 +13,7 @@ const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/templat
 const TASK_CREATE_TEMPLATE_NAME = "task create";
 const TASK_COMPLETE_TEMPLATE_NAME = "task complete";
 const PAYMENT_RECEIVE_TEMPLATE_NAME = "payment receive";
+const PAYMENT_REMINDER_TEMPLATE_NAME = "payment reminder";
 const WHATSAPP_CHANNEL_ONECHATTING = "onechatting";
 const WHATSAPP_CHANNEL_OOMS_WEB = "ooms web";
 const WHATSAPP_CHANNEL_OOMS_SYSTEM = "ooms system";
@@ -566,6 +567,89 @@ async function sendPaymentReceiveWhatsapp({
     });
 }
 
+async function sendPaymentReminderWhatsapp({
+    branch_id,
+    username,
+    balanceData,
+    sent_by,
+}) {
+    if (!branch_id || !username) {
+        throw new Error("branch_id and username are required");
+    }
+
+    const clientData = await USER_SNIPPED_DATA(username);
+    const recipientNumber = formatWhatsappNumber(
+        clientData?.country_code,
+        clientData?.mobile
+    );
+    if (!recipientNumber) {
+        throw new Error("Client does not have a valid mobile number");
+    }
+
+    const channel = await getBranchWhatsappChannel(branch_id);
+    if (!channel || channel === "disabled") {
+        throw new Error("WhatsApp channel is disabled");
+    }
+    if (channel === WHATSAPP_CHANNEL_ONECHATTING) {
+        const mapping = await loadActiveTemplateMapping(
+            branch_id,
+            PAYMENT_REMINDER_TEMPLATE_NAME
+        );
+        if (!mapping?.onechatting_template_name || !parseStoredComponent(mapping.component)) {
+            throw new Error("Payment reminder WhatsApp template is not configured");
+        }
+        if (!await getBranchDeveloperToken(branch_id)) {
+            throw new Error("OneChatting developer token is not configured");
+        }
+        if (!await getUserOnechattingToken(sent_by, branch_id)) {
+            throw new Error("Your OneChatting user token is not enabled");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
+        const template = await getTemplateBySystemName({
+            branch_id,
+            systemTemplateName: PAYMENT_REMINDER_TEMPLATE_NAME,
+        });
+        if (!template || template.status !== "active" || !template.content) {
+            throw new Error("Payment reminder WhatsApp Web template is not configured");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_SYSTEM) {
+        const [rows] = await pool.query(
+            `SELECT map_id
+             FROM wp_system_template_mapping
+             WHERE branch_id = ? AND status = 1 AND LOWER(TRIM(type)) = ?
+             LIMIT 1`,
+            [branch_id, PAYMENT_REMINDER_TEMPLATE_NAME]
+        );
+        if (!rows[0]?.map_id) {
+            throw new Error("Payment reminder OOMS WhatsApp template is not configured");
+        }
+    } else {
+        throw new Error("Unsupported WhatsApp channel");
+    }
+
+    const rawBalance = Number(balanceData?.balance ?? balanceData?.debit ?? 0);
+    const balance = Math.abs(rawBalance).toFixed(2);
+    const variables = {
+        "{{name}}": clientData?.name != null ? String(clientData.name) : String(username),
+        "{{username}}": String(username),
+        "{{mobile}}": clientData?.mobile != null ? String(clientData.mobile) : "",
+        "{{email}}": clientData?.email != null ? String(clientData.email) : "",
+        "{{balance}}": balance,
+        "{{balance_amount}}": balance,
+        "{{debit_amount}}": Number(balanceData?.debit || 0).toFixed(2),
+        "{{payment_link}}": `${process.env.APP_URL || "https://yourdomain.com"}/payment/${username}`,
+        "{{current_date}}": formatDateOnly(new Date()),
+    };
+
+    await sendWhatsappByChannel({
+        branch_id,
+        systemTemplateName: PAYMENT_REMINDER_TEMPLATE_NAME,
+        senderUsername: sent_by,
+        recipientNumber,
+        variables,
+    });
+}
+
 function notifyPaymentReceiveWhatsapp(params) {
     void sendPaymentReceiveWhatsapp(params).catch((err) => {
         console.error("Payment receive WhatsApp failed:", err?.response?.data || err?.message || err);
@@ -579,8 +663,10 @@ export {
     sendTaskCreatedWhatsapp,
     sendTaskCompletedWhatsapp,
     sendPaymentReceiveWhatsapp,
+    sendPaymentReminderWhatsapp,
     replaceVariablesInValue,
     TASK_CREATE_TEMPLATE_NAME,
     TASK_COMPLETE_TEMPLATE_NAME,
     PAYMENT_RECEIVE_TEMPLATE_NAME,
+    PAYMENT_REMINDER_TEMPLATE_NAME,
 };

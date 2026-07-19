@@ -88,20 +88,20 @@ async function getUserByUsername(branch_id, username) {
          WHERE username = ? AND status = 1`,
         [username]
     );
-    
+
     if (!rows.length) {
         // Check if user exists but inactive
         const [checkUser] = await pool.query(
             `SELECT status FROM profile WHERE username = ?`,
             [username]
         );
-        
+
         if (checkUser.length) {
             throw new Error(`User exists but status is ${checkUser[0].status} (inactive). Please activate first.`);
         }
         throw new Error(`User not found with username: ${username}`);
     }
-    
+
     return rows[0];
 }
 
@@ -109,7 +109,7 @@ async function getUserByUsername(branch_id, username) {
 router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        
+
         const [reminderStats] = await pool.query(
             `SELECT 
                 COUNT(*) as total_reminders,
@@ -123,7 +123,7 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
              LIMIT 6`,
             [branch_id]
         );
-        
+
         const [todayReminders] = await pool.query(
             `SELECT COUNT(*) as total, 
                     SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
@@ -132,7 +132,7 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
              WHERE branch_id = ? AND DATE(sent_at) = CURDATE()`,
             [branch_id]
         );
-        
+
         // FIX: status = 1 for active users
         const [topDebitUsers] = await pool.query(
             `SELECT username, name, email, mobile
@@ -141,7 +141,7 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
              LIMIT 10`,
             []
         );
-        
+
         const usersWithBalance = [];
         for (const user of topDebitUsers) {
             const balanceData = await getUserBalance(branch_id, user.username);
@@ -154,7 +154,7 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
             }
         }
         usersWithBalance.sort((a, b) => b.debit - a.debit);
-        
+
         return ok(res, "Payment reminder statistics", {
             overview: {
                 total_reminders_sent: reminderStats.reduce((sum, r) => sum + r.total_sent, 0),
@@ -165,7 +165,7 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
             monthly_stats: reminderStats,
             top_debit_users: usersWithBalance.slice(0, 10)
         });
-        
+
     } catch (error) {
         console.error("Get stats error:", error);
         return fail(res, error.message);
@@ -181,7 +181,7 @@ async function getUserBalance(branch_id, username) {
             party_id: username,
             party_type: "client"
         });
-        
+
         return balanceData;
     } catch (error) {
         console.error("Error getting balance:", error);
@@ -203,11 +203,11 @@ async function getActivePaymentTemplate(branch_id, template_type = "payment_remi
          LIMIT 1`,
         [branch_id, template_type]
     );
-    
+
     if (!rows.length) {
         throw new Error(`No active ${template_type} template found`);
     }
-    
+
     return {
         ...rows[0],
         variables_json: parseJSON(rows[0].variables_json, [])
@@ -220,23 +220,23 @@ async function getActivePaymentTemplate(branch_id, template_type = "payment_remi
 async function getActiveSmtpConfig(branch_id, config_id = null) {
     let query = `SELECT * FROM email_configs WHERE branch_id = ? AND status = 'active'`;
     let params = [branch_id];
-    
+
     if (config_id) {
         query += ` AND config_id = ?`;
         params.push(config_id);
     } else {
         query += ` ORDER BY is_default DESC LIMIT 1`;
     }
-    
+
     const [rows] = await pool.query(query, params);
-    
+
     if (!rows.length) {
         throw new Error("No active SMTP config found");
     }
-    
+
     const config = rows[0];
     config.password = decrypt(config.password_encrypted);
-    
+
     return config;
 }
 
@@ -253,11 +253,11 @@ async function sendEmail(smtpConfig, to, subject, html, text = null) {
             pass: smtpConfig.password
         }
     });
-    
-    const from = smtpConfig.from_name 
+
+    const from = smtpConfig.from_name
         ? `${smtpConfig.from_name} <${smtpConfig.from_email}>`
         : smtpConfig.from_email;
-    
+
     const mailOptions = {
         from,
         to,
@@ -265,7 +265,7 @@ async function sendEmail(smtpConfig, to, subject, html, text = null) {
         html,
         ...(text && { text })
     };
-    
+
     const result = await transporter.sendMail(mailOptions);
     return result;
 }
@@ -283,19 +283,18 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
          LIMIT 1`,
         [username, branch_id]
     );
-    
+
     // First, check what columns exist in invoice table
     const [columns] = await pool.query(`SHOW COLUMNS FROM invoice`);
     const columnNames = columns.map(col => col.Field);
-    console.log("Invoice table columns:", columnNames);
-    
+
     // Build SELECT query dynamically based on available columns
     let selectFields = ['invoice_id', 'invoice_no', 'create_date as invoice_date', 'grand_total as amount'];
-    
+
     // Check for common column names that might link to user
     let whereClause = '';
     let queryParams = [branch_id];
-    
+
     // Try different possible column names for user association
     if (columnNames.includes('username')) {
         whereClause = ` username = ?`;
@@ -310,56 +309,56 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
         // If no direct user link, don't filter by user
         whereClause = ` 1=1`;
     }
-    
+
     // Check if due_date column exists
     if (columnNames.includes('due_date')) {
         selectFields.push('due_date');
     } else {
         selectFields.push('NULL as due_date');
     }
-    
+
     // Check if payment_status column exists
     if (columnNames.includes('payment_status')) {
         selectFields.push('payment_status');
     }
-    
+
     // Check if status column exists
     if (columnNames.includes('status')) {
         selectFields.push('status');
     }
-    
+
     const selectQuery = selectFields.join(', ');
-    
+
     // Get pending invoices
     let invoiceQuery = `
         SELECT ${selectQuery}
         FROM invoice
         WHERE branch_id = ?
     `;
-    
+
     if (whereClause !== ' 1=1') {
         invoiceQuery += ` AND ${whereClause}`;
     }
-    
+
     // Add payment_status filter if column exists
     if (columnNames.includes('payment_status')) {
         invoiceQuery += ` AND payment_status = 'pending'`;
     }
-    
+
     // Add status filter if column exists
     if (columnNames.includes('status')) {
         invoiceQuery += ` AND status = 'active'`;
     }
-    
+
     invoiceQuery += ` ORDER BY create_date ASC LIMIT 5`;
-    
+
     const [pendingInvoices] = await pool.query(invoiceQuery, queryParams);
-    
+
     // Calculate days overdue for each invoice
     const today = new Date();
     const invoicesWithOverdue = pendingInvoices.map(inv => {
         let daysOverdue = 0;
-        
+
         // Only calculate overdue if due_date exists and has value
         if (inv.due_date && inv.due_date !== '0000-00-00' && inv.due_date !== null) {
             const dueDate = new Date(inv.due_date);
@@ -367,7 +366,7 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
                 daysOverdue = Math.max(0, Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)));
             }
         }
-        
+
         return {
             invoice_id: inv.invoice_id,
             invoice_no: inv.invoice_no,
@@ -378,7 +377,7 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
             formatted_amount: `₹${Number(inv.amount).toLocaleString('en-IN')}`
         };
     });
-    
+
     // Prepare invoice table HTML
     let invoiceTableHtml = '';
     if (invoicesWithOverdue.length > 0) {
@@ -404,10 +403,10 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
     } else {
         invoiceTableHtml = '<p>No pending invoices found.</p>';
     }
-    
+
     const hasDebitBalance = balanceData.debit > 0;
     const formattedBalance = `₹${Math.abs(balanceData.balance).toLocaleString('en-IN')}`;
-    
+
     const maxDaysOverdue = Math.max(...invoicesWithOverdue.map(inv => inv.days_overdue), 0);
     let urgencyLevel = "normal";
     let urgencyBadge = "🟢 Normal";
@@ -424,7 +423,7 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
         urgencyLevel = "low";
         urgencyBadge = "🟢 Low - Overdue";
     }
-    
+
     return {
         // User details
         name: user.name || username,
@@ -437,7 +436,7 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
         state: user.state || '',
         pincode: user.pincode || '',
         pan_number: user.pan_number || 'Not Provided',
-        
+
         // Balance details
         balance: formattedBalance,
         balance_amount: Math.abs(balanceData.balance),
@@ -446,32 +445,32 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
         credit_amount: `₹${balanceData.credit.toLocaleString('en-IN')}`,
         has_debit: hasDebitBalance,
         has_credit: !hasDebitBalance && balanceData.credit > 0,
-        
+
         // Firm details
         firm_name: firm.length ? firm[0].firm_name : 'Your Firm',
         firm_type: firm.length ? firm[0].firm_type : '',
         gst_no: firm.length ? firm[0].gst_no : '',
         pan_no: firm.length ? firm[0].pan_no : '',
-        
+
         // Invoice details
         total_invoices: pendingInvoices.length,
         total_due_amount: `₹${pendingInvoices.reduce((sum, inv) => sum + Number(inv.amount), 0).toLocaleString('en-IN')}`,
         invoice_table: invoiceTableHtml,
         pending_invoices: invoicesWithOverdue,
-        
+
         // Urgency
         urgency_level: urgencyLevel,
         urgency_badge: urgencyBadge,
         max_days_overdue: maxDaysOverdue,
-        
+
         // Date and time
         current_date: new Date().toLocaleDateString('en-GB'),
         current_time: new Date().toLocaleTimeString(),
         current_year: new Date().getFullYear(),
-        
+
         // Payment link
         payment_link: `${process.env.APP_URL || 'https://yourdomain.com'}/payment/${username}`,
-        
+
         // Support contact
         support_email: process.env.SUPPORT_EMAIL || 'support@yourdomain.com',
         support_phone: process.env.SUPPORT_PHONE || '+91-XXXXXXXXXX'
@@ -487,19 +486,19 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
     try {
         const branch_id = req.branch_id;
         const { username, config_id, template_type = "payment_reminder" } = req.body || {};
-        
+
         if (!username) {
             return fail(res, "username is required");
         }
-        
+
         const user = await getUserByUsername(branch_id, username);
-        
+
         if (!user.email) {
             return fail(res, `User ${username} does not have an email address`);
         }
-        
+
         const balanceData = await getUserBalance(branch_id, username);
-        
+
         if (balanceData.debit <= 0) {
             return ok(res, "User has no debit balance. Payment reminder not sent.", {
                 username,
@@ -511,17 +510,17 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
                 reason: "No debit balance found"
             });
         }
-        
+
         const template = await getActivePaymentTemplate(branch_id, template_type);
         const smtpConfig = await getActiveSmtpConfig(branch_id, config_id);
         const variables = await preparePaymentReminderVariables(branch_id, username, user, balanceData);
-        
+
         const subject = renderTemplate(template.subject, variables);
         const htmlBody = renderTemplate(template.html_body, variables);
         const textBody = template.text_body ? renderTemplate(template.text_body, variables) : null;
-        
+
         const sendResult = await sendEmail(smtpConfig, user.email, subject, htmlBody, textBody);
-        
+
         // Create payment_reminder_logs table if not exists
         await pool.query(`
             CREATE TABLE IF NOT EXISTS payment_reminder_logs (
@@ -538,14 +537,14 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
                 sent_at DATETIME
             )
         `);
-        
+
         await pool.query(
             `INSERT INTO payment_reminder_logs 
              (log_id, branch_id, username, email, balance_debit, template_id, status, message_id, sent_at)
              VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, NOW())`,
             [newId("prl"), branch_id, username, user.email, balanceData.debit, template.template_id, sendResult.messageId]
         );
-        
+
         return ok(res, "Payment reminder sent successfully", {
             username,
             email: user.email,
@@ -554,7 +553,7 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
             reminder_sent: true,
             message_id: sendResult.messageId
         });
-        
+
     } catch (error) {
         console.error("Send payment reminder error:", error);
         return fail(res, error.message);
@@ -569,11 +568,11 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
     try {
         const branch_id = req.branch_id;
         const { usernames, config_id, template_type = "payment_reminder" } = req.body || {};
-        
+
         if (!usernames || !Array.isArray(usernames) || usernames.length === 0) {
             return fail(res, "usernames array is required");
         }
-        
+
         const results = {
             total: usernames.length,
             sent: 0,
@@ -581,19 +580,19 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
             failed: 0,
             details: []
         };
-        
+
         for (const username of usernames) {
             try {
                 const user = await getUserByUsername(branch_id, username);
-                
+
                 if (!user.email) {
                     results.skipped++;
                     results.details.push({ username, status: "skipped", reason: "No email address" });
                     continue;
                 }
-                
+
                 const balanceData = await getUserBalance(branch_id, username);
-                
+
                 if (balanceData.debit <= 0) {
                     results.skipped++;
                     results.details.push({
@@ -605,17 +604,17 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
                     });
                     continue;
                 }
-                
+
                 const template = await getActivePaymentTemplate(branch_id, template_type);
                 const smtpConfig = await getActiveSmtpConfig(branch_id, config_id);
                 const variables = await preparePaymentReminderVariables(branch_id, username, user, balanceData);
-                
+
                 const subject = renderTemplate(template.subject, variables);
                 const htmlBody = renderTemplate(template.html_body, variables);
                 const textBody = template.text_body ? renderTemplate(template.text_body, variables) : null;
-                
+
                 const sendResult = await sendEmail(smtpConfig, user.email, subject, htmlBody, textBody);
-                
+
                 results.sent++;
                 results.details.push({
                     username,
@@ -624,18 +623,18 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
                     debit: balanceData.debit,
                     message_id: sendResult.messageId
                 });
-                
+
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                
+
             } catch (error) {
                 console.error(`Error sending to ${username}:`, error);
                 results.failed++;
                 results.details.push({ username, status: "failed", reason: error.message });
             }
         }
-        
+
         return ok(res, "Bulk payment reminders processed", results);
-        
+
     } catch (error) {
         console.error("Bulk send error:", error);
         return fail(res, error.message);
@@ -653,7 +652,7 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
         const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
         const offset = (page_no - 1) * limit;
         const search = req.query.search ? String(req.query.search).trim() : "";
-        
+
         // Get all active users - status = 1 (active)
         let userQuery = `
             SELECT username, name, email, mobile, city, state, pan_number, status, create_date
@@ -661,18 +660,18 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
             WHERE status = 1
         `;
         const queryParams = [];
-        
+
         if (search) {
             userQuery += ` AND (username LIKE ? OR name LIKE ? OR email LIKE ? OR mobile LIKE ?)`;
             const searchPattern = `%${search}%`;
             queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
         }
-        
+
         userQuery += ` LIMIT ? OFFSET ?`;
         queryParams.push(limit, offset);
-        
+
         const [users] = await pool.query(userQuery, queryParams);
-        
+
         // Get total count
         let countQuery = `SELECT COUNT(*) as total FROM profile WHERE status = 1`;
         const countParams = [];
@@ -682,7 +681,7 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
         }
         const [countRows] = await pool.query(countQuery, countParams);
         const total = countRows[0]?.total || 0;
-        
+
         // Get balance for each user
         const usersWithBalance = [];
         for (const user of users) {
@@ -695,12 +694,12 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
                 has_debit: balanceData.debit > 0
             });
         }
-        
+
         const filterDebitOnly = req.query.debit_only === 'true';
-        const filteredUsers = filterDebitOnly 
+        const filteredUsers = filterDebitOnly
             ? usersWithBalance.filter(u => u.has_debit)
             : usersWithBalance;
-        
+
         const summary = {
             total_users: total,
             total_with_debit: usersWithBalance.filter(u => u.has_debit).length,
@@ -709,7 +708,7 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
             total_debit_amount: usersWithBalance.reduce((sum, u) => sum + (u.debit || 0), 0),
             total_credit_amount: usersWithBalance.reduce((sum, u) => sum + (u.credit || 0), 0)
         };
-        
+
         return ok(res, "Users list retrieved successfully", {
             filters: {
                 search: search || null,
@@ -725,7 +724,7 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
                 has_more: offset + filteredUsers.length < filteredUsers.length
             }
         });
-        
+
     } catch (error) {
         console.error("Get users list error:", error);
         return fail(res, error.message);
@@ -744,29 +743,29 @@ router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
         const offset = (page_no - 1) * limit;
         const username = req.query.username;
         const status = req.query.status;
-        
+
         let query = `
             SELECT log_id, username, email, balance_debit, status, message_id, error_message, sent_at
             FROM payment_reminder_logs
             WHERE branch_id = ?
         `;
         const params = [branch_id];
-        
+
         if (username) {
             query += ` AND username = ?`;
             params.push(username);
         }
-        
+
         if (status && ['sent', 'failed'].includes(status)) {
             query += ` AND status = ?`;
             params.push(status);
         }
-        
+
         query += ` ORDER BY sent_at DESC LIMIT ? OFFSET ?`;
         params.push(limit, offset);
-        
+
         const [logs] = await pool.query(query, params);
-        
+
         let countQuery = `SELECT COUNT(*) as total FROM payment_reminder_logs WHERE branch_id = ?`;
         const countParams = [branch_id];
         if (username) {
@@ -779,7 +778,7 @@ router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
         }
         const [countRows] = await pool.query(countQuery, countParams);
         const total = countRows[0]?.total || 0;
-        
+
         return ok(res, "Logs retrieved successfully", logs, {
             page_no,
             limit,
@@ -787,7 +786,7 @@ router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
             total_pages: Math.ceil(total / limit),
             has_more: offset + logs.length < total
         });
-        
+
     } catch (error) {
         console.error("Get logs error:", error);
         return fail(res, error.message);
@@ -803,27 +802,27 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
         const branch_id = req.branch_id;
         const username = userFromReq(req);
         const { template_name, subject, html_body, text_body, is_default = 0, template_id } = req.body || {};
-        
+
         if (!template_name || !subject || !html_body) {
             return fail(res, "template_name, subject and html_body are required");
         }
-        
+
         const template_type = "payment_reminder";
         const variables = parseVariables(subject, html_body, text_body);
-        
+
         let result;
-        
+
         if (template_id) {
             const [existing] = await pool.query(
                 `SELECT template_id FROM email_static_templates 
                  WHERE branch_id = ? AND template_id = ? AND template_type = ?`,
                 [branch_id, template_id, template_type]
             );
-            
+
             if (!existing.length) {
                 return fail(res, "Template not found", 404);
             }
-            
+
             if (Number(is_default) === 1) {
                 await pool.query(
                     `UPDATE email_static_templates 
@@ -832,20 +831,20 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
                     [username, branch_id, template_type]
                 );
             }
-            
+
             await pool.query(
                 `UPDATE email_static_templates 
                  SET template_name = ?, subject = ?, html_body = ?, text_body = ?, 
                      variables_json = ?, is_default = ?, modify_by = ?, modify_date = NOW()
                  WHERE branch_id = ? AND template_id = ? AND template_type = ?`,
-                [template_name, subject, html_body, text_body, JSON.stringify(variables), 
-                 Number(is_default), username, branch_id, template_id, template_type]
+                [template_name, subject, html_body, text_body, JSON.stringify(variables),
+                    Number(is_default), username, branch_id, template_id, template_type]
             );
-            
+
             result = { template_id };
         } else {
             const newTemplateId = newId("stpl");
-            
+
             if (Number(is_default) === 1) {
                 await pool.query(
                     `UPDATE email_static_templates 
@@ -854,21 +853,21 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
                     [username, branch_id, template_type]
                 );
             }
-            
+
             await pool.query(
                 `INSERT INTO email_static_templates 
                  (template_id, branch_id, template_type, template_name, subject, html_body, text_body, 
                   variables_json, status, is_default, create_by, modify_by, create_date, modify_date)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, NOW(), NOW())`,
                 [newTemplateId, branch_id, template_type, template_name, subject, html_body, text_body,
-                 JSON.stringify(variables), Number(is_default), username, username]
+                    JSON.stringify(variables), Number(is_default), username, username]
             );
-            
+
             result = { template_id: newTemplateId };
         }
-        
+
         return ok(res, "Payment reminder template saved successfully", result);
-        
+
     } catch (error) {
         console.error("Save template error:", error);
         return fail(res, error.message);
@@ -882,7 +881,7 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
 router.get("/payment-reminder/template", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        
+
         const [templates] = await pool.query(
             `SELECT template_id, template_name, subject, html_body, text_body, variables_json, is_default, status, create_date
              FROM email_static_templates 
@@ -890,9 +889,9 @@ router.get("/payment-reminder/template", auth, validateBranch, async (req, res) 
              ORDER BY is_default DESC, create_date DESC`,
             [branch_id]
         );
-        
+
         const defaultTemplate = templates.find(t => t.is_default === 1) || templates[0];
-        
+
         return ok(res, "Template retrieved successfully", {
             templates: templates.map(t => ({
                 ...t,
@@ -903,7 +902,7 @@ router.get("/payment-reminder/template", auth, validateBranch, async (req, res) 
                 variables_json: parseJSON(defaultTemplate.variables_json, [])
             } : null
         });
-        
+
     } catch (error) {
         console.error("Get template error:", error);
         return fail(res, error.message);
@@ -955,8 +954,16 @@ router.get("/payment-reminder/variables", auth, validateBranch, async (req, res)
             { name: "support_phone", description: "Support phone" }
         ]
     };
-    
+
     return ok(res, "Available variables", variables);
 });
+
+export {
+    getActivePaymentTemplate,
+    getActiveSmtpConfig,
+    preparePaymentReminderVariables,
+    renderTemplate,
+    sendEmail,
+};
 
 export default router;

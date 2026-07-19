@@ -25,6 +25,15 @@ import fs from "fs";
 import multer from "multer";
 import xlsx from "xlsx";
 import moment from "moment";
+import {
+    getActivePaymentTemplate,
+    getActiveSmtpConfig,
+    preparePaymentReminderVariables,
+    renderTemplate,
+    sendEmail,
+} from "./payment_reminder.js";
+import { sendPaymentReminderWhatsapp } from "../helpers/whatsappNotification.js";
+import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
 
@@ -162,6 +171,206 @@ router.get("/check-pan", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to check PAN",
             error: error.message
+        });
+    }
+});
+
+router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const sent_by = req.headers.username || req.headers.Username || "";
+        const rawUsernames = Array.isArray(req.body?.usernames)
+            ? req.body.usernames
+            : req.body?.username
+              ? [req.body.username]
+              : [];
+        const usernames = [
+            ...new Set(rawUsernames.map((item) => String(item || "").trim()).filter(Boolean)),
+        ];
+        const requestedChannels = Array.isArray(req.body?.channels)
+            ? [...new Set(req.body.channels.map((item) => String(item).trim().toLowerCase()))]
+            : [];
+        const allowedChannels = new Set(["email", "sms", "whatsapp"]);
+        const channels = requestedChannels.filter((channel) => allowedChannels.has(channel));
+
+        if (usernames.length === 0) {
+            return res.status(400).json({ success: false, message: "usernames array is required" });
+        }
+        if (usernames.length > 100) {
+            return res.status(400).json({
+                success: false,
+                message: "A maximum of 100 clients can be processed at once",
+            });
+        }
+        if (channels.length === 0 || channels.length !== requestedChannels.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Select at least one valid channel: email, sms or whatsapp",
+            });
+        }
+
+        const summary = {
+            total: usernames.length,
+            sent: 0,
+            partial: 0,
+            skipped: 0,
+            failed: 0,
+            details: [],
+        };
+
+        for (const username of usernames) {
+            try {
+                const [clientRows] = await pool.query(
+                    `SELECT p.*
+                     FROM profile p
+                     INNER JOIN clients c
+                        ON c.username = p.username
+                       AND c.branch_id = ?
+                       AND c.user_type = 'client'
+                       AND c.is_deleted = '0'
+                     WHERE p.username = ? AND p.status = '1'
+                     ORDER BY p.id DESC
+                     LIMIT 1`,
+                    [branch_id, username]
+                );
+                const client = clientRows[0];
+                if (!client) {
+                    summary.failed += 1;
+                    summary.details.push({
+                        username,
+                        status: "failed",
+                        reason: "Client not found",
+                        channels: {},
+                    });
+                    continue;
+                }
+
+                // Always recalculate on the server. Never trust the list balance sent by the client.
+                const balanceData = await GET_BALANCE({
+                    branch_id,
+                    party_id: username,
+                    party_type: "client",
+                });
+                if (Number(balanceData?.debit || 0) <= 0) {
+                    summary.skipped += 1;
+                    summary.details.push({
+                        username,
+                        status: "skipped",
+                        reason: "No debit balance",
+                        balance: Number(balanceData?.balance || 0),
+                        channels: {},
+                    });
+                    continue;
+                }
+
+                const variables = await preparePaymentReminderVariables(
+                    branch_id,
+                    username,
+                    client,
+                    balanceData
+                );
+                const channelResults = {};
+
+                for (const channel of channels) {
+                    try {
+                        if (channel === "email") {
+                            if (!client.email) throw new Error("Client does not have an email address");
+                            const template = await getActivePaymentTemplate(branch_id, "payment_reminder");
+                            const smtpConfig = await getActiveSmtpConfig(branch_id);
+                            const sendResult = await sendEmail(
+                                smtpConfig,
+                                client.email,
+                                renderTemplate(template.subject, variables),
+                                renderTemplate(template.html_body, variables),
+                                template.text_body
+                                    ? renderTemplate(template.text_body, variables)
+                                    : null
+                            );
+                            channelResults.email = {
+                                status: "sent",
+                                message_id: sendResult.messageId || null,
+                            };
+                        } else if (channel === "sms") {
+                            if (!client.mobile) throw new Error("Client does not have a mobile number");
+                            const sendResult = await sendSingleSmsNotification({
+                                branch_id,
+                                mobile: client.mobile,
+                                templateName: "payment reminder",
+                                variables,
+                            });
+                            channelResults.sms = {
+                                status: "sent",
+                                message_id: sendResult.request_id || null,
+                            };
+                        } else if (channel === "whatsapp") {
+                            await sendPaymentReminderWhatsapp({
+                                branch_id,
+                                username,
+                                balanceData,
+                                sent_by,
+                            });
+                            channelResults.whatsapp = { status: "sent" };
+                        }
+                    } catch (channelError) {
+                        console.error(`Payment reminder ${channel} failed for ${username}:`, channelError);
+                        channelResults[channel] = {
+                            status: "failed",
+                            reason:
+                                channelError?.response?.data?.message ||
+                                channelError?.message ||
+                                `Failed to send via ${channel}`,
+                        };
+                    }
+                }
+
+                const sentChannels = Object.values(channelResults).filter(
+                    (result) => result.status === "sent"
+                ).length;
+                const status =
+                    sentChannels === channels.length
+                        ? "sent"
+                        : sentChannels > 0
+                          ? "partial"
+                          : "failed";
+
+                if (status === "sent") summary.sent += 1;
+                else if (status === "partial") summary.partial += 1;
+                else summary.failed += 1;
+
+                summary.details.push({
+                    username,
+                    status,
+                    balance: Number(balanceData.balance || balanceData.debit || 0),
+                    channels: channelResults,
+                });
+            } catch (clientError) {
+                console.error(`Payment reminder failed for ${username}:`, clientError);
+                summary.failed += 1;
+                summary.details.push({
+                    username,
+                    status: "failed",
+                    reason: clientError?.message || "Failed to process client",
+                    channels: {},
+                });
+            }
+        }
+
+        const delivered = summary.sent + summary.partial;
+        return res.status(200).json({
+            success: delivered > 0,
+            message:
+                delivered === summary.total
+                    ? `Payment reminders sent to ${delivered} client${delivered === 1 ? "" : "s"}`
+                    : delivered > 0
+                      ? `Payment reminders sent to ${delivered} of ${summary.total} clients`
+                      : "Payment reminders could not be sent",
+            data: summary,
+        });
+    } catch (error) {
+        console.error("Client payment reminder error:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to send payment reminder",
         });
     }
 });
