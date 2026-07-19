@@ -179,12 +179,15 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const sent_by = req.headers.username || req.headers.Username || "";
-        const rawUsernames = Array.isArray(req.body?.usernames)
-            ? req.body.usernames
-            : req.body?.username
-              ? [req.body.username]
-              : [];
-        const usernames = [
+        const isAll = req.body?.is_all === true || req.body?.is_all === "true";
+        const rawUsernames = isAll
+            ? []
+            : Array.isArray(req.body?.usernames)
+                ? req.body.usernames
+                : req.body?.username
+                    ? [req.body.username]
+                    : [];
+        let usernames = [
             ...new Set(rawUsernames.map((item) => String(item || "").trim()).filter(Boolean)),
         ];
         const requestedChannels = Array.isArray(req.body?.channels)
@@ -193,10 +196,10 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
         const allowedChannels = new Set(["email", "sms", "whatsapp"]);
         const channels = requestedChannels.filter((channel) => allowedChannels.has(channel));
 
-        if (usernames.length === 0) {
+        if (!isAll && usernames.length === 0) {
             return res.status(400).json({ success: false, message: "usernames array is required" });
         }
-        if (usernames.length > 100) {
+        if (!isAll && usernames.length > 100) {
             return res.status(400).json({
                 success: false,
                 message: "A maximum of 100 clients can be processed at once",
@@ -209,8 +212,33 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
             });
         }
 
+        if (isAll) {
+            const [allClientRows] = await pool.query(
+                `SELECT DISTINCT p.username
+                 FROM profile p
+                 INNER JOIN clients c
+                    ON c.username = p.username
+                   AND c.branch_id = ?
+                   AND c.user_type = 'client'
+                   AND c.is_deleted = '0'
+                 WHERE p.status = '1'
+                   AND p.username IS NOT NULL
+                   AND TRIM(p.username) <> ''`,
+                [branch_id]
+            );
+            usernames = allClientRows.map((row) => String(row.username).trim());
+        }
+
+        if (usernames.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No active clients found",
+            });
+        }
+
         const summary = {
             total: usernames.length,
+            is_all: isAll,
             sent: 0,
             partial: 0,
             skipped: 0,
@@ -330,8 +358,8 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
                     sentChannels === channels.length
                         ? "sent"
                         : sentChannels > 0
-                          ? "partial"
-                          : "failed";
+                            ? "partial"
+                            : "failed";
 
                 if (status === "sent") summary.sent += 1;
                 else if (status === "partial") summary.partial += 1;
@@ -362,8 +390,8 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
                 delivered === summary.total
                     ? `Payment reminders sent to ${delivered} client${delivered === 1 ? "" : "s"}`
                     : delivered > 0
-                      ? `Payment reminders sent to ${delivered} of ${summary.total} clients`
-                      : "Payment reminders could not be sent",
+                        ? `Payment reminders sent to ${delivered} of ${summary.total} clients`
+                        : "Payment reminders could not be sent",
             data: summary,
         });
     } catch (error) {
@@ -707,11 +735,46 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const queryParams = [branch_id];
 
-        // Add search filter if provided
-        if (search) {
-            const searchPattern = `%${search}%`;
-            query += ` AND (p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR p.pan_number LIKE ?)`;
-            queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+        // Add search filter if provided (profile + firm details)
+        if (search && String(search).trim() !== "") {
+            const searchPattern = `%${String(search).trim()}%`;
+            query += ` AND (
+                c.username LIKE ?
+                OR p.name LIKE ?
+                OR p.mobile LIKE ?
+                OR p.email LIKE ?
+                OR p.pan_number LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM firms f
+                    WHERE f.username = c.username
+                      AND f.branch_id = c.branch_id
+                      AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                      AND (
+                          IFNULL(f.firm_name, '') LIKE ?
+                          OR IFNULL(f.pan_no, '') LIKE ?
+                          OR IFNULL(f.gst_no, '') LIKE ?
+                          OR IFNULL(f.vat_no, '') LIKE ?
+                          OR IFNULL(f.tan_no, '') LIKE ?
+                          OR IFNULL(f.cin_no, '') LIKE ?
+                          OR IFNULL(f.file_no, '') LIKE ?
+                      )
+                )
+            )`;
+            queryParams.push(
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern
+            );
         }
 
         // Get total count for pagination

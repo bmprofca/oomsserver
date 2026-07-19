@@ -78,11 +78,12 @@ function clientBalanceSearchHaving(search) {
             OR MAX(p.email) LIKE ?
             OR agg.username LIKE ?
             OR MAX(p.guardian_name) LIKE ?
+            OR MAX(p.pan_number) LIKE ?
             OR MAX(f.firm_name) LIKE ?
             OR MAX(f.gst_no) LIKE ?
             OR MAX(f.pan_no) LIKE ?
         )`,
-        params: Array(8).fill(pattern),
+        params: Array(9).fill(pattern),
     };
 }
 
@@ -143,6 +144,7 @@ export function clientBalanceListSql(side, search = "", balanceAfter = 0) {
             MAX(p.name) AS name,
             MAX(p.guardian_name) AS guardian_name,
             MAX(p.care_of) AS care_of,
+            MAX(p.pan_number) AS pan_number,
             MAX(p.mobile) AS mobile,
             MAX(p.email) AS email,
             MAX(p.country_code) AS country_code,
