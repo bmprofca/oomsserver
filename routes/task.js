@@ -2,7 +2,8 @@ import express from "express";
 import pool from "../db.js";
 import { fetchPermissionRoleById } from "../helpers/permissionRole.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA, GET_FIRMS_BY_USERNAME } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA, GET_FIRMS_BY_USERNAME, TODAY_DATE } from "../helpers/function.js";
+import { executeCreatePurchase } from "../helpers/purchaseCreate.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
@@ -4215,6 +4216,338 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to fetch staff pending task summary",
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * CA billing list — tasks where has_ca=1 and ca_id matches username,
+ * filtered by is_ca_purchased status (0 pending / 1 generated / 2 cancelled).
+ * GET /task/ca-billing/list?page_no&limit&search&username&status
+ */
+router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const page_no = Math.max(1, Number(req.query?.page_no) || 1);
+        const limit = Math.min(100, Math.max(1, Number(req.query?.limit) || 20));
+        const offset = (page_no - 1) * limit;
+        const search = req.query?.search != null ? String(req.query.search).trim() : "";
+        const caUsername = req.query?.username != null ? String(req.query.username).trim() : "";
+        const statusRaw = req.query?.status != null ? String(req.query.status).trim() : "0";
+        const statusNum = Number(statusRaw);
+
+        if (!caUsername) {
+            return res.status(400).json({ success: false, message: "username (CA) is required" });
+        }
+        if (![0, 1, 2].includes(statusNum)) {
+            return res.status(400).json({
+                success: false,
+                message: "status must be 0 (pending), 1 (generated), or 2 (cancelled)",
+            });
+        }
+
+        let baseQuery = `
+            FROM tasks t
+            LEFT JOIN firms f
+                ON f.firm_id = t.firm_id
+                AND (f.is_deleted = '0' OR f.is_deleted = 0)
+            LEFT JOIN services s
+                ON s.service_id = t.service_id
+            LEFT JOIN profile p
+                ON p.username = t.username
+                AND p.status = '1'
+                AND p.id = (
+                    SELECT MAX(p2.id) FROM profile p2
+                    WHERE p2.username = t.username AND p2.status = '1'
+                )
+            WHERE t.branch_id = ?
+              AND t.has_ca = '1'
+              AND t.ca_id = ?
+              AND t.is_ca_purchased = ?
+        `;
+        const params = [branch_id, caUsername, statusNum];
+
+        if (search) {
+            const sp = `%${search}%`;
+            baseQuery += `
+              AND (
+                  t.task_id LIKE ?
+                  OR t.username LIKE ?
+                  OR IFNULL(p.name, '') LIKE ?
+                  OR IFNULL(f.firm_name, '') LIKE ?
+                  OR IFNULL(s.name, '') LIKE ?
+                  OR IFNULL(s.service_id, '') LIKE ?
+              )
+            `;
+            params.push(sp, sp, sp, sp, sp, sp);
+        }
+
+        const [countRows] = await pool.query(`SELECT COUNT(*) AS total ${baseQuery}`, params);
+        const total = Number(countRows[0]?.total) || 0;
+        const total_pages = Math.max(1, Math.ceil(total / limit));
+
+        const [rows] = await pool.query(
+            `SELECT
+                t.task_id,
+                t.username,
+                t.firm_id,
+                t.service_id,
+                t.has_ca,
+                t.ca_id,
+                t.fees,
+                t.total,
+                t.due_date,
+                t.create_date,
+                t.status,
+                t.is_ca_purchased,
+                f.firm_name,
+                s.name AS service_name
+             ${baseQuery}
+             ORDER BY t.create_date DESC, t.id DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
+        );
+
+        const data = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const client_profile = await USER_SNIPPED_DATA(row.username);
+            const firm_data = row.firm_id ? await SINGLE_FIRM_DATA(row.firm_id) : null;
+            const service_data = row.service_id ? await SINGLE_SERVICE_DATA(row.service_id) : null;
+            const feesNum = Number(row.fees) || 0;
+
+            data.push({
+                task_id: row.task_id,
+                client: {
+                    username: row.username,
+                    profile: client_profile,
+                },
+                firm: {
+                    firm_id: firm_data?.firm_id || row.firm_id || null,
+                    firm_name: firm_data?.firm_name || row.firm_name || null,
+                },
+                service: {
+                    service_id: service_data?.service_id || row.service_id || null,
+                    name: service_data?.name || row.service_name || null,
+                },
+                charges: {
+                    fees: feesNum,
+                    total: Number(row.total) || feesNum,
+                },
+                dates: {
+                    due_date: row.due_date,
+                    create_date: row.create_date,
+                },
+                status: row.status,
+                is_ca_purchased: Number(row.is_ca_purchased) || 0,
+                ca_id: row.ca_id,
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "CA billing list retrieved successfully",
+            data,
+            pagination: {
+                page_no,
+                limit,
+                total,
+                total_pages,
+                is_last_page: page_no >= total_pages || offset + data.length >= total,
+            },
+        });
+    } catch (error) {
+        console.error("CA billing list error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch CA billing list",
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * Generate CA purchase for a pending task (is_ca_purchased = 0 → 1).
+ * POST /task/ca-billing/generate  { task_id }
+ */
+router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        const branch_id = req.branch_id;
+        const create_by = req.headers["username"] || req.headers["Username"] || "";
+        const task_id = req.body?.task_id != null ? String(req.body.task_id).trim() : "";
+
+        if (!task_id) {
+            return res.status(400).json({ success: false, message: "task_id is required" });
+        }
+
+        await connection.beginTransaction();
+
+        const [taskRows] = await connection.query(
+            `SELECT task_id, service_id, fees, has_ca, ca_id, is_ca_purchased
+             FROM tasks
+             WHERE branch_id = ? AND task_id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [branch_id, task_id]
+        );
+        const task = taskRows[0];
+        if (!task) {
+            await connection.rollback();
+            return res.status(404).json({ success: false, message: "Task not found" });
+        }
+        if (String(task.has_ca) !== "1" || !task.ca_id) {
+            await connection.rollback();
+            return res.status(400).json({ success: false, message: "Task does not have a CA assigned" });
+        }
+        if (Number(task.is_ca_purchased) !== 0) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message:
+                    Number(task.is_ca_purchased) === 1
+                        ? "CA purchase already generated for this task"
+                        : "CA purchase was cancelled for this task",
+            });
+        }
+
+        const feesNum = Number(task.fees);
+        if (!Number.isFinite(feesNum) || feesNum <= 0) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "Task fees must be greater than 0 to generate CA purchase",
+            });
+        }
+        if (!task.service_id) {
+            await connection.rollback();
+            return res.status(400).json({ success: false, message: "Task has no service_id" });
+        }
+
+        const purchaseData = await executeCreatePurchase({
+            connection,
+            branch_id,
+            create_by,
+            party_id: task.ca_id,
+            party_type: "ca",
+            transaction_date: TODAY_DATE(),
+            remark: `CA purchase for task ${task_id}`,
+            items: [
+                {
+                    service_id: task.service_id,
+                    fees: feesNum,
+                    remark: task_id,
+                },
+            ],
+        });
+
+        const [updateResult] = await connection.query(
+            `UPDATE tasks
+             SET is_ca_purchased = 1
+             WHERE branch_id = ? AND task_id = ? AND is_ca_purchased = 0`,
+            [branch_id, task_id]
+        );
+        if (!updateResult?.affectedRows) {
+            await connection.rollback();
+            return res.status(409).json({
+                success: false,
+                message: "Task CA purchase status changed concurrently. Please refresh and try again.",
+            });
+        }
+
+        await connection.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: "CA purchase generated successfully",
+            data: {
+                task_id,
+                is_ca_purchased: 1,
+                purchase: purchaseData,
+            },
+        });
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch (_) {
+            /* ignore */
+        }
+        console.error("CA billing generate error:", error);
+        const status = error?.status || 500;
+        return res.status(status).json({
+            success: false,
+            message: error.message || "Failed to generate CA purchase",
+            error: error.message,
+        });
+    } finally {
+        connection.release();
+    }
+});
+
+/**
+ * Cancel pending CA purchase (is_ca_purchased = 0 → 2). No purchase reversal.
+ * POST /task/ca-billing/cancel  { task_id }
+ */
+router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const task_id = req.body?.task_id != null ? String(req.body.task_id).trim() : "";
+
+        if (!task_id) {
+            return res.status(400).json({ success: false, message: "task_id is required" });
+        }
+
+        const [taskRows] = await pool.query(
+            `SELECT task_id, has_ca, ca_id, is_ca_purchased
+             FROM tasks
+             WHERE branch_id = ? AND task_id = ?
+             LIMIT 1`,
+            [branch_id, task_id]
+        );
+        const task = taskRows[0];
+        if (!task) {
+            return res.status(404).json({ success: false, message: "Task not found" });
+        }
+        if (String(task.has_ca) !== "1" || !task.ca_id) {
+            return res.status(400).json({ success: false, message: "Task does not have a CA assigned" });
+        }
+        if (Number(task.is_ca_purchased) !== 0) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    Number(task.is_ca_purchased) === 1
+                        ? "Cannot cancel — CA purchase already generated"
+                        : "CA purchase already cancelled",
+            });
+        }
+
+        const [updateResult] = await pool.query(
+            `UPDATE tasks
+             SET is_ca_purchased = 2
+             WHERE branch_id = ? AND task_id = ? AND is_ca_purchased = 0`,
+            [branch_id, task_id]
+        );
+        if (!updateResult?.affectedRows) {
+            return res.status(409).json({
+                success: false,
+                message: "Task CA purchase status changed concurrently. Please refresh and try again.",
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "CA purchase cancelled successfully",
+            data: {
+                task_id,
+                is_ca_purchased: 2,
+            },
+        });
+    } catch (error) {
+        console.error("CA billing cancel error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to cancel CA purchase",
             error: error.message,
         });
     }
