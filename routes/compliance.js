@@ -1141,8 +1141,6 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                 asOfDate: new Date(),
                 settings: gstSettingsSpawn,
             });
-            const taxRateNum = spawnGst.tax_rate;
-            const taxValueNum = spawnGst.tax_value;
             const totalNum = spawnGst.total;
 
             const completeDate = statusVal === "complete" ? new Date() : null;
@@ -1155,7 +1153,7 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                  (branch_id, task_id, task_type, compliance_year, compliance_period, username, firm_id, service_id,
                   has_ca, ca_id, has_agent, agent_id, fees, total, create_by, is_recurring,
                   due_date, target_date, billing_status, status, complete_date, complete_by, cancelled_date, cancelled_by)
-                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     taskId,
@@ -1169,8 +1167,6 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                     agentId ? "1" : "0",
                     agentId,
                     feesNum,
-                    taxRateNum,
-                    taxValueNum,
                     totalNum,
                     username || null,
                     dueDateSql,

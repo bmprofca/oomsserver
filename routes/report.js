@@ -934,6 +934,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.service_id,
                 t.username,
                 t.firm_id,
+                t.task_type,
                 t.due_date,
                 t.status,
                 t.fees,
@@ -952,6 +953,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 s.name as service_name,
                 f.firm_name,
                 f.username as firm_username,
+                f.pan_no as firm_pan_no,
+                f.file_no as firm_file_no,
                 p.name as client_name,
                 p.email as client_email,
                 p.mobile as client_phone,
@@ -1042,11 +1045,14 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 s.name AS service_name,
                 f.firm_name,
                 f.username AS firm_username,
+                f.pan_no AS firm_pan_no,
+                f.file_no AS firm_file_no,
                 p.name AS client_name,
                 p.email AS client_email,
                 p.mobile AS client_phone,
                 p.address_line_1 AS client_address,
                 'recurring' AS task_kind,
+                'compliance' AS task_type,
                 ca.employee_username
             FROM compliance_schedules cs
             INNER JOIN compliance_assignments ca ON cs.assignment_id = ca.assignment_id
@@ -1315,6 +1321,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
 
             finalData.push({
                 task_id: task.task_id,
+                task_type: task.task_type || null,
                 service: {
                     service_id: task.service_id,
                     service_name: task.service_name
@@ -1329,7 +1336,9 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 firm: {
                     firm_id: task.firm_id,
                     firm_name: task.firm_name,
-                    username: task.firm_username
+                    username: task.firm_username,
+                    pan_no: task.firm_pan_no || null,
+                    file_no: task.firm_file_no || null,
                 },
                 task_details: {
                     status: task.status,
@@ -1342,7 +1351,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                     complete_date: task.complete_date,
                     created_by: createdByUser,
                     completed_by: completedByUser,
-                    task_kind: task.task_kind
+                    task_kind: task.task_kind,
+                    task_type: task.task_type || null,
                 },
                 in_user: inUserData,
                 financials: {

@@ -946,6 +946,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.username,
                 t.firm_id,
                 t.service_id,
+                t.task_type,
                 t.has_ca,
                 t.ca_id,
                 t.has_agent,
@@ -992,13 +993,16 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             });
             const object = {
                 task_id: element?.task_id,
+                task_type: element?.task_type || null,
                 client: {
                     username: element?.username,
                     profile: client_profile
                 },
                 firm: {
                     firm_id: firm_data?.firm_id,
-                    firm_name: firm_data?.firm_name
+                    firm_name: firm_data?.firm_name,
+                    pan_no: firm_data?.pan_no || null,
+                    file_no: firm_data?.file_no || null,
                 },
                 service: {
                     service_id: service_data?.service_id,
@@ -1547,6 +1551,8 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
                 return {
                     firm_id: firm_data?.firm_id || element?.firm_id,
                     firm_name: firm_data?.firm_name || element?.firm_name || null,
+                    pan_no: firm_data?.pan_no || null,
+                    file_no: firm_data?.file_no || null,
                 };
             })(),
             service: {
@@ -4302,7 +4308,35 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
                 t.status,
                 t.is_ca_purchased,
                 f.firm_name,
-                s.name AS service_name
+                s.name AS service_name,
+                (
+                    SELECT pe.amount
+                    FROM purchase_items pi
+                    INNER JOIN purchase_entries pe
+                        ON pe.purchase_id = pi.purchase_id
+                        AND CAST(pe.branch_id AS CHAR) = CAST(pi.branch_id AS CHAR)
+                    WHERE CAST(pi.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
+                      AND pi.remark = t.task_id
+                      AND pe.party_type = 'ca'
+                      AND pe.party_id = t.ca_id
+                    ORDER BY pe.id DESC
+                    LIMIT 1
+                ) AS purchase_amount,
+                (
+                    SELECT inv.invoice_no
+                    FROM purchase_items pi
+                    INNER JOIN purchase_entries pe
+                        ON pe.purchase_id = pi.purchase_id
+                        AND CAST(pe.branch_id AS CHAR) = CAST(pi.branch_id AS CHAR)
+                    INNER JOIN invoice inv
+                        ON inv.invoice_id = pe.invoice_id
+                    WHERE CAST(pi.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
+                      AND pi.remark = t.task_id
+                      AND pe.party_type = 'ca'
+                      AND pe.party_id = t.ca_id
+                    ORDER BY pe.id DESC
+                    LIMIT 1
+                ) AS purchase_invoice_no
              ${baseQuery}
              ORDER BY t.create_date DESC, t.id DESC
              LIMIT ? OFFSET ?`,
@@ -4316,6 +4350,11 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
             const firm_data = row.firm_id ? await SINGLE_FIRM_DATA(row.firm_id) : null;
             const service_data = row.service_id ? await SINGLE_SERVICE_DATA(row.service_id) : null;
             const feesNum = Number(row.fees) || 0;
+            const isPurchased = Number(row.is_ca_purchased) || 0;
+            const purchaseAmount =
+                row.purchase_amount != null && Number.isFinite(Number(row.purchase_amount))
+                    ? Number(row.purchase_amount)
+                    : null;
 
             data.push({
                 task_id: row.task_id,
@@ -4335,12 +4374,15 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
                     fees: feesNum,
                     total: Number(row.total) || feesNum,
                 },
+                // Purchase invoice amount — only meaningful when generated
+                purchase_amount: isPurchased === 1 ? purchaseAmount : null,
+                purchase_invoice_no: isPurchased === 1 ? row.purchase_invoice_no || null : null,
                 dates: {
                     due_date: row.due_date,
                     create_date: row.create_date,
                 },
                 status: row.status,
-                is_ca_purchased: Number(row.is_ca_purchased) || 0,
+                is_ca_purchased: isPurchased,
                 ca_id: row.ca_id,
             });
         }
@@ -4369,7 +4411,8 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
 
 /**
  * Generate CA purchase for a pending task (is_ca_purchased = 0 → 1).
- * POST /task/ca-billing/generate  { task_id }
+ * POST /task/ca-billing/generate  { task_id, amount }
+ * `amount` is the purchase line amount (manual). Task fees are not used as purchase amount.
  */
 router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
     const connection = await pool.getConnection();
@@ -4377,9 +4420,16 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
         const branch_id = req.branch_id;
         const create_by = req.headers["username"] || req.headers["Username"] || "";
         const task_id = req.body?.task_id != null ? String(req.body.task_id).trim() : "";
+        const amountNum = Number(req.body?.amount);
 
         if (!task_id) {
             return res.status(400).json({ success: false, message: "task_id is required" });
+        }
+        if (!Number.isFinite(amountNum) || amountNum <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "amount is required and must be greater than 0",
+            });
         }
 
         await connection.beginTransaction();
@@ -4412,14 +4462,6 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const feesNum = Number(task.fees);
-        if (!Number.isFinite(feesNum) || feesNum <= 0) {
-            await connection.rollback();
-            return res.status(400).json({
-                success: false,
-                message: "Task fees must be greater than 0 to generate CA purchase",
-            });
-        }
         if (!task.service_id) {
             await connection.rollback();
             return res.status(400).json({ success: false, message: "Task has no service_id" });
@@ -4436,7 +4478,7 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
             items: [
                 {
                     service_id: task.service_id,
-                    fees: feesNum,
+                    fees: amountNum,
                     remark: task_id,
                 },
             ],
