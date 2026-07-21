@@ -126,7 +126,7 @@ wrapPoolWithRetry(pool);
 
 pool.on("connection", (connection) => {
     connection.on("error", (err) => {
-        console.warn("MySQL pooled connection error:", err?.code || err?.message || err);
+        // console.warn("MySQL pooled connection error:", err?.code || err?.message || err);
     });
 });
 

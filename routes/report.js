@@ -430,14 +430,13 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                     category_totals: {
                         OD: 0, DT: 0, D7: 0, FT: 0,
                         WIP: 0, PFC: 0, PFD: 0,
-                        CPL: 0, CNL: 0,
                         yet_no_started: 0
                     }
                 }
             });
         }
 
-        // Get all tasks for these services
+        // Get active (non-complete/cancel) tasks for these services
         const serviceIdList = services.map(s => s.service_id);
         const taskPlaceholders = serviceIdList.map(() => "?").join(",");
 
@@ -450,6 +449,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             FROM tasks t
             WHERE t.branch_id = ? 
             AND t.service_id IN (${taskPlaceholders})
+            AND t.status NOT IN ('complete', 'cancel')
         `;
 
         const [tasks] = await pool.query(tasksQuery, [branch_id, ...serviceIdList]);
@@ -480,6 +480,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                AND cf.is_deleted = '0'
             WHERE f.branch_id = ? AND f.is_deleted = '0'
             AND ca.service_id IN (${taskPlaceholders})
+            AND (cs.status IS NULL OR LOWER(TRIM(cs.status)) NOT IN ('complete', 'cancel'))
         `;
         const [complianceTasks] = await pool.query(complianceQuery, [branch_id, ...serviceIdList]);
 
@@ -560,13 +561,11 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             }
         }
 
-        // Helper function to get status category (WIP, PFC, PFD, CPL, CNL)
+        // Helper function to get status category (WIP, PFC, PFD)
         function getStatusCategory(status) {
             if (status === 'in process') return 'WIP';
             if (status === 'pending from client') return 'PFC';
             if (status === 'pending from department') return 'PFD';
-            if (status === 'complete') return 'CPL';
-            if (status === 'cancel') return 'CNL';
             return null;
         }
 
@@ -580,7 +579,6 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
         let globalTotals = {
             OD: 0, DT: 0, D7: 0, FT: 0,
             WIP: 0, PFC: 0, PFD: 0,
-            CPL: 0, CNL: 0,
             yet_no_started: 0,
             total_active_tasks: 0,
             total_all_tasks: 0
@@ -597,8 +595,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             // Initialize counters for this service
             const counts = {
                 OD: 0, DT: 0, D7: 0, FT: 0,
-                WIP: 0, PFC: 0, PFD: 0,
-                CPL: 0, CNL: 0
+                WIP: 0, PFC: 0, PFD: 0
             };
 
             let activeTaskCount = 0;
@@ -636,15 +633,20 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             // Categorize each task - tasks can be in multiple categories
             for (const task of serviceTasks) {
                 // Get due date category (OD, DT, D7, FT) - only for active tasks
+                // OD is counted only for "in process" tasks
                 if (isTaskActive(task.status)) {
                     const dueCategory = getDueDateCategory(task.due_date);
-                    if (dueCategory) {
+                    if (dueCategory === 'OD') {
+                        if (task.status === 'in process') {
+                            counts.OD++;
+                        }
+                    } else if (dueCategory) {
                         counts[dueCategory]++;
                     }
                     activeTaskCount++;
                 }
 
-                // Get status category (WIP, PFC, PFD, CPL, CNL) - for ALL tasks
+                // Get status category (WIP, PFC, PFD)
                 const statusCategory = getStatusCategory(task.status);
                 if (statusCategory) {
                     counts[statusCategory]++;
@@ -653,18 +655,25 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
 
             // Categorize each compliance schedule
             for (const cs of serviceSchedules) {
-                // Get due date category (OD, DT, D7, FT) - only for active tasks
+                const csStatus = String(cs.status || '').trim().toLowerCase();
+                const dueCategory = getDueDateCategory(cs.schedule_due_date ?? cs.due_date);
+
+                // OD is counted only for "in process" schedules (even if not in the active PFC/PFD set)
+                if (dueCategory === 'OD' && csStatus === 'in process') {
+                    counts.OD++;
+                }
+
+                // Get due date category (DT, D7, FT) - only for active schedules
                 if (isComplianceActive(cs.status)) {
-                    const dueCategory = getDueDateCategory(cs.schedule_due_date ?? cs.due_date);
-                    if (dueCategory) {
+                    if (dueCategory && dueCategory !== 'OD') {
                         counts[dueCategory]++;
                     }
                     activeTaskCount++;
                 }
 
-                // Get status category (WIP, PFC, PFD, CPL, CNL) - for ALL tasks
+                // Get status category (WIP, PFC, PFD only — complete/cancel excluded in SQL)
                 const statusCategory = getComplianceStatusCategory(cs.status);
-                if (statusCategory) {
+                if (statusCategory === 'PFC' || statusCategory === 'PFD') {
                     counts[statusCategory]++;
                 }
             }
@@ -701,13 +710,10 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                         FT: counts.FT,
                         WIP: counts.WIP,
                         PFC: counts.PFC,
-                        PFD: counts.PFD,
-                        CPL: counts.CPL,
-                        CNL: counts.CNL
+                        PFD: counts.PFD
                     },
                     total_tasks: totalTasks,
-                    active_tasks: activeTaskCount,
-                    completed_cancelled_tasks: (counts.CPL + counts.CNL)
+                    active_tasks: activeTaskCount
                 });
             }
         }
@@ -721,9 +727,7 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             FT: globalTotals.FT,
             WIP: globalTotals.WIP,
             PFC: globalTotals.PFC,
-            PFD: globalTotals.PFD,
-            CPL: globalTotals.CPL,
-            CNL: globalTotals.CNL
+            PFD: globalTotals.PFD
         };
 
         return res.status(200).json({
@@ -744,17 +748,15 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
             category_legend: {
                 "YNS": "Yet Not Started - Compliance schedules without a started task",
                 "yet_no_started": "Yet Not Started - Compliance schedules without a started task (false for general services)",
-                "OD": "Overdue (Due date passed) - Counted for active tasks with past due date",
+                "OD": "Overdue (Due date passed) - Counted for 'in process' tasks with past due date",
                 "DT": "Due Today - Counted for active tasks due today",
                 "D7": "Due within 7 Days - Counted for active tasks due in next 7 days",
                 "FT": "Future (More than 7 days) - Counted for active tasks with due date beyond 7 days",
                 "WIP": "In Progress - Tasks with status 'in process'",
                 "PFC": "Pending From Client - Tasks with status 'pending from client'",
-                "PFD": "Pending From Department - Tasks with status 'pending from department'",
-                "CPL": "Complete - Tasks with status 'complete'",
-                "CNL": "Cancel - Tasks with status 'cancel'"
+                "PFD": "Pending From Department - Tasks with status 'pending from department'"
             },
-            note: "Services with at least one active task or not-started compliance schedule are shown. yet_no_started is a count for compliance services only (false for general services). A task can be counted in multiple categories. For example, an 'in process' task with overdue due date will be counted in both WIP and OD."
+            note: "Services with at least one active task or not-started compliance schedule are shown. yet_no_started is a count for compliance services only (false for general services). A task can be counted in multiple categories. For example, an 'in process' task with overdue due date will be counted in both WIP and OD. OD is counted only for tasks with status 'in process'."
         });
 
     } catch (error) {

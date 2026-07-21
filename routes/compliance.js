@@ -34,6 +34,41 @@ const COMPLIANCE_TASK_STATUSES = [
     "cancel",
 ];
 
+const COMPLIANCE_LIST_STATUS_FILTERS = [
+    "yet not started",
+    ...COMPLIANCE_TASK_STATUSES,
+];
+
+function parseStatusFilterList(queryStatus) {
+    if (queryStatus == null || queryStatus === "") return null;
+    const raw = Array.isArray(queryStatus) ? queryStatus : [queryStatus];
+    const statuses = [
+        ...new Set(
+            raw
+                .map((value) => String(value || "").trim().toLowerCase())
+                .filter((value) => COMPLIANCE_LIST_STATUS_FILTERS.includes(value))
+        ),
+    ];
+    return statuses.length ? statuses : null;
+}
+
+function filterComplianceRowsByStatus(rows, taskMap, statusFilter) {
+    if (!statusFilter?.length) return rows;
+
+    const wantNotStarted = statusFilter.includes("yet not started");
+    const startedStatuses = new Set(
+        statusFilter.filter((status) => status !== "yet not started")
+    );
+
+    return rows.filter((row) => {
+        const task = taskMap.get(buildComplianceTaskLookupKey(row));
+        const taskStatus =
+            task?.status != null ? String(task.status).trim().toLowerCase() : "";
+        if (!taskStatus) return wantNotStarted;
+        return startedStatuses.has(taskStatus);
+    });
+}
+
 function parseServiceId(value) {
     const service_id = value != null ? String(value).trim() : "";
     return service_id || null;
@@ -628,14 +663,20 @@ function buildComplianceFirmFilters(query, branch_id) {
             OR cf.effective_from LIKE ?
             OR f.firm_name LIKE ?
             OR f.username LIKE ?
+            OR f.firm_type LIKE ?
             OR f.pan_no LIKE ?
             OR f.gst_no LIKE ?
+            OR f.file_no LIKE ?
             OR s.name LIKE ?
             OR p.name LIKE ?
             OR p.mobile LIKE ?
             OR p.email LIKE ?
+            OR p.pan_number LIKE ?
         )`);
         params.push(
+            searchPattern,
+            searchPattern,
+            searchPattern,
             searchPattern,
             searchPattern,
             searchPattern,
@@ -717,14 +758,20 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
             OR t.agent_id LIKE ?
             OR f.firm_name LIKE ?
             OR f.username LIKE ?
+            OR f.firm_type LIKE ?
             OR f.pan_no LIKE ?
             OR f.gst_no LIKE ?
+            OR f.file_no LIKE ?
             OR s.name LIKE ?
             OR p.name LIKE ?
             OR p.mobile LIKE ?
             OR p.email LIKE ?
+            OR p.pan_number LIKE ?
         )`);
         params.push(
+            searchPattern,
+            searchPattern,
+            searchPattern,
             searchPattern,
             searchPattern,
             searchPattern,
@@ -1311,7 +1358,8 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const { pageNum, limitNum, offset } = parseListPagination(req.query);
-        const { service_id, firm_id, username, compliance_year, compliance_period, search, ca, agent } = req.query || {};
+        const { service_id, firm_id, username, compliance_year, compliance_period, search, ca, agent, status } = req.query || {};
+        const statusFilter = parseStatusFilterList(status);
 
         const serviceId = parseServiceId(service_id);
         const complianceYearRaw =
@@ -1405,9 +1453,15 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
             mergeComplianceTaskListRows(assignmentRows, existingTaskRows)
         );
 
-        const total = expandedRows.length;
-        const pageRows = expandedRows.slice(offset, offset + limitNum);
-        const taskMap = await fetchComplianceTasksMap(branch_id, pageRows);
+        const taskMap = await fetchComplianceTasksMap(branch_id, expandedRows);
+        const filteredRows = filterComplianceRowsByStatus(
+            expandedRows,
+            taskMap,
+            statusFilter
+        );
+
+        const total = filteredRows.length;
+        const pageRows = filteredRows.slice(offset, offset + limitNum);
 
         const data = [];
         for (const row of pageRows) {
@@ -1427,6 +1481,8 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
                 service_id: serviceId,
                 firm_id: parseFirmId(firm_id),
                 username: username != null ? String(username).trim() || null : null,
+                status: statusFilter,
+                search: search != null ? String(search).trim() || null : null,
                 compliance_year:
                     complianceYearRaw || getFinancialYearForDate(new Date()),
                 compliance_period:
