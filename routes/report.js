@@ -190,13 +190,69 @@ async function checkUserPermission(username, branchId, permissionKey) {
 
 // ========== END GLOBAL HELPER FUNCTIONS ==========
 
+function getCurrentFinancialYearLabel(date = new Date()) {
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    if (month >= 4) {
+        return `${year}-${year + 1}`;
+    }
+    return `${year - 1}-${year}`;
+}
 
-// Dashboard Summary API - Core Metrics Only
+function parseFinancialYearLabel(fyLabel) {
+    const match = String(fyLabel || "").trim().match(/^(\d{4})-(\d{4})$/);
+    if (!match) return null;
+    const startYear = Number(match[1]);
+    const endYear = Number(match[2]);
+    if (!Number.isFinite(startYear) || !Number.isFinite(endYear) || endYear !== startYear + 1) {
+        return null;
+    }
+    return {
+        label: `${startYear}-${endYear}`,
+        fyStartDate: `${startYear}-04-01`,
+        fyEndDate: `${endYear}-03-31`,
+    };
+}
+
+function resolveFinancialYearRange(fyQuery) {
+    const parsed = parseFinancialYearLabel(fyQuery);
+    if (parsed) return parsed;
+
+    const current = getCurrentFinancialYearLabel();
+    const currentParsed = parseFinancialYearLabel(current);
+    return currentParsed;
+}
+
+function getPreviousFinancialYearRange(fyLabel) {
+    const parsed = parseFinancialYearLabel(fyLabel);
+    if (!parsed) return null;
+    const startYear = Number(parsed.label.split("-")[0]);
+    return parseFinancialYearLabel(`${startYear - 1}-${startYear}`);
+}
+
+function computeSaleAmountGrowthPercent(currentAmount, previousAmount) {
+    const current = Number(currentAmount) || 0;
+    const previous = Number(previousAmount) || 0;
+    if (previous === 0) {
+        return current === 0 ? 0 : null;
+    }
+    return Number((((current - previous) / previous) * 100).toFixed(1));
+}
+
+function formatFinancialYearShortLabel(fyLabel) {
+    const parsed = parseFinancialYearLabel(fyLabel);
+    if (!parsed) return fyLabel;
+    const [start, end] = parsed.label.split("-");
+    return `FY ${start}-${String(end).slice(-2)}`;
+}
+
+
+// Dashboard Summary API - Sales Overview metrics for selected financial year
 router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const username = req.headers["username"] || req.headers["Username"] || '';
-        const hasPerm = await checkUserPermission(username, branch_id, 'card_dashboard_statistics');
+        const hasPerm = await checkUserPermission(username, branch_id, 'sales_overview_view');
         if (!hasPerm) {
             return res.status(403).json({
                 success: false,
@@ -204,100 +260,142 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
             });
         }
 
-        // Get current financial year (April 1 to March 31)
-        const today = new Date();
-        const currentYear = today.getFullYear();
-        const currentMonth = today.getMonth() + 1;
-
-        let fyStartYear, fyEndYear;
-        if (currentMonth >= 4) {
-            fyStartYear = currentYear;
-            fyEndYear = currentYear + 1;
-        } else {
-            fyStartYear = currentYear - 1;
-            fyEndYear = currentYear;
+        const fyRange = resolveFinancialYearRange(req.query.financial_year);
+        if (!fyRange) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid financial_year. Expected format: YYYY-YYYY (e.g. 2025-2026)",
+            });
         }
 
-        const fyStartDate = `${fyStartYear}-04-01`;
-        const fyEndDate = `${fyEndYear}-03-31`;
+        const { label: financialYear, fyStartDate, fyEndDate } = fyRange;
 
-        // Get previous financial year for growth calculation
-        const prevFyStartYear = fyStartYear - 1;
-        const prevFyEndYear = fyEndYear - 1;
-        const prevFyStartDate = `${prevFyStartYear}-04-01`;
-        const prevFyEndDate = `${prevFyEndYear}-03-31`;
-
-        // 1. Current FY Total Sales & Previous FY Total Sales (for Growth Rate)
-        const [salesData] = await pool.query(
-            `SELECT 
-                COALESCE(SUM(CASE WHEN DATE(complete_date) BETWEEN ? AND ? THEN total ELSE 0 END), 0) as current_fy_sales,
-                COALESCE(SUM(CASE WHEN DATE(complete_date) BETWEEN ? AND ? THEN total ELSE 0 END), 0) as previous_fy_sales
-             FROM tasks 
-             WHERE branch_id = ? 
-             AND billing_status = '1'
-             AND status = 'complete'
-             AND complete_date IS NOT NULL`,
-            [fyStartDate, fyEndDate, prevFyStartDate, prevFyEndDate, branch_id]
-        );
-
-        const currentFYSales = parseFloat(salesData[0]?.current_fy_sales || 0);
-        const previousFYSales = parseFloat(salesData[0]?.previous_fy_sales || 0);
-
-        // Calculate Growth Rate
-        let growthRate = 0;
-        if (previousFYSales > 0) {
-            growthRate = ((currentFYSales - previousFYSales) / previousFYSales) * 100;
-        } else if (currentFYSales > 0) {
-            growthRate = 100;
-        }
-
-        // 2. Net Profit (Current FY) - Removed is_deleted filter
-        const [netProfitData] = await pool.query(
-            `SELECT 
-                COALESCE(SUM(CASE 
-                    WHEN transaction_type IN ('credit', 'receive', 'received', 'sale') THEN amount 
-                    WHEN transaction_type IN ('debit', 'payment', 'purchase', 'pay') THEN -amount 
-                    ELSE 0 
-                END), 0) as net_profit
-             FROM transactions 
-             WHERE branch_id = ? 
-             AND DATE(transaction_date) BETWEEN ? AND ?`,
+        const [salesRows] = await pool.query(
+            `SELECT
+                COUNT(DISTINCT i.invoice_id) AS invoice_count,
+                COALESCE(SUM(i.grand_total), 0) AS sale_amount,
+                COALESCE(SUM(
+                    GREATEST(
+                        0,
+                        i.total
+                        - GREATEST(0, i.subtotal - COALESCE(i.discount_value, 0))
+                        - COALESCE(i.additional_charge, 0)
+                    )
+                ), 0) AS gst_amount,
+                COUNT(DISTINCT CASE
+                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                    THEN se.sale_id
+                    ELSE NULL
+                END) AS task_sale_count,
+                COUNT(DISTINCT CASE
+                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                    THEN se.sale_id
+                    ELSE NULL
+                END) AS breakdown_task_count,
+                COALESCE(SUM(CASE
+                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                    THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS breakdown_task_amount,
+                COUNT(DISTINCT CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                    THEN se.sale_id
+                    ELSE NULL
+                END) AS breakdown_client_count,
+                COALESCE(SUM(CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                    THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS breakdown_client_amount,
+                COUNT(DISTINCT CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'bank'
+                    THEN se.sale_id
+                    ELSE NULL
+                END) AS breakdown_bank_count,
+                COALESCE(SUM(CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) = 'bank'
+                    THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS breakdown_bank_amount,
+                COUNT(DISTINCT CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
+                    THEN se.sale_id
+                    ELSE NULL
+                END) AS breakdown_other_count,
+                COALESCE(SUM(CASE
+                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                         AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
+                    THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS breakdown_other_amount
+             FROM invoice i
+             INNER JOIN sale_entries se
+                ON se.invoice_id = i.invoice_id
+                AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+             WHERE i.branch_id = ?
+               AND i.type = 'sale'
+               AND DATE(se.sale_date) BETWEEN ? AND ?`,
             [branch_id, fyStartDate, fyEndDate]
         );
 
-        const netProfit = parseFloat(netProfitData[0]?.net_profit || 0);
+        const row = salesRows[0] || {};
+        const invoiceCount = parseInt(row.invoice_count || 0, 10);
+        const saleAmount = parseFloat(row.sale_amount || 0);
+        const gstAmount = parseFloat(row.gst_amount || 0);
+        const taskSaleCount = parseInt(row.task_sale_count || 0, 10);
 
-        // 3. Active Clients (clients with at least one active/in-progress task)
-        const [activeClientsData] = await pool.query(
-            `SELECT COUNT(DISTINCT c.id) as active_clients
-             FROM clients c
-             INNER JOIN tasks t ON (t.username = c.username OR t.firm_id = c.id)
-             WHERE c.branch_id = ? 
-             AND c.is_deleted = '0' 
-             AND c.status = '1'
-             AND t.branch_id = ?
-             AND t.status NOT IN ('complete', 'cancel')`,
-            [branch_id, branch_id]
+        const saleBreakdown = {
+            task: {
+                count: parseInt(row.breakdown_task_count || 0, 10),
+                amount: parseFloat(row.breakdown_task_amount || 0),
+            },
+            client: {
+                count: parseInt(row.breakdown_client_count || 0, 10),
+                amount: parseFloat(row.breakdown_client_amount || 0),
+            },
+            bank: {
+                count: parseInt(row.breakdown_bank_count || 0, 10),
+                amount: parseFloat(row.breakdown_bank_amount || 0),
+            },
+            other: {
+                count: parseInt(row.breakdown_other_count || 0, 10),
+                amount: parseFloat(row.breakdown_other_amount || 0),
+            },
+        };
+
+        const previousFyRange = getPreviousFinancialYearRange(financialYear);
+        let previousFySaleAmount = 0;
+        let previousFinancialYear = null;
+
+        if (previousFyRange) {
+            previousFinancialYear = previousFyRange.label;
+            const [previousRows] = await pool.query(
+                `SELECT COALESCE(SUM(i.grand_total), 0) AS sale_amount
+                 FROM invoice i
+                 INNER JOIN sale_entries se
+                    ON se.invoice_id = i.invoice_id
+                    AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+                 WHERE i.branch_id = ?
+                   AND i.type = 'sale'
+                   AND DATE(se.sale_date) BETWEEN ? AND ?`,
+                [branch_id, previousFyRange.fyStartDate, previousFyRange.fyEndDate]
+            );
+            previousFySaleAmount = parseFloat(previousRows[0]?.sale_amount || 0);
+        }
+
+        const saleAmountGrowthPercent = computeSaleAmountGrowthPercent(
+            saleAmount,
+            previousFySaleAmount
         );
 
-        const activeClients = parseInt(activeClientsData[0]?.active_clients || 0);
-
-        // 4. Task Completion Rate (Current FY)
-        const [taskStats] = await pool.query(
-            `SELECT 
-                COUNT(*) as total_tasks,
-                SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as completed_tasks
-             FROM tasks 
-             WHERE branch_id = ? 
-             AND DATE(create_date) BETWEEN ? AND ?`,
-            [branch_id, fyStartDate, fyEndDate]
-        );
-
-        const totalTasks = taskStats[0]?.total_tasks || 0;
-        const completedTasks = taskStats[0]?.completed_tasks || 0;
-        const completionRate = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0;
-
-        // Format currency in Indian Rupees
         const formatCurrency = (amount) => {
             const absAmount = Math.abs(amount);
             const formatted = new Intl.NumberFormat('en-IN', {
@@ -309,33 +407,41 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
 
         return res.status(200).json({
             success: true,
-            message: "Dashboard summary retrieved successfully",
+            message: "Sales overview retrieved successfully",
             data: {
-                financial_year: `${fyStartYear}-${fyEndYear}`,
-                current_fy_total_sales: {
-                    value: currentFYSales,
-                    formatted: formatCurrency(currentFYSales)
+                financial_year: financialYear,
+                fy_start_date: fyStartDate,
+                fy_end_date: fyEndDate,
+                invoice_count: invoiceCount,
+                sale_amount: saleAmount,
+                gst_amount: gstAmount,
+                task_sale_count: taskSaleCount,
+                sale_breakdown: saleBreakdown,
+                previous_financial_year: previousFinancialYear,
+                previous_fy_sale_amount: previousFySaleAmount,
+                sale_amount_growth_percent: saleAmountGrowthPercent,
+                formatted: {
+                    invoice_count: invoiceCount.toLocaleString('en-IN'),
+                    sale_amount: formatCurrency(saleAmount),
+                    gst_amount: formatCurrency(gstAmount),
+                    task_sale_count: taskSaleCount.toLocaleString('en-IN'),
+                    previous_fy_sale_amount: formatCurrency(previousFySaleAmount),
+                    previous_fy_label: previousFinancialYear
+                        ? formatFinancialYearShortLabel(previousFinancialYear)
+                        : null,
+                    sale_amount_growth_percent: saleAmountGrowthPercent == null
+                        ? null
+                        : `${saleAmountGrowthPercent > 0 ? '+' : ''}${saleAmountGrowthPercent}%`,
+                    sale_breakdown: Object.fromEntries(
+                        Object.entries(saleBreakdown).map(([key, value]) => [
+                            key,
+                            {
+                                count: value.count.toLocaleString('en-IN'),
+                                amount: formatCurrency(value.amount),
+                            },
+                        ]),
+                    ),
                 },
-                growth_rate: {
-                    value: parseFloat(growthRate.toFixed(2)),
-                    formatted: `${growthRate >= 0 ? '+' : ''}${growthRate.toFixed(2)}%`,
-                    trend: growthRate >= 0 ? 'up' : 'down'
-                },
-                net_profit: {
-                    value: netProfit,
-                    formatted: formatCurrency(netProfit),
-                    is_positive: netProfit >= 0
-                },
-                active_clients: {
-                    value: activeClients,
-                    formatted: activeClients.toString()
-                },
-                task_completion: {
-                    rate: parseFloat(completionRate.toFixed(1)),
-                    formatted: `${completionRate.toFixed(1)}%`,
-                    completed: completedTasks,
-                    total: totalTasks
-                }
             }
         });
 
@@ -343,7 +449,7 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
         console.error("Dashboard summary core error:", error);
         return res.status(500).json({
             success: false,
-            message: "Failed to fetch dashboard summary",
+            message: "Failed to fetch sales overview",
             error: error.message
         });
     }
