@@ -490,6 +490,47 @@ function formatComplianceFirmRow(row) {
     };
 }
 
+/** Enrich staff/CA/agent usernames into profile snippets for UI (task-display style). */
+async function enrichComplianceFirmRow(row) {
+    const base = formatComplianceFirmRow(row);
+    const staffs = await resolveAssignedStaffList(null, row.staffs);
+
+    let ca = null;
+    if (base.ca?.[0]) {
+        const profile = await USER_SNIPPED_DATA(base.ca[0]);
+        ca = profile
+            ? {
+                username: profile.username ?? base.ca[0],
+                name: profile.name ?? base.ca[0],
+                mobile: profile.mobile ?? "",
+                email: profile.email ?? "",
+            }
+            : { username: base.ca[0], name: base.ca[0] };
+    }
+
+    let agent = null;
+    if (base.agent?.[0]) {
+        const profile = await USER_SNIPPED_DATA(base.agent[0]);
+        agent = profile
+            ? {
+                username: profile.username ?? base.agent[0],
+                name: profile.name ?? base.agent[0],
+                mobile: profile.mobile ?? "",
+                email: profile.email ?? "",
+            }
+            : { username: base.agent[0], name: base.agent[0] };
+    }
+
+    return {
+        ...base,
+        staffs,
+        ca,
+        agent,
+        has_ca: Boolean(ca),
+        has_agent: Boolean(agent),
+    };
+}
+
 const COMPLIANCE_FIRM_SELECT = `
     cf.id,
     cf.branch_id,
@@ -698,7 +739,7 @@ function buildComplianceFirmFilters(query, branch_id) {
     return { whereClause: where.join(" AND "), params };
 }
 
-function buildComplianceTaskFilters(query, branch_id, { complianceYear, compliancePeriod }) {
+function buildComplianceTaskFilters(query, branch_id, { complianceYear, complianceYearMax, compliancePeriod }) {
     const { service_id, firm_id, username, search, ca, agent } = query || {};
 
     const where = [
@@ -741,6 +782,12 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
     if (complianceYear) {
         where.push("t.compliance_year = ?");
         params.push(complianceYear);
+    } else if (complianceYearMax) {
+        const maxStart = parseInt(String(complianceYearMax).split("-")[0], 10);
+        if (Number.isFinite(maxStart)) {
+            where.push("CAST(SUBSTRING_INDEX(t.compliance_year, '-', 1) AS UNSIGNED) <= ?");
+            params.push(maxStart);
+        }
     }
 
     if (compliancePeriod) {
@@ -791,9 +838,10 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
     return { whereClause: where.join(" AND "), params };
 }
 
-async function fetchExistingComplianceTaskRows(branch_id, query, { complianceYear, compliancePeriod }) {
+async function fetchExistingComplianceTaskRows(branch_id, query, { complianceYear, complianceYearMax, compliancePeriod }) {
     const { whereClause, params } = buildComplianceTaskFilters(query, branch_id, {
         complianceYear,
+        complianceYearMax,
         compliancePeriod,
     });
 
@@ -1074,6 +1122,297 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
             message: "Failed to add compliance firm",
             error: error.message,
         });
+    }
+});
+
+/**
+ * Bulk-assign firms to a compliance service.
+ * Accepts group_id and/or firm_ids[]. Already-assigned firms are skipped unchanged.
+ */
+router.post("/add-firms", auth, validateBranch, async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+        const branch_id = req.branch_id;
+        const createdBy = req.headers["username"] || req.headers["Username"] || "";
+        const {
+            service_id,
+            group_id,
+            firm_ids,
+            fees,
+            due_date,
+            visibility_offset,
+            effective_from,
+            staffs,
+            ca,
+            agent,
+        } = req.body || {};
+
+        const serviceId = parseServiceId(service_id);
+        if (!serviceId) {
+            return res.status(400).json({ success: false, message: "service_id is required" });
+        }
+
+        const groupId = group_id != null ? String(group_id).trim() : "";
+        const firmIdArray = Array.isArray(firm_ids)
+            ? firm_ids.map((id) => parseFirmId(id)).filter(Boolean)
+            : [];
+
+        if (!groupId && firmIdArray.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "group_id or firm_ids is required",
+            });
+        }
+
+        if (fees == null || fees === "") {
+            return res.status(400).json({ success: false, message: "fees is required" });
+        }
+
+        const dueDateVal = parseDueDate(due_date);
+        if (dueDateVal === null) {
+            return res.status(400).json({
+                success: false,
+                message: "due_date is required and must be an integer between 1 and 31",
+            });
+        }
+
+        const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
+        if (visibilityOffsetVal === null) {
+            return res.status(400).json({
+                success: false,
+                message: "visibility_offset must be an integer",
+            });
+        }
+
+        const parsedAmounts = parseFeesTax(fees, 0);
+        if (parsedAmounts.error) {
+            return res.status(400).json({ success: false, message: parsedAmounts.error });
+        }
+        const { feesNum, taxRateNum, tax_value } = parsedAmounts;
+
+        const [serviceRows] = await conn.query(
+            `SELECT service_id, name, type, frequency
+             FROM services
+             WHERE service_id = ?
+             LIMIT 1`,
+            [serviceId],
+        );
+        if (!serviceRows.length) {
+            return res.status(404).json({ success: false, message: "Service not found" });
+        }
+        if (serviceRows[0].type !== "compliance") {
+            return res.status(400).json({
+                success: false,
+                message: "service_id must belong to a compliance service",
+            });
+        }
+
+        const parsedEffectiveFrom = parseComplianceEffectiveFrom(
+            effective_from,
+            serviceRows[0].frequency,
+        );
+        if (parsedEffectiveFrom.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedEffectiveFrom.error,
+                hint: formatComplianceEffectiveFromHint(serviceRows[0].frequency),
+            });
+        }
+
+        const [branchServiceRows] = await conn.query(
+            `SELECT id
+             FROM branch_services
+             WHERE branch_id = ?
+               AND service_id = ?
+               AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id, serviceId],
+        );
+        if (!branchServiceRows.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Service is not added to this branch. Add it to branch_services first.",
+            });
+        }
+
+        let targetFirmIds = [...new Set(firmIdArray)];
+
+        if (groupId) {
+            const [groupRows] = await conn.query(
+                `SELECT group_id
+                 FROM groups
+                 WHERE group_id = ?
+                   AND branch_id = ?
+                   AND is_deleted = '0'
+                 LIMIT 1`,
+                [groupId, branch_id],
+            );
+            if (!groupRows.length) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Group not found or does not belong to this branch",
+                });
+            }
+
+            const [groupFirmRows] = await conn.query(
+                `SELECT DISTINCT gf.firm_id
+                 FROM group_firms gf
+                 INNER JOIN firms f
+                   ON f.firm_id = gf.firm_id
+                  AND f.branch_id = ?
+                  AND f.is_deleted = '0'
+                 WHERE gf.group_id = ?
+                   AND gf.is_deleted = '0'`,
+                [branch_id, groupId],
+            );
+
+            const fromGroup = groupFirmRows
+                .map((r) => parseFirmId(r.firm_id))
+                .filter(Boolean);
+            targetFirmIds = [...new Set([...targetFirmIds, ...fromGroup])];
+        }
+
+        if (targetFirmIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No firms found to assign",
+            });
+        }
+
+        const [validFirms] = await conn.query(
+            `SELECT firm_id, firm_name, username
+             FROM firms
+             WHERE firm_id IN (?)
+               AND branch_id = ?
+               AND is_deleted = '0'`,
+            [targetFirmIds, branch_id],
+        );
+        const firmById = new Map(validFirms.map((f) => [String(f.firm_id), f]));
+
+        const [existingRows] = await conn.query(
+            `SELECT firm_id
+             FROM compliance_firms
+             WHERE branch_id = ?
+               AND service_id = ?
+               AND firm_id IN (?)
+               AND is_deleted = '0'`,
+            [branch_id, serviceId, targetFirmIds],
+        );
+        const alreadyAssigned = new Set(existingRows.map((r) => String(r.firm_id)));
+
+        const staffsVal = normalizeCommaSeparated(staffs);
+        const caVal = normalizeCommaSeparated(ca);
+        const agentVal = normalizeCommaSeparated(agent);
+
+        const result = {
+            added: [],
+            skipped: [],
+            failed: [],
+        };
+
+        await conn.beginTransaction();
+
+        for (const firmId of targetFirmIds) {
+            const firm = firmById.get(String(firmId));
+            if (!firm) {
+                result.failed.push({
+                    firm_id: firmId,
+                    status: "failed",
+                    message: "Firm not found",
+                });
+                continue;
+            }
+
+            if (alreadyAssigned.has(String(firmId))) {
+                result.skipped.push({
+                    firm_id: firmId,
+                    firm_name: firm.firm_name,
+                    status: "skipped",
+                    message: "Already assigned — left unchanged",
+                });
+                continue;
+            }
+
+            const clientUsername = firm.username
+                ? String(firm.username).trim()
+                : null;
+
+            const [insertResult] = await conn.query(
+                `INSERT INTO compliance_firms
+                 (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
+                [
+                    branch_id,
+                    serviceId,
+                    clientUsername,
+                    firmId,
+                    parsedEffectiveFrom.value,
+                    feesNum,
+                    staffsVal,
+                    caVal,
+                    agentVal,
+                    dueDateVal,
+                    visibilityOffsetVal,
+                    createdBy,
+                    createdBy,
+                ],
+            );
+
+            alreadyAssigned.add(String(firmId));
+            result.added.push({
+                id: insertResult.insertId,
+                firm_id: firmId,
+                firm_name: firm.firm_name,
+                status: "added",
+            });
+        }
+
+        await conn.commit();
+
+        const messageParts = [];
+        if (result.added.length) messageParts.push(`${result.added.length} added`);
+        if (result.skipped.length) messageParts.push(`${result.skipped.length} skipped (already assigned)`);
+        if (result.failed.length) messageParts.push(`${result.failed.length} failed`);
+
+        return res.status(200).json({
+            success: true,
+            message:
+                messageParts.length > 0
+                    ? `Bulk assign complete: ${messageParts.join(", ")}`
+                    : "No firms were assigned",
+            data: {
+                service_id: serviceId,
+                service_name: serviceRows[0].name,
+                group_id: groupId || null,
+                fees: feesNum,
+                tax_rate: taxRateNum,
+                tax_value,
+                due_date: dueDateVal,
+                visibility_offset: visibilityOffsetVal,
+                effective_from: parsedEffectiveFrom.value,
+                summary: {
+                    total: targetFirmIds.length,
+                    added: result.added.length,
+                    skipped: result.skipped.length,
+                    failed: result.failed.length,
+                },
+                result,
+            },
+        });
+    } catch (error) {
+        try {
+            await conn.rollback();
+        } catch {
+            /* ignore */
+        }
+        console.error("POST COMPLIANCE ADD FIRMS ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to bulk-assign compliance firms",
+            error: error.message,
+        });
+    } finally {
+        conn.release();
     }
 });
 
@@ -1433,7 +1772,8 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
 
         const targetYear = complianceYearRaw
             ? normalizeFinancialYear(complianceYearRaw)
-            : getFinancialYearForDate(new Date());
+            : null;
+        const currentFy = getFinancialYearForDate(new Date());
 
         const assignmentRows = expandComplianceFirmPeriods(firmRows, {
             complianceYear: complianceYearRaw,
@@ -1445,12 +1785,22 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
             { service_id, firm_id, username, search, ca, agent },
             {
                 complianceYear: targetYear,
+                complianceYearMax: targetYear ? null : currentFy,
                 compliancePeriod: compliancePeriodRaw || null,
             }
         );
 
         const expandedRows = sortComplianceTaskListRows(
-            mergeComplianceTaskListRows(assignmentRows, existingTaskRows)
+            mergeComplianceTaskListRows(assignmentRows, existingTaskRows).filter((row) => {
+                if (!targetYear) {
+                    const yearStart = parseInt(String(row.compliance_year || "").split("-")[0], 10);
+                    const currentStart = parseInt(String(currentFy).split("-")[0], 10);
+                    if (Number.isFinite(yearStart) && Number.isFinite(currentStart) && yearStart > currentStart) {
+                        return false;
+                    }
+                }
+                return true;
+            })
         );
 
         const taskMap = await fetchComplianceTasksMap(branch_id, expandedRows);
@@ -1483,8 +1833,7 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
                 username: username != null ? String(username).trim() || null : null,
                 status: statusFilter,
                 search: search != null ? String(search).trim() || null : null,
-                compliance_year:
-                    complianceYearRaw || getFinancialYearForDate(new Date()),
+                compliance_year: complianceYearRaw,
                 compliance_period:
                     serviceFrequency && isYearlyComplianceFrequency(serviceFrequency)
                         ? null
@@ -1605,23 +1954,30 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
 
         const targetYear = complianceYearRaw
             ? normalizeFinancialYear(complianceYearRaw)
-            : getFinancialYearForDate(new Date());
+            : null;
+        const currentFy = getFinancialYearForDate(new Date());
 
         const assignmentRows = expandComplianceFirmPeriods(firmRows, {
-            complianceYear: complianceYearRaw || targetYear,
+            complianceYear: complianceYearRaw,
             compliancePeriod: compliancePeriodRaw || null,
         });
 
-        const startedTaskSql = `
+        let startedFilterSql = `
             SELECT t.service_id, t.firm_id, t.compliance_year, t.compliance_period, s.frequency
             FROM tasks t
             INNER JOIN services s ON s.service_id = t.service_id
             WHERE t.branch_id = ?
               AND t.task_type = 'compliance'
-              AND t.compliance_year = ?
         `;
-        const startedParams = [branch_id, targetYear];
-        let startedFilterSql = startedTaskSql;
+        const startedParams = [branch_id];
+        if (targetYear) {
+            startedFilterSql += ` AND t.compliance_year = ?`;
+            startedParams.push(targetYear);
+        } else {
+            const currentStart = parseInt(String(currentFy).split("-")[0], 10);
+            startedFilterSql += ` AND CAST(SUBSTRING_INDEX(t.compliance_year, '-', 1) AS UNSIGNED) <= ?`;
+            startedParams.push(currentStart);
+        }
         if (serviceId) {
             startedFilterSql += ` AND t.service_id = ?`;
             startedParams.push(serviceId);
@@ -1722,7 +2078,7 @@ router.get("/firms", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Compliance firms retrieved successfully",
-            data: rows.map(formatComplianceFirmRow),
+            data: await Promise.all(rows.map((row) => enrichComplianceFirmRow(row))),
             pagination: {
                 page_no: pageNum,
                 limit: limitNum,
@@ -1760,7 +2116,7 @@ router.get("/firm-details", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Compliance firm details retrieved successfully",
-            data: formatComplianceFirmRow(record.row),
+            data: await enrichComplianceFirmRow(record.row),
         });
     } catch (error) {
         console.error("GET COMPLIANCE FIRM DETAILS ERROR:", error);
@@ -1944,7 +2300,7 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Compliance firm updated successfully",
-            data: formatComplianceFirmRow(refreshed.row),
+            data: await enrichComplianceFirmRow(refreshed.row),
         });
     } catch (error) {
         console.error("PUT COMPLIANCE EDIT FIRM ERROR:", error);

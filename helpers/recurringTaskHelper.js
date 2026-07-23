@@ -224,6 +224,38 @@ export function getFinancialYearForDate(date) {
     }
 }
 
+/** Inclusive FY list from startFy through endFy (e.g. 2024-2025 … 2026-2027). */
+export function listFinancialYearsInclusive(startFy, endFy) {
+    const end = normalizeFinancialYear(endFy);
+    const start = normalizeFinancialYear(startFy);
+    const startInt = parseInt(String(start).split("-")[0], 10);
+    const endInt = parseInt(String(end).split("-")[0], 10);
+    if (!Number.isFinite(startInt) || !Number.isFinite(endInt)) {
+        return [end];
+    }
+    if (startInt > endInt) {
+        return [];
+    }
+    const years = [];
+    for (let year = startInt; year <= endInt; year += 1) {
+        years.push(`${year}-${year + 1}`);
+    }
+    return years;
+}
+
+/** Start FY for an assignment from effective_from; falls back to current FY when missing/invalid. */
+export function getEffectiveStartFinancialYear(effectiveFrom, frequency, now = new Date()) {
+    const currentFy = getFinancialYearForDate(now);
+    if (effectiveFrom == null || String(effectiveFrom).trim() === "") {
+        return currentFy;
+    }
+    const parsed = parseComplianceEffectiveFrom(effectiveFrom, frequency);
+    if (parsed.error || !parsed.periodStart) {
+        return currentFy;
+    }
+    return getFinancialYearForDate(parsed.periodStart);
+}
+
 const COMPLIANCE_MONTH_LABELS = [
     "April", "May", "June", "July", "August", "September",
     "October", "November", "December", "January", "February", "March",
@@ -658,51 +690,65 @@ export function buildComplianceTaskLookupKey(row) {
 
 export function expandComplianceFirmPeriods(firmRows, { complianceYear, compliancePeriod } = {}) {
     const now = new Date();
-    const targetYear = complianceYear
-        ? normalizeFinancialYear(complianceYear)
-        : getFinancialYearForDate(now);
     const currentFy = getFinancialYearForDate(now);
+    const singleYear =
+        complianceYear != null && String(complianceYear).trim() !== ""
+            ? normalizeFinancialYear(complianceYear)
+            : null;
     const explicitPeriod = compliancePeriod != null ? String(compliancePeriod).trim() : "";
     const expanded = [];
 
     for (const firm of firmRows) {
         const isYearly = isYearlyComplianceFrequency(firm.frequency);
-        const periods = isYearly
-            ? ["Annual"]
-            : explicitPeriod
-                ? [explicitPeriod]
-                : getPeriodsForFrequency(firm.frequency);
+        const years = singleYear
+            ? [singleYear]
+            : listFinancialYearsInclusive(
+                getEffectiveStartFinancialYear(firm.effective_from, firm.frequency, now),
+                currentFy
+            );
 
-        for (const period of periods) {
-            if (
-                !isCompliancePeriodOnOrAfterEffective(
-                    targetYear,
-                    period,
-                    firm.effective_from,
-                    firm.frequency
-                )
-            ) {
-                continue;
+        for (const targetYear of years) {
+            const periods = isYearly
+                ? ["Annual"]
+                : explicitPeriod
+                    ? [explicitPeriod]
+                    : getPeriodsForFrequency(firm.frequency);
+
+            for (const period of periods) {
+                if (
+                    !isCompliancePeriodOnOrAfterEffective(
+                        targetYear,
+                        period,
+                        firm.effective_from,
+                        firm.frequency
+                    )
+                ) {
+                    continue;
+                }
+
+                expanded.push({
+                    ...firm,
+                    compliance_year: targetYear,
+                    compliance_period: period,
+                    period_name: period,
+                    financial_year: targetYear,
+                    create_date: firm.create_date,
+                });
             }
-
-            expanded.push({
-                ...firm,
-                compliance_year: targetYear,
-                compliance_period: period,
-                period_name: period,
-                financial_year: targetYear,
-                create_date: firm.create_date,
-            });
         }
     }
 
-    if (!explicitPeriod && targetYear === currentFy) {
-        return filterCompliancePeriodsByVisibility(
-            filterSchedulesByRecurringRules(expanded, now),
-            now
-        );
-    }
+    const pastRows = expanded.filter((row) => row.compliance_year !== currentFy);
+    const currentRows = expanded.filter((row) => row.compliance_year === currentFy);
 
-    return filterCompliancePeriodsByVisibility(expanded, now);
+    const filteredPast = filterCompliancePeriodsByVisibility(pastRows, now);
+    const filteredCurrent = !explicitPeriod
+        ? filterCompliancePeriodsByVisibility(
+            filterSchedulesByRecurringRules(currentRows, now),
+            now
+        )
+        : filterCompliancePeriodsByVisibility(currentRows, now);
+
+    return [...filteredPast, ...filteredCurrent];
 }
 

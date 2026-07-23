@@ -4,6 +4,7 @@ const router = express.Router();
 import pool from "../db.js";
 import { auth, validateBranch } from '../middleware/auth.js';
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, TODAY_DATE, SET_OPENING_BALANCE, ID_LENGTH } from "../helpers/function.js";
+import { CLIENT_BALANCE_EFFECTS_SQL } from "../helpers/clientBalanceSql.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import multer from 'multer';
 import xlsx from 'xlsx';
@@ -714,6 +715,8 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
             INNER JOIN firms f
                 ON f.firm_id = gf.firm_id
                 AND f.is_deleted = '0'
+            LEFT JOIN profile p
+                ON p.username = f.username
             WHERE gf.is_deleted = '0'
               AND gf.group_id = ?
         `;
@@ -742,10 +745,15 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
                     f.district LIKE ? OR
                     f.state LIKE ? OR
                     f.country LIKE ? OR
-                    f.pincode LIKE ?
+                    f.pincode LIKE ? OR
+                    p.name LIKE ? OR
+                    p.guardian_name LIKE ? OR
+                    p.mobile LIKE ? OR
+                    p.email LIKE ? OR
+                    p.pan_number LIKE ?
                 )
             `;
-            queryParams.push(...Array(17).fill(searchPattern));
+            queryParams.push(...Array(22).fill(searchPattern));
         }
 
         /* ===============================
@@ -769,7 +777,14 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
                 gf.modify_date   AS mapping_modify_date,
                 gf.create_by,
                 gf.modify_by,
-                f.*
+                f.*,
+                p.name           AS client_name,
+                p.guardian_name  AS client_guardian_name,
+                p.care_of        AS client_care_of,
+                p.mobile         AS client_mobile,
+                p.email          AS client_email,
+                p.country_code   AS client_country_code,
+                p.pan_number     AS client_pan_number
             ${baseQuery}
             ORDER BY gf.create_date DESC
             LIMIT ? OFFSET ?
@@ -778,12 +793,44 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
         );
 
         /* ===============================
+           💰 Batch client balances for page usernames
+        =============================== */
+        const usernames = [
+            ...new Set(
+                rows
+                    .map((row) => String(row.username || "").trim())
+                    .filter(Boolean),
+            ),
+        ];
+        const balanceByUsername = new Map();
+        if (usernames.length > 0) {
+            const [balanceRows] = await pool.query(
+                `
+                SELECT b.party_id AS username, COALESCE(SUM(b.effect), 0) AS balance
+                FROM (
+                    ${CLIENT_BALANCE_EFFECTS_SQL}
+                ) b
+                WHERE b.party_id IN (?)
+                GROUP BY b.party_id
+                `,
+                [branch_id, branch_id, usernames],
+            );
+            for (const row of balanceRows) {
+                balanceByUsername.set(
+                    String(row.username),
+                    Number(row.balance) || 0,
+                );
+            }
+        }
+
+        /* ===============================
            🧠 Transform Response
         =============================== */
         const firms = await Promise.all(
             rows.map(async (row) => {
                 const createUser = row.create_by ? await USER_DATA(row.create_by) : null;
                 const modifyUser = row.modify_by ? await USER_DATA(row.modify_by) : null;
+                const username = row.username || "";
 
                 return {
                     index_id: row.group_firm_id,
@@ -809,6 +856,20 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
                         state: row.state,
                         country: row.country,
                         pincode: row.pincode
+                    },
+
+                    client: {
+                        username: username || "",
+                        name: row.client_name || "",
+                        guardian_name: row.client_guardian_name || "",
+                        care_of: row.client_care_of || "",
+                        mobile: row.client_mobile || "",
+                        email: row.client_email || "",
+                        country_code: row.client_country_code || "",
+                        pan_number: row.client_pan_number || "",
+                        balance: username
+                            ? Number(balanceByUsername.get(username) || 0)
+                            : 0
                     },
 
                     create_by: {
@@ -864,13 +925,15 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
 
     try {
-        const { group_id, firm_ids } = req.body || {};
+        const { group_id, firm_ids, search } = req.body || {};
+        const isAll =
+            req.body?.is_all === true ||
+            req.body?.is_all === "true" ||
+            req.body?.select_all === true ||
+            req.body?.select_all === "true";
         const modifiedBy = req.headers["username"] || "";
         const branch_id = req.branch_id;
 
-        /* ===============================
-           🔒 Validation
-        =============================== */
         if (!group_id) {
             return res.status(400).json({
                 success: false,
@@ -878,20 +941,18 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
             });
         }
 
-        if (!firm_ids || (Array.isArray(firm_ids) && firm_ids.length === 0)) {
+        if (
+            !isAll &&
+            (!firm_ids || (Array.isArray(firm_ids) && firm_ids.length === 0))
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "firm_ids is required"
             });
         }
 
-        const firmIdArray = Array.isArray(firm_ids) ? firm_ids : [firm_ids];
-
         await conn.beginTransaction();
 
-        /* ===============================
-           🔍 Validate group belongs to branch
-        =============================== */
         const [groupExists] = await conn.query(
             `SELECT group_id
              FROM groups
@@ -902,36 +963,83 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
         );
 
         if (groupExists.length === 0) {
+            await conn.rollback();
             return res.status(404).json({
                 success: false,
                 message: "Group not found or does not belong to this branch"
             });
         }
 
-        /* ===============================
-           🔍 Check existing mappings
-        =============================== */
-        const [existingMappings] = await conn.query(
-            `SELECT firm_id
-             FROM group_firms
-             WHERE group_id = ?
-               AND firm_id IN (?)
-               AND is_deleted = '0'`,
-            [group_id, firmIdArray]
-        );
+        let mappedFirmIds = [];
 
-        if (existingMappings.length === 0) {
+        if (isAll) {
+            let selectSql = `
+                SELECT gf.firm_id
+                FROM group_firms gf
+                INNER JOIN firms f
+                    ON f.firm_id = gf.firm_id
+                    AND f.is_deleted = '0'
+                LEFT JOIN profile p
+                    ON p.username = f.username
+                WHERE gf.is_deleted = '0'
+                  AND gf.group_id = ?
+            `;
+            const selectParams = [group_id];
+
+            if (search && String(search).trim() !== "") {
+                const searchPattern = `%${String(search).trim()}%`;
+                selectSql += `
+                    AND (
+                        f.username LIKE ? OR
+                        f.firm_name LIKE ? OR
+                        f.firm_type LIKE ? OR
+                        f.file_no LIKE ? OR
+                        f.gst_no LIKE ? OR
+                        f.pan_no LIKE ? OR
+                        f.tan_no LIKE ? OR
+                        f.vat_no LIKE ? OR
+                        f.cin_no LIKE ? OR
+                        f.address_line_1 LIKE ? OR
+                        f.address_line_2 LIKE ? OR
+                        f.city LIKE ? OR
+                        f.district LIKE ? OR
+                        f.state LIKE ? OR
+                        f.country LIKE ? OR
+                        f.pincode LIKE ? OR
+                        p.name LIKE ? OR
+                        p.guardian_name LIKE ? OR
+                        p.mobile LIKE ? OR
+                        p.email LIKE ? OR
+                        p.pan_number LIKE ?
+                    )
+                `;
+                selectParams.push(...Array(22).fill(searchPattern));
+            }
+
+            const [allMappings] = await conn.query(selectSql, selectParams);
+            mappedFirmIds = allMappings.map((r) => r.firm_id);
+        } else {
+            const firmIdArray = Array.isArray(firm_ids) ? firm_ids : [firm_ids];
+
+            const [existingMappings] = await conn.query(
+                `SELECT firm_id
+                 FROM group_firms
+                 WHERE group_id = ?
+                   AND firm_id IN (?)
+                   AND is_deleted = '0'`,
+                [group_id, firmIdArray]
+            );
+            mappedFirmIds = existingMappings.map((r) => r.firm_id);
+        }
+
+        if (mappedFirmIds.length === 0) {
+            await conn.rollback();
             return res.status(404).json({
                 success: false,
                 message: "No matching firm mappings found for this group"
             });
         }
 
-        const mappedFirmIds = existingMappings.map(r => r.firm_id);
-
-        /* ===============================
-           ❌ Soft delete mappings
-        =============================== */
         await conn.query(
             `UPDATE group_firms
              SET is_deleted = '1',
@@ -951,7 +1059,9 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
             message: "Firm(s) removed from group successfully",
             data: {
                 group_id,
-                firms_removed: mappedFirmIds
+                is_all: Boolean(isAll),
+                firms_removed: mappedFirmIds,
+                firms_removed_count: mappedFirmIds.length
             }
         });
 
@@ -968,6 +1078,7 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
         conn.release();
     }
 });
+
 /**
  * Get all active groups OR specific group details with firms and profile details
  * GET /api/email/groups/all

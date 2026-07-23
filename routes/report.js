@@ -17,6 +17,7 @@ import {
     buildComplianceTaskLookupKey,
     expandComplianceFirmPeriods,
     filterCompliancePeriodsByVisibility,
+    getFinancialYearForDate,
 } from "../helpers/recurringTaskHelper.js";
 
 const router = express.Router();
@@ -641,7 +642,9 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                    AND cf.service_id IN (${complianceFirmPlaceholders})`,
                 [branch_id, ...complianceServiceIds]
             );
-            expandedComplianceFirmPeriods = expandComplianceFirmPeriods(complianceFirmRows, {});
+            expandedComplianceFirmPeriods = expandComplianceFirmPeriods(complianceFirmRows, {
+                complianceYear: getFinancialYearForDate(new Date()),
+            });
         }
 
         // Helper function to get due date category (OD, DT, D7, FT)
@@ -2499,27 +2502,35 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
             clientBalanceCountParams(branch_id)
         );
 
-        // Today Received: transaction_type = 'receive' or 'sale' or 'received'
+        // Today Received: receive vouchers only (exclude sale/billing)
+        // Same source as /transaction/report/receive — invoice.type receive entries
         const [todayReceived] = await pool.query(
-            `SELECT 
+            `SELECT
                 COUNT(*) AS total_count,
-                COALESCE(SUM(amount), 0) AS total_amount
-             FROM transactions 
-             WHERE branch_id = ? 
-             AND DATE(transaction_date) = CURDATE()
-             AND LOWER(transaction_type) IN ('receive', 'received', 'sale')`,
+                COALESCE(SUM(t.amount), 0) AS total_amount
+             FROM invoice i
+             INNER JOIN transactions t
+                ON t.transaction_id = i.transaction_id
+               AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+             WHERE i.branch_id = ?
+               AND i.type IN ('payment receive', 'receive')
+               AND DATE(t.transaction_date) = CURDATE()`,
             [branch_id]
         );
 
-        // Today Payment: transaction_type = 'payment' or 'purchase' or 'pay'
+        // Today Payment: payment vouchers only (exclude purchase)
+        // Same source as /transaction/report/payment — invoice.type = 'payment'
         const [todayPayment] = await pool.query(
-            `SELECT 
+            `SELECT
                 COUNT(*) AS total_count,
-                COALESCE(SUM(ABS(amount)), 0) AS total_amount
-             FROM transactions 
-             WHERE branch_id = ? 
-             AND DATE(transaction_date) = CURDATE()
-             AND LOWER(transaction_type) IN ('payment', 'purchase', 'pay')`,
+                COALESCE(SUM(ABS(t.amount)), 0) AS total_amount
+             FROM invoice i
+             INNER JOIN transactions t
+                ON t.transaction_id = i.transaction_id
+               AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+             WHERE i.branch_id = ?
+               AND i.type = 'payment'
+               AND DATE(t.transaction_date) = CURDATE()`,
             [branch_id]
         );
 
@@ -2868,36 +2879,43 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
             }
 
             case "today_received":
-                // Today Received: DISTINCT transactions by transaction_id to avoid duplicates
+                // Receive vouchers only (exclude sale/billing) — same as receive register
                 const [receivedDetails] = await pool.query(
-                    `SELECT DISTINCT
+                    `SELECT
                         t.transaction_date AS date,
-                        CASE 
+                        CASE
                             WHEN t.party1_type = 'client' THEN CONCAT(COALESCE(p.name, t.party1_id), ' (', COALESCE(p.mobile, 'No Mobile'), ')')
                             WHEN t.party1_type = 'bank' THEN 'Bank Transfer'
                             ELSE t.party1_id
                         END AS particulars,
-                        t.invoice_no AS voucher_no,
+                        i.invoice_no AS voucher_no,
                         t.amount,
                         t.create_date AS received_at,
                         COALESCE(t.create_by, 'System') AS received_by
-                     FROM transactions t
+                     FROM invoice i
+                     INNER JOIN transactions t
+                        ON t.transaction_id = i.transaction_id
+                       AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
                      LEFT JOIN profile p ON p.username = t.party1_id
-                     WHERE t.branch_id = ? 
-                     AND DATE(t.transaction_date) = CURDATE()
-                     AND LOWER(t.transaction_type) IN ('receive', 'received', 'sale')
-                     GROUP BY t.transaction_id, t.create_date, t.party1_type, t.party1_id, t.invoice_no, t.amount, t.create_by
-                     ORDER BY t.create_date DESC
+                     WHERE i.branch_id = ?
+                       AND i.type IN ('payment receive', 'receive')
+                       AND DATE(t.transaction_date) = CURDATE()
+                     ORDER BY t.transaction_date DESC, t.id DESC
                      LIMIT ? OFFSET ?`,
                     [branch_id, limitNum, offset]
                 );
 
                 const [totalReceived] = await pool.query(
-                    `SELECT COUNT(DISTINCT transaction_id) AS total, COALESCE(SUM(amount), 0) AS total_amount
-                     FROM transactions 
-                     WHERE branch_id = ? 
-                     AND DATE(t.transaction_date) = CURDATE()
-                     AND LOWER(transaction_type) IN ('receive', 'received', 'sale')`,
+                    `SELECT
+                        COUNT(*) AS total,
+                        COALESCE(SUM(t.amount), 0) AS total_amount
+                     FROM invoice i
+                     INNER JOIN transactions t
+                        ON t.transaction_id = i.transaction_id
+                       AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+                     WHERE i.branch_id = ?
+                       AND i.type IN ('payment receive', 'receive')
+                       AND DATE(t.transaction_date) = CURDATE()`,
                     [branch_id]
                 );
 
@@ -2912,36 +2930,43 @@ router.get("/dashboard/details", auth, validateBranch, async (req, res) => {
                 break;
 
             case "today_payment":
-                // Today Payment: DISTINCT transactions by transaction_id to avoid duplicates
+                // Payment vouchers only (exclude purchase) — same as payment register
                 const [paymentDetails] = await pool.query(
-                    `SELECT DISTINCT
+                    `SELECT
                         t.transaction_date AS date,
-                        CASE 
+                        CASE
                             WHEN t.party2_type = 'client' THEN CONCAT(COALESCE(p.name, t.party2_id), ' (', COALESCE(p.mobile, 'No Mobile'), ')')
                             WHEN t.party2_type = 'bank' THEN 'Bank Transfer'
                             ELSE t.party2_id
                         END AS particulars,
-                        t.invoice_no AS voucher_no,
+                        i.invoice_no AS voucher_no,
                         ABS(t.amount) AS amount,
                         t.create_date AS paid_at,
                         COALESCE(t.create_by, 'System') AS paid_by
-                     FROM transactions t
+                     FROM invoice i
+                     INNER JOIN transactions t
+                        ON t.transaction_id = i.transaction_id
+                       AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
                      LEFT JOIN profile p ON p.username = t.party2_id
-                     WHERE t.branch_id = ? 
-                     AND DATE(t.transaction_date) = CURDATE()
-                     AND LOWER(t.transaction_type) IN ('payment', 'purchase', 'pay')
-                     GROUP BY t.transaction_id, t.create_date, t.party2_type, t.party2_id, t.invoice_no, t.amount, t.create_by
-                     ORDER BY t.create_date DESC
+                     WHERE i.branch_id = ?
+                       AND i.type = 'payment'
+                       AND DATE(t.transaction_date) = CURDATE()
+                     ORDER BY t.transaction_date DESC, t.id DESC
                      LIMIT ? OFFSET ?`,
                     [branch_id, limitNum, offset]
                 );
 
                 const [totalPayment] = await pool.query(
-                    `SELECT COUNT(DISTINCT transaction_id) AS total, COALESCE(SUM(ABS(amount)), 0) AS total_amount
-                     FROM transactions 
-                     WHERE branch_id = ? 
-                     AND DATE(t.transaction_date) = CURDATE()
-                     AND LOWER(transaction_type) IN ('payment', 'purchase', 'pay')`,
+                    `SELECT
+                        COUNT(*) AS total,
+                        COALESCE(SUM(ABS(t.amount)), 0) AS total_amount
+                     FROM invoice i
+                     INNER JOIN transactions t
+                        ON t.transaction_id = i.transaction_id
+                       AND CAST(t.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+                     WHERE i.branch_id = ?
+                       AND i.type = 'payment'
+                       AND DATE(t.transaction_date) = CURDATE()`,
                     [branch_id]
                 );
 
