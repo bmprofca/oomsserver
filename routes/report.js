@@ -3212,48 +3212,142 @@ router.get("/sales-top-summary", auth, validateBranch, async (req, res) => {
             };
         }
 
-        // 2. STAFF WISE DATA (from tasks table using complete_date)
+        // 2. STAFF WISE DATA — from sale_entries.create_by
+        // is_task ENUM('0','1'): '1' = task, '0' = direct (compare as strings only)
         if (type === "staff" || type === "both") {
-            // Get top staff
-            const [topStaff] = await pool.query(
-                `SELECT 
-                    t.complete_by as staff_username,
-                    COALESCE(p.name, t.complete_by) as staff_name,
-                    COALESCE(SUM(t.total), 0) as total_sales
-                FROM tasks t
-                LEFT JOIN profile p ON t.complete_by = p.username
-                WHERE t.branch_id = ? 
-                AND t.status = 'complete'
-                AND t.billing_status = '1'
-                AND t.complete_date IS NOT NULL
-                AND DATE(t.complete_date) BETWEEN ? AND ?
-                AND t.complete_by IS NOT NULL
-                GROUP BY t.complete_by
-                ORDER BY total_sales DESC
-                LIMIT 1`,
+            const staffLimit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+
+            const [staffRows] = await pool.query(
+                `SELECT
+                    se.create_by AS username,
+                    COALESCE(MAX(p.name), se.create_by) AS name,
+                    MAX(p.mobile) AS mobile,
+                    MAX(p.email) AS email,
+                    MAX(p.country_code) AS country_code,
+                    COUNT(DISTINCT CASE
+                        WHEN CAST(se.is_task AS CHAR) = '1' THEN se.sale_id
+                        ELSE NULL
+                    END) AS task_count,
+                    COALESCE(SUM(CASE
+                        WHEN CAST(se.is_task AS CHAR) = '1' THEN COALESCE(se.total, 0)
+                        ELSE 0
+                    END), 0) AS task_amount,
+                    COUNT(DISTINCT CASE
+                        WHEN CAST(se.is_task AS CHAR) = '0' THEN se.sale_id
+                        ELSE NULL
+                    END) AS direct_count,
+                    COALESCE(SUM(CASE
+                        WHEN CAST(se.is_task AS CHAR) = '0' THEN COALESCE(se.total, 0)
+                        ELSE 0
+                    END), 0) AS direct_amount,
+                    COUNT(DISTINCT se.sale_id) AS total_count,
+                    COALESCE(SUM(COALESCE(se.total, 0)), 0) AS total_amount
+                FROM sale_entries se
+                LEFT JOIN profile p ON se.create_by = p.username
+                WHERE se.branch_id = ?
+                  AND se.sale_date >= ? AND se.sale_date <= ?
+                  AND se.create_by IS NOT NULL
+                  AND TRIM(se.create_by) <> ''
+                GROUP BY se.create_by
+                HAVING total_amount > 0
+                ORDER BY total_amount DESC
+                LIMIT ?`,
+                [branch_id, from_date, to_date, staffLimit]
+            );
+
+            const [staffSummaryRows] = await pool.query(
+                `SELECT
+                    COUNT(DISTINCT se.create_by) AS total_staff,
+                    COALESCE(SUM(COALESCE(se.total, 0)), 0) AS grand_total,
+                    COUNT(DISTINCT se.sale_id) AS total_count,
+                    COUNT(DISTINCT CASE
+                        WHEN CAST(se.is_task AS CHAR) = '1' THEN se.sale_id
+                        ELSE NULL
+                    END) AS task_count,
+                    COALESCE(SUM(CASE
+                        WHEN CAST(se.is_task AS CHAR) = '1' THEN COALESCE(se.total, 0)
+                        ELSE 0
+                    END), 0) AS task_amount,
+                    COUNT(DISTINCT CASE
+                        WHEN CAST(se.is_task AS CHAR) = '0' THEN se.sale_id
+                        ELSE NULL
+                    END) AS direct_count,
+                    COALESCE(SUM(CASE
+                        WHEN CAST(se.is_task AS CHAR) = '0' THEN COALESCE(se.total, 0)
+                        ELSE 0
+                    END), 0) AS direct_amount
+                FROM sale_entries se
+                WHERE se.branch_id = ?
+                  AND se.sale_date >= ? AND se.sale_date <= ?
+                  AND se.create_by IS NOT NULL
+                  AND TRIM(se.create_by) <> ''`,
                 [branch_id, from_date, to_date]
             );
 
-            // Get total sales across all staff
-            const [totalStaffResult] = await pool.query(
-                `SELECT COALESCE(SUM(t.total), 0) as total_sales
-                FROM tasks t
-                WHERE t.branch_id = ? 
-                AND t.status = 'complete'
-                AND t.billing_status = '1'
-                AND t.complete_date IS NOT NULL
-                AND DATE(t.complete_date) BETWEEN ? AND ?
-                AND t.complete_by IS NOT NULL`,
-                [branch_id, from_date, to_date]
-            );
+            const summaryRow = staffSummaryRows[0] || {};
+            const grandTotal = parseFloat(summaryRow.grand_total || 0);
+
+            const staffs = staffRows.map((row, index) => {
+                const taskAmount = parseFloat(row.task_amount || 0);
+                const directAmount = parseFloat(row.direct_amount || 0);
+                const totalAmount = parseFloat(row.total_amount || 0);
+                const totalCount = parseInt(row.total_count || 0, 10);
+                const mobile = row.mobile
+                    ? `${row.country_code || "+91"} ${row.mobile}`.trim()
+                    : null;
+                return {
+                    rank: index + 1,
+                    username: row.username,
+                    name: row.name || row.username,
+                    contact: {
+                        mobile: mobile || null,
+                        email: row.email || null,
+                    },
+                    task: {
+                        count: parseInt(row.task_count || 0, 10),
+                        amount: taskAmount,
+                    },
+                    direct: {
+                        count: parseInt(row.direct_count || 0, 10),
+                        amount: directAmount,
+                    },
+                    total_count: totalCount,
+                    total_amount: totalAmount,
+                    percentage:
+                        grandTotal > 0
+                            ? Number(((totalAmount / grandTotal) * 100).toFixed(2))
+                            : 0,
+                };
+            });
+
+            const topStaff = staffs.length > 0 ? staffs[0] : null;
 
             response.data.staff_wise = {
-                top_staff: topStaff.length > 0 ? {
-                    username: topStaff[0].staff_username,
-                    name: topStaff[0].staff_name,
-                    total_sales: parseFloat(topStaff[0].total_sales)
-                } : null,
-                total_sales: parseFloat(totalStaffResult[0]?.total_sales || 0)
+                summary: {
+                    total_staff: parseInt(summaryRow.total_staff || 0, 10),
+                    total_sales: grandTotal,
+                    total_count: parseInt(summaryRow.total_count || 0, 10),
+                    task: {
+                        count: parseInt(summaryRow.task_count || 0, 10),
+                        amount: parseFloat(summaryRow.task_amount || 0),
+                    },
+                    direct: {
+                        count: parseInt(summaryRow.direct_count || 0, 10),
+                        amount: parseFloat(summaryRow.direct_amount || 0),
+                    },
+                },
+                top_staff: topStaff
+                    ? {
+                          username: topStaff.username,
+                          name: topStaff.name,
+                          contact: topStaff.contact,
+                          total_sales: topStaff.total_amount,
+                          total_count: topStaff.total_count,
+                          task: topStaff.task,
+                          direct: topStaff.direct,
+                      }
+                    : null,
+                staffs,
             };
         }
 
@@ -3265,6 +3359,176 @@ router.get("/sales-top-summary", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to fetch top sales summary",
             error: error.message
+        });
+    }
+});
+
+// Staff × Service sales contribution (for staff-wise sales page)
+router.get("/staff-service-sales-contribution", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { from_date, to_date } = req.query;
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const hasPerm = await checkUserPermission(username, branch_id, "card_staff_wise_sales");
+        if (!hasPerm) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized: You do not have permission to view this card",
+            });
+        }
+
+        if (!from_date || !to_date) {
+            return res.status(400).json({
+                success: false,
+                message: "Both from_date and to_date are required",
+            });
+        }
+
+        const serviceLimit = Math.min(30, Math.max(1, Number(req.query.service_limit) || 12));
+        const staffLimit = Math.min(12, Math.max(1, Number(req.query.staff_limit) || 6));
+
+        const [rows] = await pool.query(
+            `SELECT
+                si.service_id,
+                COALESCE(MAX(s.name), 'Unknown Service') AS service_name,
+                se.create_by AS username,
+                COALESCE(MAX(p.name), se.create_by) AS staff_name,
+                COALESCE(SUM(COALESCE(si.total, 0)), 0) AS amount,
+                COUNT(DISTINCT se.sale_id) AS sale_count
+             FROM sale_items si
+             INNER JOIN sale_entries se
+                ON CAST(si.sale_id AS CHAR) = CAST(se.sale_id AS CHAR)
+               AND CAST(si.branch_id AS CHAR) = CAST(se.branch_id AS CHAR)
+             LEFT JOIN services s ON si.service_id = s.service_id
+             LEFT JOIN profile p ON se.create_by = p.username
+             WHERE CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)
+               AND se.sale_date >= ? AND se.sale_date <= ?
+               AND se.create_by IS NOT NULL
+               AND TRIM(se.create_by) <> ''
+               AND COALESCE(si.total, 0) > 0
+             GROUP BY si.service_id, se.create_by
+             HAVING amount > 0
+             ORDER BY amount DESC`,
+            [branch_id, from_date, to_date]
+        );
+
+        const staffTotals = new Map();
+        const serviceMap = new Map();
+
+        for (const row of rows) {
+            const amount = parseFloat(row.amount || 0);
+            const count = parseInt(row.sale_count || 0, 10);
+            const staffKey = row.username;
+            const serviceKey = row.service_id || "unknown";
+
+            if (!staffTotals.has(staffKey)) {
+                staffTotals.set(staffKey, {
+                    username: staffKey,
+                    name: row.staff_name || staffKey,
+                    amount: 0,
+                    count: 0,
+                });
+            }
+            const staffAgg = staffTotals.get(staffKey);
+            staffAgg.amount += amount;
+            staffAgg.count += count;
+
+            if (!serviceMap.has(serviceKey)) {
+                serviceMap.set(serviceKey, {
+                    service_id: row.service_id,
+                    service_name: row.service_name || "Unknown Service",
+                    total_amount: 0,
+                    total_count: 0,
+                    staffs: [],
+                });
+            }
+            const serviceAgg = serviceMap.get(serviceKey);
+            serviceAgg.total_amount += amount;
+            serviceAgg.total_count += count;
+            serviceAgg.staffs.push({
+                username: staffKey,
+                name: row.staff_name || staffKey,
+                amount,
+                count,
+            });
+        }
+
+        const topStaff = [...staffTotals.values()]
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, staffLimit);
+
+        const topStaffKeys = new Set(topStaff.map((s) => s.username));
+
+        const services = [...serviceMap.values()]
+            .sort((a, b) => b.total_amount - a.total_amount)
+            .slice(0, serviceLimit)
+            .map((service, index) => {
+                const byStaff = {};
+                let othersAmount = 0;
+                let othersCount = 0;
+
+                for (const staff of service.staffs) {
+                    if (topStaffKeys.has(staff.username)) {
+                        byStaff[staff.username] = {
+                            amount: staff.amount,
+                            count: staff.count,
+                            name: staff.name,
+                        };
+                    } else {
+                        othersAmount += staff.amount;
+                        othersCount += staff.count;
+                    }
+                }
+
+                return {
+                    rank: index + 1,
+                    service_id: service.service_id,
+                    service_name: service.service_name,
+                    total_amount: Number(service.total_amount.toFixed(2)),
+                    total_count: service.total_count,
+                    by_staff: byStaff,
+                    others: {
+                        amount: Number(othersAmount.toFixed(2)),
+                        count: othersCount,
+                    },
+                };
+            });
+
+        const grandTotal = [...serviceMap.values()].reduce(
+            (sum, s) => sum + s.total_amount,
+            0
+        );
+        const grandCount = [...serviceMap.values()].reduce(
+            (sum, s) => sum + s.total_count,
+            0
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Staff service sales contribution retrieved successfully",
+            data: {
+                period: { from_date, to_date },
+                summary: {
+                    total_sales: Number(grandTotal.toFixed(2)),
+                    total_count: grandCount,
+                    total_services: serviceMap.size,
+                    total_staff: staffTotals.size,
+                },
+                staff_series: topStaff.map((s) => ({
+                    username: s.username,
+                    name: s.name,
+                    amount: Number(s.amount.toFixed(2)),
+                    count: s.count,
+                })),
+                services,
+            },
+        });
+    } catch (error) {
+        console.error("Staff service sales contribution error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch staff service sales contribution",
+            error: error.message,
         });
     }
 });
