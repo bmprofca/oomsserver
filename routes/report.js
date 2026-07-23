@@ -283,55 +283,55 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
                     )
                 ), 0) AS gst_amount,
                 COUNT(DISTINCT CASE
-                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                    WHEN CAST(se.is_task AS CHAR) = '1'
                          AND LOWER(COALESCE(se.party_type, '')) = 'client'
                     THEN se.sale_id
                     ELSE NULL
                 END) AS task_sale_count,
                 COUNT(DISTINCT CASE
-                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                    WHEN CAST(se.is_task AS CHAR) = '1'
                          AND LOWER(COALESCE(se.party_type, '')) = 'client'
                     THEN se.sale_id
                     ELSE NULL
                 END) AS breakdown_task_count,
                 COALESCE(SUM(CASE
-                    WHEN (se.is_task = '1' OR se.is_task = 1)
+                    WHEN CAST(se.is_task AS CHAR) = '1'
                          AND LOWER(COALESCE(se.party_type, '')) = 'client'
                     THEN COALESCE(se.total, 0)
                     ELSE 0
                 END), 0) AS breakdown_task_amount,
                 COUNT(DISTINCT CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) = 'client'
                     THEN se.sale_id
                     ELSE NULL
                 END) AS breakdown_client_count,
                 COALESCE(SUM(CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) = 'client'
                     THEN COALESCE(se.total, 0)
                     ELSE 0
                 END), 0) AS breakdown_client_amount,
                 COUNT(DISTINCT CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) = 'bank'
                     THEN se.sale_id
                     ELSE NULL
                 END) AS breakdown_bank_count,
                 COALESCE(SUM(CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) = 'bank'
                     THEN COALESCE(se.total, 0)
                     ELSE 0
                 END), 0) AS breakdown_bank_amount,
                 COUNT(DISTINCT CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
                     THEN se.sale_id
                     ELSE NULL
                 END) AS breakdown_other_count,
                 COALESCE(SUM(CASE
-                    WHEN (se.is_task = '0' OR se.is_task = 0)
+                    WHEN CAST(se.is_task AS CHAR) = '0'
                          AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
                     THEN COALESCE(se.total, 0)
                     ELSE 0
@@ -1688,6 +1688,48 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
         );
         const taskCompletedToday = tasksCompletedResult[0]?.total || 0;
 
+        // 9. Total CA
+        const [totalCaResult] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM clients
+             WHERE branch_id = ?
+               AND user_type = 'ca'
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [branch_id]
+        );
+        const totalCa = totalCaResult[0]?.total || 0;
+
+        // 10. Total Agent
+        const [totalAgentResult] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM clients
+             WHERE branch_id = ?
+               AND user_type = 'agent'
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [branch_id]
+        );
+        const totalAgent = totalAgentResult[0]?.total || 0;
+
+        // 11. Total Firms
+        const [totalFirmsResult] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM firms
+             WHERE branch_id = ?
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [branch_id]
+        );
+        const totalFirms = totalFirmsResult[0]?.total || 0;
+
+        // 12. Total Services (branch-assigned)
+        const [totalServicesResult] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM branch_services
+             WHERE branch_id = ?
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [branch_id]
+        );
+        const totalServices = totalServicesResult[0]?.total || 0;
+
         // Additional helpful metrics
         // Pending tasks (not complete or cancel)
         const [pendingTasksResult] = await pool.query(
@@ -1843,6 +1885,10 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
                 present_today: presentToday,
                 task_created_today: taskCreatedToday,
                 task_completed_today: taskCompletedToday,
+                total_ca: totalCa,
+                total_agent: totalAgent,
+                total_firms: totalFirms,
+                total_services: totalServices,
                 recurring_task_summary: {
                     total_tasks: totalRecurringTasks,
                     overdue_tasks: overdueRecurringTasks,
@@ -2430,13 +2476,15 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
             });
         }
 
-        // Pending Billing Count (from tasks table)
-        // Pending Billing Count (from tasks table)
+        // Pending Billing Count + total fees (from tasks table)
         const [pendingBilling] = await pool.query(
-            `SELECT COUNT(*) AS total FROM tasks 
-     WHERE branch_id = ? 
-     AND status = 'complete' 
-     AND billing_status IN (0, '0')`,
+            `SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(COALESCE(total, fees, 0)), 0) AS total_amount
+             FROM tasks
+             WHERE branch_id = ?
+               AND status = 'complete'
+               AND billing_status IN (0, '0')`,
             [branch_id]
         );
         // Creditors: clients with negative net balance (GET_BALANCE rules)
@@ -2551,7 +2599,8 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
             message: "Dashboard quick stats retrieved successfully",
             data: {
                 pending_billing: {
-                    count: Number(pendingBilling[0]?.total) || 0
+                    count: Number(pendingBilling[0]?.total) || 0,
+                    total_amount: Number(pendingBilling[0]?.total_amount) || 0
                 },
                 creditors: {
                     count: Number(creditors[0]?.total_count) || 0,
@@ -3684,7 +3733,10 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
         const offset = (pageNum - 1) * limitNum;
 
-        // Aggregate top clients first (no per-row firms subquery — avoids max_statement_time timeout)
+        // Aggregate top clients with task vs direct breakdown.
+        // sale_entries.is_task is ENUM('0','1') — compare as strings only.
+        // Numeric compares (is_task = 1) match ENUM index 1 which is '0' (direct).
+        // Rule: is_task = '1' → task, is_task = '0' → direct.
         const [clientsData] = await pool.query(
             `SELECT 
                 se.party_id as username,
@@ -3694,6 +3746,22 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                 MAX(p.mobile) as mobile,
                 MAX(p.email) as email,
                 MAX(p.country_code) as country_code,
+                COUNT(DISTINCT CASE
+                    WHEN CAST(se.is_task AS CHAR) = '1' THEN se.sale_id
+                    ELSE NULL
+                END) AS task_count,
+                COALESCE(SUM(CASE
+                    WHEN CAST(se.is_task AS CHAR) = '1' THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS task_amount,
+                COUNT(DISTINCT CASE
+                    WHEN CAST(se.is_task AS CHAR) = '0' THEN se.sale_id
+                    ELSE NULL
+                END) AS direct_count,
+                COALESCE(SUM(CASE
+                    WHEN CAST(se.is_task AS CHAR) = '0' THEN COALESCE(se.total, 0)
+                    ELSE 0
+                END), 0) AS direct_amount,
                 COUNT(DISTINCT se.sale_id) as total_transactions,
                 COUNT(se.id) as total_items,
                 COALESCE(SUM(se.total), 0) as total_amount,
@@ -3703,17 +3771,13 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
             LEFT JOIN profile p ON se.party_id = p.username
             WHERE se.branch_id = ?
             AND se.sale_date >= ? AND se.sale_date <= ?
-            AND se.party_type = 'client'
-            AND (se.is_task = '0' OR se.is_task = 0 OR se.is_task IS NULL)
+            AND LOWER(COALESCE(se.party_type, '')) = 'client'
             GROUP BY se.party_id
             HAVING total_amount > 0
             ORDER BY total_amount DESC
             LIMIT ? OFFSET ?`,
             [branch_id, from_date, to_date, limitNum, offset]
         );
-
-        const clientUsernames = clientsData.map((c) => c.username).filter(Boolean);
-        const firmsByUsername = await getFirmsMapForUsernames(branch_id, clientUsernames);
 
         // Get total count for pagination
         const [countResult] = await pool.query(
@@ -3723,8 +3787,7 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                 FROM sale_entries se
                 WHERE se.branch_id = ?
                 AND se.sale_date >= ? AND se.sale_date <= ?
-                AND se.party_type = 'client'
-                AND (se.is_task = '0' OR se.is_task = 0 OR se.is_task IS NULL)
+                AND LOWER(COALESCE(se.party_type, '')) = 'client'
                 GROUP BY se.party_id
                 HAVING COALESCE(SUM(se.total), 0) > 0
             ) counted`,
@@ -3734,21 +3797,13 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
         const total = countResult[0]?.total || 0;
         const totalPages = Math.ceil(total / limitNum);
 
-        // Format the response data with proper firm parsing
+        // Format the response data
         const formattedClients = clientsData.map((client, index) => {
-            const firmsRaw = firmsByUsername[client.username] || [];
-            const firms = firmsRaw.map((f) => ({
-                firm_id: f.firm_id,
-                firm_name: f.firm_name,
-                firm_type: f.firm_type,
-                gst_no: f.gst_no,
-                pan_no: f.pan_no,
-                tan_no: f.tan_no,
-                address: f.address?.address_line_1 || '',
-                city: f.address?.city || '',
-                state: f.address?.state || '',
-                status: f.status,
-            }));
+            const taskCount = parseInt(client.task_count || 0, 10);
+            const taskAmount = parseFloat(client.task_amount || 0);
+            const directCount = parseInt(client.direct_count || 0, 10);
+            const directAmount = parseFloat(client.direct_amount || 0);
+            const totalAmount = parseFloat(client.total_amount || 0);
 
             return {
                 rank: index + 1,
@@ -3762,9 +3817,16 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                         email: client.email || 'N/A'
                     }
                 },
-                firms: firms.length > 0 ? firms : null,
                 sales_summary: {
-                    total_amount: parseFloat(client.total_amount),
+                    task: {
+                        count: taskCount,
+                        amount: taskAmount,
+                    },
+                    direct: {
+                        count: directCount,
+                        amount: directAmount,
+                    },
+                    total_amount: totalAmount,
                     total_transactions: client.total_transactions,
                     total_items: client.total_items,
                     first_sale_date: client.first_sale_date,
@@ -3784,18 +3846,33 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
             }
         }
 
-        // Get summary statistics for the period
+        // Get summary statistics for the period (same is_task string rule)
         const [summaryResult] = await pool.query(
             `SELECT 
                 COUNT(DISTINCT party_id) as total_clients,
                 COALESCE(SUM(total), 0) as grand_total,
                 COUNT(DISTINCT sale_id) as total_transactions,
-                COUNT(id) as total_items
+                COUNT(id) as total_items,
+                COUNT(DISTINCT CASE
+                    WHEN CAST(is_task AS CHAR) = '1' THEN sale_id
+                    ELSE NULL
+                END) AS task_count,
+                COALESCE(SUM(CASE
+                    WHEN CAST(is_task AS CHAR) = '1' THEN COALESCE(total, 0)
+                    ELSE 0
+                END), 0) AS task_amount,
+                COUNT(DISTINCT CASE
+                    WHEN CAST(is_task AS CHAR) = '0' THEN sale_id
+                    ELSE NULL
+                END) AS direct_count,
+                COALESCE(SUM(CASE
+                    WHEN CAST(is_task AS CHAR) = '0' THEN COALESCE(total, 0)
+                    ELSE 0
+                END), 0) AS direct_amount
             FROM sale_entries
             WHERE branch_id = ?
             AND sale_date >= ? AND sale_date <= ?
-            AND party_type = 'client'
-            AND (is_task = '0' OR is_task = 0 OR is_task IS NULL)
+            AND LOWER(COALESCE(party_type, '')) = 'client'
             `,
             [branch_id, from_date, to_date]
         );
@@ -3816,6 +3893,14 @@ router.get("/top-clients-by-sales", auth, validateBranch, async (req, res) => {
                     grand_total_sales: parseFloat(summaryResult[0]?.grand_total || 0),
                     total_transactions: summaryResult[0]?.total_transactions || 0,
                     total_items_sold: summaryResult[0]?.total_items || 0,
+                    task: {
+                        count: parseInt(summaryResult[0]?.task_count || 0, 10),
+                        amount: parseFloat(summaryResult[0]?.task_amount || 0),
+                    },
+                    direct: {
+                        count: parseInt(summaryResult[0]?.direct_count || 0, 10),
+                        amount: parseFloat(summaryResult[0]?.direct_amount || 0),
+                    },
                     average_per_client: summaryResult[0]?.total_clients > 0
                         ? parseFloat(summaryResult[0]?.grand_total || 0) / summaryResult[0]?.total_clients
                         : 0
