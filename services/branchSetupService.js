@@ -19,10 +19,6 @@ function getDefaultExpireDate() {
     return expire.toISOString().slice(0, 10);
 }
 
-function calcGstValue(fees, gstRate) {
-    return Number(((fees * gstRate) / 100).toFixed(2));
-}
-
 export async function setupInvoicePrefixes(branchId, createdBy, connection = null) {
     const runner = connection || pool;
     const issueDate = TODAY_DATE();
@@ -114,8 +110,11 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
     );
 
     const fees = Number(service.default_amount || 0);
-    const gstRate = 0;
-    const gstValue = calcGstValue(fees, gstRate);
+    const dueDateRaw = Number(service.default_due_date);
+    const dueDate = Number.isInteger(dueDateRaw) && dueDateRaw >= 1 && dueDateRaw <= 31
+        ? dueDateRaw
+        : 10;
+    const remark = 'Default service added during branch setup';
     const now = TODAY_DATE();
 
     if (softDeleted.length > 0) {
@@ -124,8 +123,7 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
              SET is_deleted = '0',
                  deleted_by = NULL,
                  fees = ?,
-                 gst_rate = ?,
-                 gst_value = ?,
+                 due_date = ?,
                  remark = ?,
                  modify_by = ?,
                  modify_date = ?
@@ -133,9 +131,8 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
                AND service_id = ?`,
             [
                 fees,
-                gstRate,
-                gstValue,
-                'Default service added during branch setup',
+                dueDate,
+                remark,
                 createdBy,
                 now,
                 branchId,
@@ -145,16 +142,15 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
     } else {
         await runner.query(
             `INSERT INTO branch_services (
-                branch_id, service_id, fees, remark,
+                branch_id, service_id, fees, due_date, remark,
                 create_by, modify_by, is_deleted, create_date, modify_date
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, '0', ?, ?)`,
             [
                 branchId,
                 service.service_id,
                 fees,
-                gstRate,
-                gstValue,
-                'Default service added during branch setup',
+                dueDate,
+                remark,
                 createdBy,
                 createdBy,
                 now,
@@ -167,8 +163,7 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
         service_id: service.service_id,
         name: service.name,
         fees,
-        gst_rate: gstRate,
-        gst_value: gstValue,
+        due_date: dueDate,
         skipped: false,
     };
 }
