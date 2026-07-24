@@ -6,6 +6,8 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 
 | File | When to tag |
 |------|-------------|
+| [`subscription.md`](./subscription.md) | Branch `user_subscriptions`, activate/replace plans, admin manual assign, middleware |
+| [`group-firms.md`](./group-firms.md) | Group details, firm list search/balance/last payment, debtor-clients for reminders |
 | [`client-balance.md`](./client-balance.md) | Debtors/creditors dashboard APIs, `clientBalanceSql`, client `pan_number` on lists |
 | [`payment-reminder.md`](./payment-reminder.md) | `POST /client/payment-reminder`, debit eligibility, channels |
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
@@ -15,6 +17,8 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 
 | Server | Client |
 |--------|--------|
+| `subscription.md` | `CLIENT/context/subscription.md` |
+| `group-firms.md` | `CLIENT/context/group-firms.md`, `CLIENT/context/payment-reminder.md` |
 | `client-balance.md` | `CLIENT/context/client-profile.md`, `CLIENT/context/ledger-tab.md`, debtors UI |
 | `payment-reminder.md` | `CLIENT/context/payment-reminder.md` |
 | `gst-change.md` | `CLIENT/context/gst-change.md` |

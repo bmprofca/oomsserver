@@ -4,7 +4,7 @@ const router = express.Router();
 import pool from "../db.js";
 import { auth, validateBranch } from '../middleware/auth.js';
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, TODAY_DATE, SET_OPENING_BALANCE, ID_LENGTH } from "../helpers/function.js";
-import { CLIENT_BALANCE_EFFECTS_SQL } from "../helpers/clientBalanceSql.js";
+import { CLIENT_BALANCE_EFFECTS_SQL, CLIENT_LAST_PAYMENT_SQL } from "../helpers/clientBalanceSql.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import multer from 'multer';
 import xlsx from 'xlsx';
@@ -241,6 +241,89 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to fetch Group list",
             error: error.message
+        });
+    }
+});
+
+/**
+ * Lightweight group details for a branch.
+ * GET /group/details/:group_id
+ */
+router.get("/details/:group_id", auth, validateBranch, async (req, res) => {
+    try {
+        const group_id = String(req.params.group_id || "").trim();
+        const branch_id = req.branch_id;
+
+        if (!group_id) {
+            return res.status(400).json({
+                success: false,
+                message: "group_id is required",
+            });
+        }
+
+        const [groupRows] = await pool.query(
+            `SELECT
+                g.group_id,
+                g.name,
+                g.remark,
+                g.status,
+                g.create_by,
+                g.modify_by,
+                g.create_date,
+                g.modify_date
+             FROM groups g
+             WHERE g.group_id = ?
+               AND g.branch_id = ?
+               AND g.is_deleted = '0'
+             LIMIT 1`,
+            [group_id, branch_id]
+        );
+
+        if (!groupRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found for this branch",
+                code: "GROUP_NOT_FOUND",
+            });
+        }
+
+        const group = groupRows[0];
+
+        const [countRows] = await pool.query(
+            `SELECT COUNT(*) AS firm_count
+             FROM group_firms gf
+             INNER JOIN firms f
+                ON f.firm_id = gf.firm_id
+               AND f.is_deleted = '0'
+             WHERE gf.group_id = ?
+               AND gf.is_deleted = '0'`,
+            [group_id]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Group details retrieved successfully",
+            data: {
+                group: {
+                    group_id: group.group_id,
+                    group_name: group.name,
+                    group_remark: group.remark || "",
+                    status: group.status,
+                    is_active: String(group.status) === "1",
+                    firm_count: Number(countRows[0]?.firm_count) || 0,
+                    create_by: group.create_by || "",
+                    modify_by: group.modify_by || "",
+                    create_date: group.create_date,
+                    modify_date: group.modify_date,
+                },
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching group details:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch group details",
+            error: error.message,
         });
     }
 });
@@ -728,32 +811,36 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
         =============================== */
         if (search && search.trim() !== "") {
             const searchPattern = `%${search.trim()}%`;
+            // Keep placeholder count in sync with LIKE clauses below (currently 21).
+            const searchClauses = [
+                "f.username",
+                "f.firm_name",
+                "f.firm_type",
+                "f.file_no",
+                "f.gst_no",
+                "f.pan_no",
+                "f.tan_no",
+                "f.vat_no",
+                "f.cin_no",
+                "f.address_line_1",
+                "f.address_line_2",
+                "f.city",
+                "f.district",
+                "f.state",
+                "f.country",
+                "f.pincode",
+                "p.name",
+                "p.guardian_name",
+                "p.mobile",
+                "p.email",
+                "p.pan_number",
+            ];
             baseQuery += `
                 AND (
-                    f.username LIKE ? OR
-                    f.firm_name LIKE ? OR
-                    f.firm_type LIKE ? OR
-                    f.file_no LIKE ? OR
-                    f.gst_no LIKE ? OR
-                    f.pan_no LIKE ? OR
-                    f.tan_no LIKE ? OR
-                    f.vat_no LIKE ? OR
-                    f.cin_no LIKE ? OR
-                    f.address_line_1 LIKE ? OR
-                    f.address_line_2 LIKE ? OR
-                    f.city LIKE ? OR
-                    f.district LIKE ? OR
-                    f.state LIKE ? OR
-                    f.country LIKE ? OR
-                    f.pincode LIKE ? OR
-                    p.name LIKE ? OR
-                    p.guardian_name LIKE ? OR
-                    p.mobile LIKE ? OR
-                    p.email LIKE ? OR
-                    p.pan_number LIKE ?
+                    ${searchClauses.map((col) => `${col} LIKE ?`).join(" OR\n                    ")}
                 )
             `;
-            queryParams.push(...Array(22).fill(searchPattern));
+            queryParams.push(...searchClauses.map(() => searchPattern));
         }
 
         /* ===============================
@@ -789,11 +876,11 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
             ORDER BY gf.create_date DESC
             LIMIT ? OFFSET ?
             `,
-            [...queryParams, limitNum, offset]
+            [...queryParams, Number(limitNum), Number(offset)]
         );
 
         /* ===============================
-           💰 Batch client balances for page usernames
+           💰 Batch client balances + last payment for page usernames
         =============================== */
         const usernames = [
             ...new Set(
@@ -803,6 +890,21 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
             ),
         ];
         const balanceByUsername = new Map();
+        const lastPaymentByUsername = new Map();
+
+        const lastPaymentPeriodLabel = (rawDate) => {
+            if (!rawDate) return "No payment";
+            const days = Math.floor(
+                (Date.now() - new Date(rawDate).getTime()) / (1000 * 60 * 60 * 24)
+            );
+            if (!Number.isFinite(days) || days < 0) return "No payment";
+            if (days <= 1) return "Today";
+            if (days <= 7) return "Last 7 days";
+            if (days <= 30) return "Last 30 days";
+            if (days <= 90) return "Last 90 days";
+            return "90+ days";
+        };
+
         if (usernames.length > 0) {
             const [balanceRows] = await pool.query(
                 `
@@ -820,6 +922,18 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
                     String(row.username),
                     Number(row.balance) || 0,
                 );
+            }
+
+            const [paymentRows] = await pool.query(
+                `
+                SELECT lp.party_id AS username, lp.last_payment_date
+                FROM (${CLIENT_LAST_PAYMENT_SQL}) lp
+                WHERE lp.party_id IN (?)
+                `,
+                [branch_id, usernames],
+            );
+            for (const row of paymentRows) {
+                lastPaymentByUsername.set(String(row.username), row.last_payment_date || null);
             }
         }
 
@@ -869,7 +983,16 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
                         pan_number: row.client_pan_number || "",
                         balance: username
                             ? Number(balanceByUsername.get(username) || 0)
-                            : 0
+                            : 0,
+                        last_payment: (() => {
+                            const date = username
+                                ? lastPaymentByUsername.get(username) || null
+                                : null;
+                            return {
+                                date,
+                                period: lastPaymentPeriodLabel(date),
+                            };
+                        })(),
                     },
 
                     create_by: {
@@ -917,6 +1040,160 @@ router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to fetch group-wise firms",
             error: error.message
+        });
+    }
+});
+
+/**
+ * Unique group clients with positive balance (for bulk payment reminders).
+ * GET /group/group-firms/debtor-clients?group_id=&search=
+ */
+router.get("/group-firms/debtor-clients", auth, validateBranch, async (req, res) => {
+    try {
+        const group_id = String(req.query.group_id || "").trim();
+        const search = String(req.query.search || "").trim();
+        const branch_id = req.branch_id;
+
+        if (!group_id) {
+            return res.status(400).json({
+                success: false,
+                message: "group_id is required",
+            });
+        }
+
+        const [groupRows] = await pool.query(
+            `SELECT group_id
+             FROM groups
+             WHERE group_id = ?
+               AND branch_id = ?
+               AND is_deleted = '0'
+             LIMIT 1`,
+            [group_id, branch_id]
+        );
+        if (!groupRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found",
+            });
+        }
+
+        let firmFilterSql = `
+            SELECT DISTINCT f.username
+            FROM group_firms gf
+            INNER JOIN firms f
+                ON f.firm_id = gf.firm_id
+               AND f.is_deleted = '0'
+            LEFT JOIN profile p
+                ON p.username = f.username
+            WHERE gf.is_deleted = '0'
+              AND gf.group_id = ?
+              AND f.username IS NOT NULL
+              AND TRIM(f.username) <> ''
+        `;
+        const firmParams = [group_id];
+
+        if (search) {
+            const searchPattern = `%${search}%`;
+            const searchClauses = [
+                "f.username",
+                "f.firm_name",
+                "f.firm_type",
+                "f.file_no",
+                "f.gst_no",
+                "f.pan_no",
+                "f.tan_no",
+                "f.vat_no",
+                "f.cin_no",
+                "f.address_line_1",
+                "f.address_line_2",
+                "f.city",
+                "f.district",
+                "f.state",
+                "f.country",
+                "f.pincode",
+                "p.name",
+                "p.guardian_name",
+                "p.mobile",
+                "p.email",
+                "p.pan_number",
+            ];
+            firmFilterSql += `
+                AND (
+                    ${searchClauses.map((col) => `${col} LIKE ?`).join(" OR\n                    ")}
+                )
+            `;
+            firmParams.push(...searchClauses.map(() => searchPattern));
+        }
+
+        const [usernameRows] = await pool.query(firmFilterSql, firmParams);
+        const usernames = [
+            ...new Set(
+                usernameRows
+                    .map((row) => String(row.username || "").trim())
+                    .filter(Boolean)
+            ),
+        ];
+
+        if (!usernames.length) {
+            return res.status(200).json({
+                success: true,
+                message: "No clients found in this group",
+                data: { clients: [] },
+            });
+        }
+
+        const [balanceRows] = await pool.query(
+            `
+            SELECT b.party_id AS username, COALESCE(SUM(b.effect), 0) AS balance
+            FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
+            WHERE b.party_id IN (?)
+            GROUP BY b.party_id
+            HAVING balance > 0.02
+            `,
+            [branch_id, branch_id, usernames]
+        );
+
+        const debtorUsernames = balanceRows.map((row) => String(row.username));
+        if (!debtorUsernames.length) {
+            return res.status(200).json({
+                success: true,
+                message: "No clients with positive balance in this group",
+                data: { clients: [] },
+            });
+        }
+
+        const balanceMap = new Map(
+            balanceRows.map((row) => [String(row.username), Number(row.balance) || 0])
+        );
+
+        const [profileRows] = await pool.query(
+            `SELECT username, name, mobile, email, country_code
+             FROM profile
+             WHERE username IN (?)
+               AND status = '1'`,
+            [debtorUsernames]
+        );
+
+        const clients = profileRows.map((row) => ({
+            username: row.username,
+            name: row.name || row.username,
+            mobile: row.mobile || "",
+            email: row.email || "",
+            country_code: row.country_code || "",
+            balance: balanceMap.get(String(row.username)) || 0,
+        }));
+
+        return res.status(200).json({
+            success: true,
+            message: "Group debtor clients retrieved successfully",
+            data: { clients },
+        });
+    } catch (error) {
+        console.error("Error fetching group debtor clients:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch group debtor clients",
+            error: error.message,
         });
     }
 });
@@ -1013,7 +1290,7 @@ router.delete("/group-firms/remove", auth, validateBranch, async (req, res) => {
                         p.pan_number LIKE ?
                     )
                 `;
-                selectParams.push(...Array(22).fill(searchPattern));
+                selectParams.push(...Array(21).fill(searchPattern));
             }
 
             const [allMappings] = await conn.query(selectSql, selectParams);

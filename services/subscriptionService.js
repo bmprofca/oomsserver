@@ -89,6 +89,10 @@ async function getBranchOwnerUsername(branchId, connection = null) {
     return ownerRows[0]?.username || null;
 }
 
+/**
+ * Legacy mirror on users.is_subscribed / subscription_plan / subscription_expires_at.
+ * Runtime access control MUST use user_subscriptions via getSubscriptionStatus — not these columns.
+ */
 async function syncBranchOwnerLegacySummary(branchId, connection = null) {
     const runner = connection || pool;
     const ownerUsername = await getBranchOwnerUsername(branchId, runner);
@@ -118,6 +122,91 @@ async function syncBranchOwnerLegacySummary(branchId, connection = null) {
             ownerUsername,
         ]
     );
+}
+
+export { syncBranchOwnerLegacySummary };
+
+/**
+ * Admin: set an absolute expiry datetime for a branch plan row.
+ * Also refreshes status to active/expired based on the new date.
+ */
+export async function updatePlanExpiryByAdmin({
+    branchId,
+    subscriptionId,
+    expiresAt,
+    adminUsername = null,
+    connection = null,
+}) {
+    if (!branchId) throw new Error('branch_id is required');
+    if (!subscriptionId) throw new Error('subscription_id is required');
+
+    const expiryDate = new Date(expiresAt);
+    if (Number.isNaN(expiryDate.getTime())) {
+        throw new Error('Invalid expires_at datetime');
+    }
+
+    const ownsConnection = !connection;
+    const conn = connection || await pool.getConnection();
+
+    try {
+        if (ownsConnection) {
+            await conn.beginTransaction();
+        }
+
+        const [rows] = await conn.query(
+            `SELECT id, subscription_id, plan_name, expires_at, status
+             FROM user_subscriptions
+             WHERE branch_id = ? AND subscription_id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [branchId, subscriptionId]
+        );
+
+        if (!rows.length) {
+            const err = new Error('Subscription not found for this branch');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        const nextStatus = isPlanActive(expiryDate) ? 'active' : 'expired';
+        const remark = adminUsername
+            ? `Admin ${adminUsername} set expiry`
+            : 'Admin set expiry';
+
+        await conn.query(
+            `UPDATE user_subscriptions
+             SET expires_at = ?,
+                 status = ?,
+                 payment_method = 'admin_manual',
+                 payment_ref = ?,
+                 modify_date = NOW()
+             WHERE id = ?`,
+            [expiryDate, nextStatus, remark, rows[0].id]
+        );
+
+        await syncBranchOwnerLegacySummary(branchId, conn);
+
+        if (ownsConnection) {
+            await conn.commit();
+        }
+
+        return {
+            subscription_id: rows[0].subscription_id,
+            plan_name: rows[0].plan_name,
+            previous_expires_at: rows[0].expires_at,
+            expires_at: expiryDate,
+            status: nextStatus,
+        };
+    } catch (error) {
+        if (ownsConnection) {
+            await conn.rollback();
+        }
+        throw error;
+    } finally {
+        if (ownsConnection) {
+            conn.release();
+        }
+    }
 }
 
 export async function getSubscriptionStatus(branchId, connection = null) {
@@ -174,13 +263,19 @@ export async function getSubscriptionStatus(branchId, connection = null) {
     };
 }
 
-export async function activateOrExtendPlan({
+/**
+ * Activate (or replace) a plan for a branch.
+ * Plans do NOT stack/extend: expiry is always now + billing period
+ * (or an absolute expiresAt when provided).
+ */
+export async function activatePlan({
     branchId,
     username,
     planName,
     billingCycle = 'monthly',
     paymentRef = null,
     paymentMethod = 'wallet',
+    expiresAt = null,
     connection = null,
 }) {
     if (!branchId) {
@@ -191,10 +286,22 @@ export async function activateOrExtendPlan({
         throw new Error('Invalid plan name');
     }
 
+    const cycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
+    const subscriptionDays = getSubscriptionDays(cycle);
+    const now = new Date();
+
+    let expiryDate;
+    if (expiresAt != null && expiresAt !== '') {
+        expiryDate = new Date(expiresAt);
+        if (Number.isNaN(expiryDate.getTime())) {
+            throw new Error('Invalid expires_at datetime');
+        }
+    } else {
+        expiryDate = addDays(now, subscriptionDays);
+    }
+
     const ownsConnection = !connection;
     const conn = connection || await pool.getConnection();
-    const subscriptionDays = getSubscriptionDays(billingCycle);
-    const now = new Date();
 
     try {
         if (ownsConnection) {
@@ -202,7 +309,7 @@ export async function activateOrExtendPlan({
         }
 
         const [existing] = await conn.query(
-            `SELECT id, expires_at
+            `SELECT id, subscription_id, expires_at
              FROM user_subscriptions
              WHERE branch_id = ? AND plan_name = ?
              LIMIT 1
@@ -210,14 +317,11 @@ export async function activateOrExtendPlan({
             [branchId, planName]
         );
 
-        let startFrom = now;
-        if (existing.length > 0 && isPlanActive(existing[0].expires_at)) {
-            startFrom = new Date(existing[0].expires_at);
-        }
-
-        const expiresAt = addDays(startFrom, subscriptionDays);
+        const nextStatus = isPlanActive(expiryDate) ? 'active' : 'expired';
+        let subscriptionId;
 
         if (existing.length > 0) {
+            subscriptionId = existing[0].subscription_id;
             await conn.query(
                 `UPDATE user_subscriptions
                  SET billing_cycle = ?,
@@ -225,26 +329,36 @@ export async function activateOrExtendPlan({
                      payment_ref = ?,
                      payment_method = ?,
                      username = ?,
-                     status = 'active',
+                     status = ?,
                      modify_date = NOW()
                  WHERE id = ?`,
-                [billingCycle, expiresAt, paymentRef, paymentMethod, username, existing[0].id]
+                [
+                    cycle,
+                    expiryDate,
+                    paymentRef,
+                    paymentMethod,
+                    username,
+                    nextStatus,
+                    existing[0].id,
+                ]
             );
         } else {
+            subscriptionId = newSubscriptionId();
             await conn.query(
                 `INSERT INTO user_subscriptions (
                     subscription_id, branch_id, username, plan_name, billing_cycle,
                     expires_at, payment_ref, payment_method, status
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    newSubscriptionId(),
+                    subscriptionId,
                     branchId,
                     username,
                     planName,
-                    billingCycle,
-                    expiresAt,
+                    cycle,
+                    expiryDate,
                     paymentRef,
                     paymentMethod,
+                    nextStatus,
                 ]
             );
         }
@@ -257,11 +371,14 @@ export async function activateOrExtendPlan({
 
         return {
             branch_id: branchId,
+            subscription_id: subscriptionId,
             plan_name: planName,
-            billing_cycle: billingCycle,
-            expires_at: expiresAt,
-            extended_from: startFrom,
-            days_added: subscriptionDays,
+            billing_cycle: cycle,
+            expires_at: expiryDate,
+            status: nextStatus,
+            starts_from: now,
+            days_added: expiresAt ? null : subscriptionDays,
+            replaced_existing: existing.length > 0,
         };
     } catch (error) {
         if (ownsConnection) {
@@ -273,6 +390,51 @@ export async function activateOrExtendPlan({
             conn.release();
         }
     }
+}
+
+/** @deprecated Use activatePlan — kept for callers; does not extend remaining days. */
+export async function activateOrExtendPlan(args) {
+    return activatePlan(args);
+}
+
+/**
+ * Admin assigns a plan to a branch without payment gateway.
+ */
+export async function assignPlanByAdmin({
+    branchId,
+    planName,
+    billingCycle = 'monthly',
+    expiresAt = null,
+    adminUsername = null,
+    connection = null,
+}) {
+    if (!branchId) throw new Error('branch_id is required');
+    if (!VALID_PLANS.includes(planName)) {
+        const err = new Error('Invalid planName. Must be Business, BusinessPlus, or BusinessPro.');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const ownerUsername = await getBranchOwnerUsername(branchId, connection);
+    const username = ownerUsername || adminUsername || 'admin';
+
+    let normalizedExpiry = expiresAt;
+    if (expiresAt && /^\d{4}-\d{2}-\d{2}$/.test(String(expiresAt).trim())) {
+        normalizedExpiry = `${String(expiresAt).trim()}T23:59:59`;
+    }
+
+    return activatePlan({
+        branchId,
+        username,
+        planName,
+        billingCycle,
+        expiresAt: normalizedExpiry,
+        paymentRef: adminUsername
+            ? `admin_manual_${adminUsername}_${Date.now()}`
+            : `admin_manual_${Date.now()}`,
+        paymentMethod: 'admin_manual',
+        connection,
+    });
 }
 
 export function hasFeatureAccess(status, feature) {

@@ -187,71 +187,78 @@ async function validateBranch(req, res, next) {
     }
 }
 
+/**
+ * Load branch subscription from user_subscriptions (not users.* columns).
+ * Prefer req.branch_id set by validateBranch; fall back to branch header/query.
+ */
 async function checkSubscription(req, res, next) {
     try {
         const username = req.headers["username"] || req.headers["Username"] || '';
-        const branch = req.headers["branch"] || req.headers["Branch"] || req.query.branch_id || '';
-        
+        const branchId = String(
+            req.branch_id
+            || req.headers["branch"]
+            || req.headers["Branch"]
+            || req.query.branch_id
+            || ''
+        ).trim();
+
         if (!username) {
             return res.status(401).json({
                 success: false,
-                message: "Session expired or username missing"
+                message: "Session expired or username missing",
             });
         }
 
-        const [rows] = await pool.query(
-            "SELECT username FROM users WHERE username = ? LIMIT 1",
-            [username]
-        );
-
-        if (rows.length === 0) {
-            return res.status(404).json({
+        if (!branchId) {
+            return res.status(400).json({
                 success: false,
-                message: "User account not found"
+                message: "Missing required branch context for subscription validation",
+                code: "BRANCH_REQUIRED",
             });
         }
 
-        if (!branch || String(branch).trim() === '') {
-            req.subscription = await getSubscriptionStatus('');
-            return next();
-        }
+        // Source of truth: user_subscriptions for this branch
+        req.subscription = await getSubscriptionStatus(branchId);
+        req.branch_id = req.branch_id || branchId;
 
-        req.subscription = await getSubscriptionStatus(String(branch).trim());
-        
         next();
     } catch (err) {
         console.error("Subscription validation error:", err);
         return res.status(500).json({
             success: false,
             message: "Failed to validate subscription status",
-            error: err.message
+            error: err.message,
         });
     }
 }
 
 function requirePlan(allowedPlans) {
+    const allowed = Array.isArray(allowedPlans) ? allowedPlans : [allowedPlans];
+
     return (req, res, next) => {
         const activePlanNames = (req.subscription?.active_plans || [])
             .filter((plan) => plan.is_active)
             .map((plan) => plan.plan_name);
 
-        const hasAllowedPlan = allowedPlans.some((plan) => activePlanNames.includes(plan));
-        const isSubscribed = req.subscription?.is_subscribed === 'yes';
+        const isSubscribed =
+            req.subscription?.is_subscribed === 'yes'
+            && activePlanNames.length > 0;
 
         if (!isSubscribed) {
             return res.status(403).json({
                 success: false,
                 message: "Active subscription required. Please subscribe to a plan.",
-                code: "SUBSCRIPTION_REQUIRED"
+                code: "SUBSCRIPTION_REQUIRED",
             });
         }
 
+        const hasAllowedPlan = allowed.some((plan) => activePlanNames.includes(plan));
         if (!hasAllowedPlan) {
             const plan = req.subscription?.subscription_plan || 'None';
             return res.status(403).json({
                 success: false,
                 message: `This feature is not available in your current plan (${plan}). Please upgrade your plan.`,
-                code: "PLAN_UPGRADE_REQUIRED"
+                code: "PLAN_UPGRADE_REQUIRED",
             });
         }
 
@@ -261,7 +268,13 @@ function requirePlan(allowedPlans) {
 
 function requireFeature(featureKey) {
     return (req, res, next) => {
-        const isSubscribed = req.subscription?.is_subscribed === 'yes';
+        const activePlanNames = (req.subscription?.active_plans || [])
+            .filter((plan) => plan.is_active)
+            .map((plan) => plan.plan_name);
+
+        const isSubscribed =
+            req.subscription?.is_subscribed === 'yes'
+            && activePlanNames.length > 0;
 
         if (!isSubscribed) {
             return res.status(403).json({

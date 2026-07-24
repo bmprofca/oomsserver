@@ -1,5 +1,5 @@
 import pool from "../db.js";
-import { activateOrExtendPlan } from "./subscriptionService.js";
+import { activatePlan } from "./subscriptionService.js";
 import { creditWallet } from "./walletService.js";
 
 async function getOrderByRazorpayId(orderId) {
@@ -75,7 +75,7 @@ export async function fulfillRazorpayOrder({ orderId, paymentId, source = "webho
             throw new Error(`Missing plan_name for subscription order ${orderId}`);
         }
 
-        await activateOrExtendPlan({
+        await activatePlan({
             branchId: order.branch_id,
             username: order.username,
             planName: order.plan_name,

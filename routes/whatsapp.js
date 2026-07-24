@@ -38,6 +38,10 @@ import {
     resolveComponentMedia,
     cleanupPreviousMedia,
 } from "../helpers/onechattingTemplateMedia.js";
+import {
+    normalizeCountryCode,
+    normalizeMobileDigits,
+} from "../helpers/clientPhone.js";
 
 const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
 const ONECHATTING_CHAT_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-list`;
@@ -51,6 +55,16 @@ const ONECHATTING_SEND_AUDIO_URL = `${ONECHATTING_BASE_URL}/developer/message/se
 const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
 const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
 const ONECHATTING_TEMPLATE_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/template/template-details`;
+const ONECHATTING_CONTACT_BULK_UPSERT_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert`;
+const ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert-status`;
+/** Soft payload ceiling (~18MB) under OneChatting's 20MB limit. */
+const ONECHATTING_BULK_UPSERT_MAX_BYTES =
+    Number(process.env.ONECHATTING_BULK_UPSERT_MAX_BYTES) || 18 * 1024 * 1024;
+/** API also caps contacts per request; keep default high but safe. */
+const ONECHATTING_BULK_UPSERT_CHUNK_SIZE =
+    Number(process.env.ONECHATTING_BULK_UPSERT_CHUNK_SIZE) || 8000;
+const ONECHATTING_SYNC_DB_PAGE_SIZE =
+    Number(process.env.ONECHATTING_SYNC_DB_PAGE_SIZE) || 1000;
 
 const router = express.Router();
 
@@ -186,6 +200,251 @@ async function proxyOneChattingTemplateGet(url, developer_token, params, res) {
     }
 
     return res.status(response.status).json(response.data);
+}
+
+function buildOneChattingContactNumber(country_code, mobile) {
+    const cc = normalizeCountryCode(country_code);
+    const rawMobile = String(mobile || "").replace(/\D/g, "");
+    if (!rawMobile) return null;
+
+    if (rawMobile.startsWith(cc) && rawMobile.length > cc.length + 5) {
+        return rawMobile;
+    }
+
+    const local = normalizeMobileDigits(rawMobile) || rawMobile;
+    if (!local) return null;
+    return `${cc}${local}`;
+}
+
+function chunkArray(items, size) {
+    const chunks = [];
+    for (let i = 0; i < items.length; i += size) {
+        chunks.push(items.slice(i, i + size));
+    }
+    return chunks;
+}
+
+function estimateContactsPayloadBytes(contacts) {
+    try {
+        return Buffer.byteLength(JSON.stringify({ contacts }), "utf8");
+    } catch {
+        return contacts.length * 512;
+    }
+}
+
+/** Pack contacts into batches under contact-count and ~20MB body limits. */
+function buildSizedContactBatches(contacts, {
+    maxContacts = ONECHATTING_BULK_UPSERT_CHUNK_SIZE,
+    maxBytes = ONECHATTING_BULK_UPSERT_MAX_BYTES,
+} = {}) {
+    const batches = [];
+    let current = [];
+
+    const flush = () => {
+        if (current.length) {
+            batches.push(current);
+            current = [];
+        }
+    };
+
+    for (const contact of contacts) {
+        const candidate = [...current, contact];
+        const tooMany = candidate.length > maxContacts;
+        const tooHeavy =
+            current.length > 0 && estimateContactsPayloadBytes(candidate) > maxBytes;
+
+        if (tooMany || tooHeavy) {
+            flush();
+        }
+        current.push(contact);
+    }
+
+    flush();
+    return batches;
+}
+
+function profileRecencyScore(row) {
+    const createMs = new Date(row.profile_create_date || 0).getTime();
+    if (Number.isFinite(createMs) && createMs > 0) return createMs;
+    return Number(row.profile_id) || 0;
+}
+
+async function fetchFirmNameMap(branchId, usernames) {
+    const map = new Map();
+    const unique = [...new Set(usernames.map((u) => String(u || "").trim()).filter(Boolean))];
+    if (!unique.length) return map;
+
+    const placeholders = unique.map(() => "?").join(",");
+    const [rows] = await pool.query(
+        `SELECT username, firm_name
+         FROM firms
+         WHERE branch_id = ?
+           AND is_deleted = '0'
+           AND username IN (${placeholders})
+         ORDER BY id ASC`,
+        [branchId, ...unique]
+    );
+
+    for (const row of rows) {
+        const username = String(row.username || "").trim();
+        if (!username || map.has(username)) continue;
+        const firmName = String(row.firm_name || "").trim();
+        if (firmName) map.set(username, firmName);
+    }
+
+    return map;
+}
+
+/**
+ * Page through branch clients to avoid one huge DB hit.
+ * For duplicate WhatsApp numbers, keep the client whose profile is newest.
+ */
+async function collectOneChattingContactsForBranch(branchId, {
+    pageSize = ONECHATTING_SYNC_DB_PAGE_SIZE,
+} = {}) {
+    const contactsByNumber = new Map();
+    let totalRows = 0;
+    let skippedInvalidMobile = 0;
+    let duplicateNumbersReplaced = 0;
+    let offset = 0;
+
+    while (true) {
+        const [rows] = await pool.query(
+            `SELECT
+                c.username,
+                p.id AS profile_id,
+                p.name,
+                p.mobile,
+                p.country_code,
+                p.email,
+                p.create_date AS profile_create_date
+             FROM clients c
+             INNER JOIN profile p
+                ON p.username = c.username
+               AND p.status = '1'
+             INNER JOIN (
+                SELECT p2.username, MAX(p2.id) AS max_id
+                FROM profile p2
+                INNER JOIN clients c2
+                   ON c2.username = p2.username
+                  AND c2.branch_id = ?
+                  AND c2.user_type = 'client'
+                  AND c2.is_deleted = '0'
+                WHERE p2.status = '1'
+                  AND p2.mobile IS NOT NULL
+                  AND TRIM(p2.mobile) <> ''
+                GROUP BY p2.username
+             ) latest
+                ON latest.username = p.username
+               AND latest.max_id = p.id
+             WHERE c.branch_id = ?
+               AND c.user_type = 'client'
+               AND c.is_deleted = '0'
+               AND p.mobile IS NOT NULL
+               AND TRIM(p.mobile) <> ''
+             ORDER BY c.id ASC
+             LIMIT ?
+             OFFSET ?`,
+            [branchId, branchId, pageSize, offset]
+        );
+
+        if (!rows.length) break;
+
+        totalRows += rows.length;
+        const firmMap = await fetchFirmNameMap(
+            branchId,
+            rows.map((row) => row.username)
+        );
+
+        for (const row of rows) {
+            const number = buildOneChattingContactNumber(row.country_code, row.mobile);
+            if (!number) {
+                skippedInvalidMobile += 1;
+                continue;
+            }
+
+            const recency = profileRecencyScore(row);
+            const existing = contactsByNumber.get(number);
+            if (existing && existing._recency >= recency) {
+                duplicateNumbersReplaced += 1;
+                continue;
+            }
+            if (existing) {
+                duplicateNumbersReplaced += 1;
+            }
+
+            const name = String(row.name || "").trim() || number;
+            const email = row.email ? String(row.email).trim() : "";
+            const firm_name = firmMap.get(String(row.username || "").trim()) || "";
+
+            contactsByNumber.set(number, {
+                number,
+                name,
+                ...(email ? { email } : {}),
+                ...(firm_name ? { firm_name } : {}),
+                remark: `OOMS client ${row.username}`,
+                _recency: recency,
+                _username: row.username,
+                _profile_id: row.profile_id,
+            });
+        }
+
+        offset += rows.length;
+        if (rows.length < pageSize) break;
+    }
+
+    const contacts = [...contactsByNumber.values()].map((item) => {
+        const {
+            _recency,
+            _username,
+            _profile_id,
+            ...contact
+        } = item;
+        return contact;
+    });
+
+    return {
+        contacts,
+        total_rows_scanned: totalRows,
+        skipped_invalid_mobile: skippedInvalidMobile,
+        duplicate_numbers_skipped: duplicateNumbersReplaced,
+    };
+}
+
+function isBulkUpsertJobDone(statusPayload) {
+    const status = String(
+        statusPayload?.status ||
+            statusPayload?.job_status ||
+            statusPayload?.data?.status ||
+            ""
+    )
+        .trim()
+        .toLowerCase();
+    if (!status) return false;
+    return ["completed", "complete", "done", "success", "failed", "error"].includes(status);
+}
+
+async function pollOneChattingBulkUpsertStatus(developerToken, jobId, {
+    timeoutMs = 90000,
+    intervalMs = 2000,
+} = {}) {
+    const started = Date.now();
+    let lastPayload = null;
+
+    while (Date.now() - started < timeoutMs) {
+        const response = await axios.get(ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL, {
+            headers: { token: developerToken },
+            params: { job_id: jobId },
+            timeout: 30000,
+        });
+        lastPayload = response.data;
+        if (isBulkUpsertJobDone(lastPayload)) {
+            return { timed_out: false, status: lastPayload };
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    return { timed_out: true, status: lastPayload };
 }
 
 const VALID_WHATSAPP_CHANNELS = ["disabled", "ooms system", "ooms web", "onechatting"];
@@ -526,6 +785,121 @@ router.put("/onechatting/developer-token", auth, validateBranch, async (req, res
             success: false,
             message: "Failed to update developer token",
         });
+    }
+});
+
+/**
+ * Sync branch clients into OneChatting contacts via bulk-upsert (project/developer token).
+ * Matching key is WhatsApp number (country code + mobile).
+ * Duplicate numbers: keep the client with the newest profile.
+ * DB reads are paged; OneChatting uploads are batched by count + ~20MB size.
+ */
+router.post("/onechatting/sync-clients", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const waitForCompletion = req.body?.wait !== false;
+
+        const tokenResult = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!tokenResult.ok) {
+            return res.status(tokenResult.status).json(tokenResult.data);
+        }
+
+        const pageSize = Math.min(
+            5000,
+            Math.max(100, Number(req.body?.db_page_size) || ONECHATTING_SYNC_DB_PAGE_SIZE)
+        );
+
+        const collected = await collectOneChattingContactsForBranch(branch_id, { pageSize });
+        const contacts = collected.contacts;
+
+        if (!contacts.length) {
+            return res.status(200).json({
+                success: true,
+                message: "No clients with valid mobile numbers to sync",
+                data: {
+                    total_rows_scanned: collected.total_rows_scanned,
+                    contacts_prepared: 0,
+                    skipped_invalid_mobile: collected.skipped_invalid_mobile,
+                    duplicate_numbers_skipped: collected.duplicate_numbers_skipped,
+                    db_page_size: pageSize,
+                    jobs: [],
+                },
+            });
+        }
+
+        const maxContacts = Math.min(
+            10000,
+            Math.max(1, Number(req.body?.batch_size) || ONECHATTING_BULK_UPSERT_CHUNK_SIZE)
+        );
+        const chunks = buildSizedContactBatches(contacts, {
+            maxContacts,
+            maxBytes: ONECHATTING_BULK_UPSERT_MAX_BYTES,
+        });
+        const jobs = [];
+
+        for (let index = 0; index < chunks.length; index += 1) {
+            const chunk = chunks[index];
+            const upsertResponse = await axios.post(
+                ONECHATTING_CONTACT_BULK_UPSERT_URL,
+                { contacts: chunk },
+                {
+                    headers: {
+                        token: tokenResult.developer_token,
+                        "Content-Type": "application/json",
+                    },
+                    timeout: 120000,
+                    maxBodyLength: Infinity,
+                    maxContentLength: Infinity,
+                }
+            );
+
+            const jobId = upsertResponse.data?.job_id || null;
+            const jobEntry = {
+                chunk: index + 1,
+                total_chunks: chunks.length,
+                contacts: chunk.length,
+                payload_bytes: estimateContactsPayloadBytes(chunk),
+                accepted: upsertResponse.data,
+                job_id: jobId,
+                final_status: null,
+                timed_out: false,
+            };
+
+            if (waitForCompletion && jobId) {
+                const polled = await pollOneChattingBulkUpsertStatus(
+                    tokenResult.developer_token,
+                    jobId
+                );
+                jobEntry.timed_out = polled.timed_out;
+                jobEntry.final_status = polled.status;
+            }
+
+            jobs.push(jobEntry);
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: waitForCompletion
+                ? `Client sync completed in ${chunks.length} batch${chunks.length === 1 ? "" : "es"}`
+                : `Client sync queued in ${chunks.length} batch${chunks.length === 1 ? "" : "es"}`,
+            data: {
+                total_rows_scanned: collected.total_rows_scanned,
+                contacts_prepared: contacts.length,
+                skipped_invalid_mobile: collected.skipped_invalid_mobile,
+                duplicate_numbers_skipped: collected.duplicate_numbers_skipped,
+                db_page_size: pageSize,
+                batch_size: maxContacts,
+                max_payload_bytes: ONECHATTING_BULK_UPSERT_MAX_BYTES,
+                chunks: chunks.length,
+                jobs,
+            },
+        });
+    } catch (error) {
+        return handleOneChattingAxiosError(
+            error,
+            res,
+            "Failed to sync clients with OneChatting"
+        );
     }
 });
 

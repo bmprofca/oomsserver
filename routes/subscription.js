@@ -3,7 +3,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { getOrCreateWallet, getWalletBalance, debitWallet } from "../services/walletService.js";
 import {
-    activateOrExtendPlan,
+    activatePlan,
     getSubscriptionStatus,
 } from "../services/subscriptionService.js";
 import {
@@ -250,7 +250,7 @@ router.post("/pay-from-wallet", auth, validateBranch, async (req, res) => {
             connection: conn,
         });
 
-        const activation = await activateOrExtendPlan({
+        const activation = await activatePlan({
             branchId,
             username,
             planName,

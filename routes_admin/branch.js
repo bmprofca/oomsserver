@@ -3,6 +3,13 @@ import pool from "../db.js";
 import { authAdmin } from "../middleware/authAdmin.js";
 import { FORMAT_DATE } from "../helpers/function.js";
 import { buildBranchLogoUrl, buildBranchSignUrl } from "../helpers/mediaUrl.js";
+import {
+    getSubscriptionStatus,
+    isPlanActive,
+    updatePlanExpiryByAdmin,
+    assignPlanByAdmin,
+    VALID_PLANS,
+} from "../services/subscriptionService.js";
 
 const router = express.Router();
 
@@ -477,5 +484,274 @@ router.get("/services", authAdmin, async (req, res) => {
         });
     }
 });
+
+/**
+ * Branch subscription overview for admin:
+ * - summary (highest active plan)
+ * - all plan rows (active + expired history on the plan table)
+ * - payment / checkout history from razorpay_orders
+ */
+router.get("/:branch_id/subscriptions", authAdmin, async (req, res) => {
+    try {
+        const branch_id = String(req.params.branch_id || "").trim();
+        if (!branch_id) {
+            return res.status(400).json({
+                success: false,
+                message: "branch_id is required",
+            });
+        }
+
+        const [branchRows] = await pool.query(
+            `SELECT branch_id, name, username
+             FROM branch_list
+             WHERE branch_id = ? AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id]
+        );
+
+        if (!branchRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Branch not found",
+            });
+        }
+
+        const summary = await getSubscriptionStatus(branch_id);
+
+        const [subscriptionRows] = await pool.query(
+            `SELECT
+                subscription_id,
+                branch_id,
+                username,
+                plan_name,
+                billing_cycle,
+                expires_at,
+                payment_ref,
+                payment_method,
+                status,
+                create_date,
+                modify_date
+             FROM user_subscriptions
+             WHERE branch_id = ?
+             ORDER BY
+                CASE WHEN expires_at > NOW() THEN 0 ELSE 1 END ASC,
+                expires_at DESC,
+                plan_name ASC`,
+            [branch_id]
+        );
+
+        const subscriptions = subscriptionRows.map((row) => {
+            const active = isPlanActive(row.expires_at);
+            const diffMs = new Date(row.expires_at).getTime() - Date.now();
+            return {
+                subscription_id: row.subscription_id,
+                branch_id: row.branch_id,
+                username: row.username,
+                plan_name: row.plan_name,
+                billing_cycle: row.billing_cycle,
+                expires_at: row.expires_at,
+                payment_ref: row.payment_ref,
+                payment_method: row.payment_method,
+                status: active ? "active" : "expired",
+                is_active: active,
+                days_remaining: active ? Math.ceil(diffMs / (1000 * 60 * 60 * 24)) : 0,
+                create_date: FORMAT_DATE(row.create_date),
+                modify_date: FORMAT_DATE(row.modify_date),
+            };
+        });
+
+        const [paymentRows] = await pool.query(
+            `SELECT
+                razorpay_order_id,
+                razorpay_payment_id,
+                username,
+                branch_id,
+                plan_name,
+                billing_cycle,
+                order_type,
+                purpose,
+                amount,
+                status
+             FROM razorpay_orders
+             WHERE branch_id = ?
+               AND (order_type = 'subscription' OR order_type IS NULL OR order_type = '')
+             ORDER BY id DESC
+             LIMIT 100`,
+            [branch_id]
+        );
+
+        const payments = paymentRows.map((row) => ({
+            order_id: row.razorpay_order_id,
+            payment_id: row.razorpay_payment_id || null,
+            username: row.username,
+            plan_name: row.plan_name,
+            billing_cycle: row.billing_cycle,
+            order_type: row.order_type || "subscription",
+            purpose: row.purpose || null,
+            amount_paise: Number(row.amount) || 0,
+            amount_rupees: Math.round(((Number(row.amount) || 0) / 100) * 100) / 100,
+            status: row.status || "pending",
+        }));
+
+        return res.status(200).json({
+            success: true,
+            message: "Branch subscriptions retrieved successfully",
+            data: {
+                branch: {
+                    branch_id: branchRows[0].branch_id,
+                    name: branchRows[0].name,
+                    username: branchRows[0].username,
+                },
+                summary,
+                subscriptions,
+                payments,
+                plans: VALID_PLANS,
+            },
+        });
+    } catch (err) {
+        console.error("ADMIN BRANCH SUBSCRIPTIONS ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch branch subscriptions",
+            error: err.message,
+        });
+    }
+});
+
+/**
+ * Admin manually assigns a plan to a branch (no payment gateway).
+ * Body: { plan_name, billing_cycle?, expires_at? }
+ * If expires_at is omitted, expiry = now + monthly/yearly period (does not stack).
+ */
+router.post("/:branch_id/subscriptions", authAdmin, async (req, res) => {
+    try {
+        const branch_id = String(req.params.branch_id || "").trim();
+        const plan_name = String(req.body?.plan_name || "").trim();
+        const billing_cycle =
+            req.body?.billing_cycle === "yearly" ? "yearly" : "monthly";
+        const expires_at = req.body?.expires_at || null;
+
+        if (!branch_id) {
+            return res.status(400).json({
+                success: false,
+                message: "branch_id is required",
+            });
+        }
+
+        if (!VALID_PLANS.includes(plan_name)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid plan_name. Must be Business, BusinessPlus, or BusinessPro.",
+            });
+        }
+
+        const [branchRows] = await pool.query(
+            `SELECT branch_id FROM branch_list
+             WHERE branch_id = ? AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id]
+        );
+
+        if (!branchRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Branch not found",
+            });
+        }
+
+        const adminUsername =
+            req.headers["username"] || req.headers["Username"] || null;
+
+        const assigned = await assignPlanByAdmin({
+            branchId: branch_id,
+            planName: plan_name,
+            billingCycle: billing_cycle,
+            expiresAt: expires_at,
+            adminUsername,
+        });
+
+        const summary = await getSubscriptionStatus(branch_id);
+
+        return res.status(200).json({
+            success: true,
+            message: "Plan assigned successfully (manual, no payment).",
+            data: {
+                assigned,
+                summary,
+            },
+        });
+    } catch (err) {
+        console.error("ADMIN BRANCH ASSIGN SUBSCRIPTION ERROR:", err);
+        const status = err.statusCode || 500;
+        return res.status(status).json({
+            success: false,
+            message: err.message || "Failed to assign subscription plan",
+        });
+    }
+});
+
+/**
+ * Admin manually updates a subscription expiry date for a branch plan.
+ * Body: { expires_at: "YYYY-MM-DD" | ISO datetime }
+ */
+router.patch(
+    "/:branch_id/subscriptions/:subscription_id/expiry",
+    authAdmin,
+    async (req, res) => {
+        try {
+            const branch_id = String(req.params.branch_id || "").trim();
+            const subscription_id = String(req.params.subscription_id || "").trim();
+            const expires_at = req.body?.expires_at;
+
+            if (!branch_id || !subscription_id) {
+                return res.status(400).json({
+                    success: false,
+                    message: "branch_id and subscription_id are required",
+                });
+            }
+
+            if (!expires_at) {
+                return res.status(400).json({
+                    success: false,
+                    message: "expires_at is required",
+                });
+            }
+
+            const adminUsername =
+                req.headers["username"] || req.headers["Username"] || null;
+
+            // Accept date-only (YYYY-MM-DD) as end-of-day local-ish UTC evening
+            let normalizedExpiry = expires_at;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(String(expires_at).trim())) {
+                normalizedExpiry = `${String(expires_at).trim()}T23:59:59`;
+            }
+
+            const updated = await updatePlanExpiryByAdmin({
+                branchId: branch_id,
+                subscriptionId: subscription_id,
+                expiresAt: normalizedExpiry,
+                adminUsername,
+            });
+
+            const summary = await getSubscriptionStatus(branch_id);
+
+            return res.status(200).json({
+                success: true,
+                message: "Subscription expiry updated successfully",
+                data: {
+                    updated,
+                    summary,
+                },
+            });
+        } catch (err) {
+            console.error("ADMIN BRANCH SUBSCRIPTION EXPIRY ERROR:", err);
+            const status = err.statusCode || 500;
+            return res.status(status).json({
+                success: false,
+                message: err.message || "Failed to update subscription expiry",
+            });
+        }
+    }
+);
 
 export default router;

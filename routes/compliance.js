@@ -415,6 +415,10 @@ async function formatComplianceTaskListRow(row, task) {
             due_date: dueDate,
             create_date: task?.create_date ?? null,
             target_date: targetDate,
+            compliance_year: row.compliance_year ?? null,
+            compliance_period: isYearlyComplianceFrequency(row.frequency)
+                ? null
+                : row.compliance_period ?? null,
         },
         compliance_year: row.compliance_year,
         compliance_period: isYearlyComplianceFrequency(row.frequency)
