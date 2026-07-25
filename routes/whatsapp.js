@@ -46,6 +46,8 @@ import {
 const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
 const ONECHATTING_CHAT_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-list`;
 const ONECHATTING_CHAT_HISTORY_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-history`;
+const ONECHATTING_CHAT_ASSIGN_PERMISSION_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign-permission`;
+const ONECHATTING_CHAT_ASSIGN_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign`;
 const ONECHATTING_MARK_AS_READ_URL = `${ONECHATTING_BASE_URL}/developer/message/mark-as-read`;
 const ONECHATTING_SEND_TEXT_URL = `${ONECHATTING_BASE_URL}/developer/message/send-text-message`;
 const ONECHATTING_SEND_IMAGE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-image-message`;
@@ -1383,6 +1385,112 @@ router.get("/onechatting/chat-history", auth, validateBranch, async (req, res) =
             success: false,
             message: "Failed to fetch chat history",
         });
+    }
+});
+
+router.get("/onechatting/chat-assign-permission", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const number = req.query.number ? String(req.query.number).trim() : "";
+
+        const resolved = await resolveOneChattingToken(username, branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        const params = {};
+        if (number) {
+            params.number = number;
+        }
+
+        const response = await axios.get(ONECHATTING_CHAT_ASSIGN_PERMISSION_URL, {
+            headers: {
+                token: resolved.token,
+            },
+            params,
+        });
+
+        if (response.status === 401) {
+            return res.status(400).json(response.data);
+        }
+
+        return res.status(response.status).json({
+            ...(response.data || {}),
+            developer_token: resolved.token,
+        });
+    } catch (error) {
+        return handleOneChattingAxiosError(
+            error,
+            res,
+            "Failed to fetch chat assign permission"
+        );
+    }
+});
+
+router.post("/onechatting/chat-assign", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const number = req.body?.number ? String(req.body.number).trim() : "";
+        const type = req.body?.type ? String(req.body.type).trim().toLowerCase() : "";
+        const target = req.body?.target != null ? String(req.body.target).trim() : "";
+
+        if (!number || !type) {
+            return res.status(400).json({
+                success: false,
+                message: "number and type are required",
+            });
+        }
+
+        if (type !== "assign" && type !== "unassign") {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid type (assign / unassign only)",
+            });
+        }
+
+        if (type === "assign" && !target) {
+            return res.status(400).json({
+                success: false,
+                message: "target is required",
+            });
+        }
+
+        const resolved = await resolveOneChattingToken(username, branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        const body = {
+            number,
+            type,
+        };
+        if (type === "assign") {
+            body.target = target;
+        }
+
+        const response = await axios.post(ONECHATTING_CHAT_ASSIGN_URL, body, {
+            headers: {
+                token: resolved.token,
+                "Content-Type": "application/json",
+            },
+        });
+
+        if (response.status === 401) {
+            return res.status(400).json(response.data);
+        }
+
+        return res.status(response.status).json({
+            ...(response.data || {}),
+            developer_token: resolved.token,
+        });
+    } catch (error) {
+        return handleOneChattingAxiosError(
+            error,
+            res,
+            "Failed to update chat assignment"
+        );
     }
 });
 

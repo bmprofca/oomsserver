@@ -1966,6 +1966,22 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
             compliancePeriod: compliancePeriodRaw || null,
         });
 
+        // Cap at current FY when year=All (same as /compliance/task-list).
+        const currentStart = parseInt(String(currentFy).split("-")[0], 10);
+        const scopedAssignmentRows = !targetYear
+            ? assignmentRows.filter((row) => {
+                const yearStart = parseInt(String(row.compliance_year || "").split("-")[0], 10);
+                if (
+                    Number.isFinite(yearStart) &&
+                    Number.isFinite(currentStart) &&
+                    yearStart > currentStart
+                ) {
+                    return false;
+                }
+                return true;
+            })
+            : assignmentRows;
+
         let startedFilterSql = `
             SELECT t.service_id, t.firm_id, t.compliance_year, t.compliance_period, s.frequency
             FROM tasks t
@@ -1978,7 +1994,6 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
             startedFilterSql += ` AND t.compliance_year = ?`;
             startedParams.push(targetYear);
         } else {
-            const currentStart = parseInt(String(currentFy).split("-")[0], 10);
             startedFilterSql += ` AND CAST(SUBSTRING_INDEX(t.compliance_year, '-', 1) AS UNSIGNED) <= ?`;
             startedParams.push(currentStart);
         }
@@ -2001,7 +2016,7 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
         );
 
         const notStartedRows = sortComplianceTaskListRows(
-            assignmentRows.filter(
+            scopedAssignmentRows.filter(
                 (row) => !startedKeys.has(buildComplianceTaskLookupKey(row))
             )
         );

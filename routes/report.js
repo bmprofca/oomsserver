@@ -17,7 +17,6 @@ import {
     buildComplianceTaskLookupKey,
     expandComplianceFirmPeriods,
     filterCompliancePeriodsByVisibility,
-    getFinancialYearForDate,
 } from "../helpers/recurringTaskHelper.js";
 
 const router = express.Router();
@@ -642,9 +641,9 @@ router.get("/task-summary", auth, validateBranch, async (req, res) => {
                    AND cf.service_id IN (${complianceFirmPlaceholders})`,
                 [branch_id, ...complianceServiceIds]
             );
-            expandedComplianceFirmPeriods = expandComplianceFirmPeriods(complianceFirmRows, {
-                complianceYear: getFinancialYearForDate(new Date()),
-            });
+            // Same as compliance task-list with year=All: expand from each
+            // firm's effective_from through the current FY (past + current periods).
+            expandedComplianceFirmPeriods = expandComplianceFirmPeriods(complianceFirmRows, {});
         }
 
         // Helper function to get due date category (OD, DT, D7, FT)
