@@ -55,8 +55,14 @@ const ONECHATTING_SEND_AUDIO_URL = `${ONECHATTING_BASE_URL}/developer/message/se
 const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
 const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
 const ONECHATTING_TEMPLATE_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/template/template-details`;
+const ONECHATTING_CAMPAIGN_CREATE_URL = `${ONECHATTING_BASE_URL}/developer/campaign/create`;
+const ONECHATTING_CAMPAIGN_LIST_URL = `${ONECHATTING_BASE_URL}/developer/campaign/list`;
+const ONECHATTING_CAMPAIGN_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/campaign/details`;
+const ONECHATTING_CAMPAIGN_MESSAGES_URL = `${ONECHATTING_BASE_URL}/developer/campaign/messages`;
+const ONECHATTING_CAMPAIGN_DELETE_URL = `${ONECHATTING_BASE_URL}/developer/campaign/delete`;
 const ONECHATTING_CONTACT_BULK_UPSERT_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert`;
 const ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert-status`;
+const ONECHATTING_CAMPAIGN_MAX_NUMBERS = 10000;
 /** Soft payload ceiling (~18MB) under OneChatting's 20MB limit. */
 const ONECHATTING_BULK_UPSERT_MAX_BYTES =
     Number(process.env.ONECHATTING_BULK_UPSERT_MAX_BYTES) || 18 * 1024 * 1024;
@@ -1238,6 +1244,7 @@ router.get("/onechatting/template-list", auth, validateBranch, async (req, res) 
         const page_no = Math.max(1, Number(req.query.page_no) || 1);
         const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
         const status = req.query.status != null ? String(req.query.status) : "";
+        const search = req.query.search ? String(req.query.search).trim() : "";
 
         const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
         if (!resolved.ok) {
@@ -1247,6 +1254,9 @@ router.get("/onechatting/template-list", auth, validateBranch, async (req, res) 
         const params = { page_no, limit };
         if (status) {
             params.status = status;
+        }
+        if (search) {
+            params.search = search;
         }
 
         return await proxyOneChattingTemplateGet(
@@ -1284,6 +1294,216 @@ router.get("/onechatting/template-details", auth, validateBranch, async (req, re
         );
     } catch (error) {
         return handleOneChattingAxiosError(error, res, "Failed to fetch template details");
+    }
+});
+
+/** Read-only WhatsApp numbers from branch clients (for campaign recipients). */
+router.get("/onechatting/campaign/client-numbers", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const collected = await collectOneChattingContactsForBranch(branch_id);
+        const numbers = collected.contacts.map((c) => c.number).filter(Boolean);
+
+        return res.status(200).json({
+            success: true,
+            data: numbers,
+            count: numbers.length,
+            meta: {
+                total_rows_scanned: collected.total_rows_scanned,
+                skipped_invalid_mobile: collected.skipped_invalid_mobile,
+                duplicate_numbers_skipped: collected.duplicate_numbers_skipped,
+            },
+        });
+    } catch (error) {
+        console.error("GET ONECHATTING CAMPAIGN CLIENT NUMBERS ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to load client numbers",
+        });
+    }
+});
+
+router.post("/onechatting/campaign/create", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const name = req.body?.name != null ? String(req.body.name).trim() : "";
+        const template_id =
+            req.body?.template_id != null ? String(req.body.template_id).trim() : "";
+        const schedule_date =
+            req.body?.schedule_date != null ? String(req.body.schedule_date).trim() : "";
+        const rawNumbers = Array.isArray(req.body?.numbers) ? req.body.numbers : [];
+        const component = Array.isArray(req.body?.component) ? req.body.component : null;
+
+        if (!name) {
+            return res.status(400).json({ success: false, message: "name is required" });
+        }
+        if (!template_id) {
+            return res.status(400).json({ success: false, message: "template_id is required" });
+        }
+        if (!component) {
+            return res.status(400).json({
+                success: false,
+                message: "component must be an array",
+            });
+        }
+
+        const numbers = [
+            ...new Set(
+                rawNumbers
+                    .map((n) => String(n || "").trim().replace(/^\+/, "").replace(/\s/g, ""))
+                    .filter(Boolean)
+            ),
+        ];
+
+        if (!numbers.length) {
+            return res.status(400).json({
+                success: false,
+                message: "numbers must include at least one WhatsApp number",
+            });
+        }
+        if (numbers.length > ONECHATTING_CAMPAIGN_MAX_NUMBERS) {
+            return res.status(400).json({
+                success: false,
+                message: `numbers cannot exceed ${ONECHATTING_CAMPAIGN_MAX_NUMBERS}`,
+            });
+        }
+
+        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        const body = {
+            name,
+            template_id,
+            numbers,
+            component,
+        };
+        if (schedule_date) {
+            body.schedule_date = schedule_date;
+        }
+
+        return await proxyOneChattingPost(
+            ONECHATTING_CAMPAIGN_CREATE_URL,
+            resolved.developer_token,
+            body,
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to create campaign");
+    }
+});
+
+router.get("/onechatting/campaign/list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const page_no = Math.max(1, Number(req.query.page_no) || 1);
+        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+        const status = req.query.status != null ? String(req.query.status).trim() : "all";
+
+        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        return await proxyOneChattingGet(
+            ONECHATTING_CAMPAIGN_LIST_URL,
+            resolved.developer_token,
+            { page_no, limit, status: status || "all" },
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to list campaigns");
+    }
+});
+
+router.get("/onechatting/campaign/details", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const campaign_id =
+            req.query.campaign_id != null ? String(req.query.campaign_id).trim() : "";
+
+        if (!campaign_id) {
+            return res.status(400).json({
+                success: false,
+                message: "campaign_id is required",
+            });
+        }
+
+        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        return await proxyOneChattingGet(
+            ONECHATTING_CAMPAIGN_DETAILS_URL,
+            resolved.developer_token,
+            { campaign_id },
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to fetch campaign details");
+    }
+});
+
+router.get("/onechatting/campaign/messages", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const campaign_id =
+            req.query.campaign_id != null ? String(req.query.campaign_id).trim() : "";
+        const page_no = Math.max(1, Number(req.query.page_no) || 1);
+        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+        const status = req.query.status != null ? String(req.query.status).trim() : "all";
+
+        if (!campaign_id) {
+            return res.status(400).json({
+                success: false,
+                message: "campaign_id is required",
+            });
+        }
+
+        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        return await proxyOneChattingGet(
+            ONECHATTING_CAMPAIGN_MESSAGES_URL,
+            resolved.developer_token,
+            { campaign_id, page_no, limit, status: status || "all" },
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to list campaign messages");
+    }
+});
+
+router.post("/onechatting/campaign/delete", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const campaign_id =
+            req.body?.campaign_id != null ? String(req.body.campaign_id).trim() : "";
+
+        if (!campaign_id) {
+            return res.status(400).json({
+                success: false,
+                message: "campaign_id is required",
+            });
+        }
+
+        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        return await proxyOneChattingPost(
+            ONECHATTING_CAMPAIGN_DELETE_URL,
+            resolved.developer_token,
+            { campaign_id },
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to delete campaign");
     }
 });
 
