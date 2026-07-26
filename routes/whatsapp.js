@@ -162,6 +162,98 @@ function handleOneChattingAxiosError(error, res, fallbackMessage) {
     });
 }
 
+function normalizeLoosePhone(value) {
+    return String(value || "").replace(/\D/g, "");
+}
+
+function extractAssigningUsers(payload) {
+    if (!payload || typeof payload !== "object") return [];
+    const nested =
+        payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+            ? payload.data
+            : payload;
+    const assigning =
+        nested.assigning && typeof nested.assigning === "object"
+            ? nested.assigning
+            : payload.assigning && typeof payload.assigning === "object"
+              ? payload.assigning
+              : {};
+    const users = Array.isArray(assigning.users)
+        ? assigning.users
+        : Array.isArray(nested.users)
+          ? nested.users
+          : [];
+    return users.filter((u) => u && typeof u === "object");
+}
+
+/**
+ * Map OOMS staff identity → OneChatting username from assigning.users.
+ * Transfer works with OC usernames; Assign-to-me must use the same identity.
+ */
+async function resolveOneChattingAssignUsername({
+    branchId,
+    oomsUsername,
+    users = [],
+}) {
+    const wanted = String(oomsUsername || "").trim();
+    if (!wanted) return "";
+
+    const list = Array.isArray(users) ? users : [];
+    const byExact = list.find(
+        (u) => String(u.username || "").trim().toLowerCase() === wanted.toLowerCase()
+    );
+    if (byExact?.username) return String(byExact.username).trim();
+
+    const byFlag = list.find(
+        (u) => u.is_me === true || u.self === true || u.assigned_to_me === true
+    );
+    if (byFlag?.username) return String(byFlag.username).trim();
+
+    const [profileRows] = await pool.query(
+        `SELECT p.name, p.email, p.mobile, p.country_code
+         FROM profile p
+         WHERE p.username = ?
+           AND p.status = '1'
+           AND p.id = (
+               SELECT MAX(p2.id)
+               FROM profile p2
+               WHERE p2.username = ?
+                 AND p2.status = '1'
+           )
+         LIMIT 1`,
+        [wanted, wanted]
+    );
+
+    const profile = profileRows[0] || null;
+    if (!profile) return wanted;
+
+    const email = String(profile.email || "").trim().toLowerCase();
+    const mobile = normalizeLoosePhone(profile.mobile);
+    const withCc = normalizeLoosePhone(
+        `${profile.country_code || ""}${profile.mobile || ""}`
+    );
+
+    const byEmail = email
+        ? list.find(
+              (u) => String(u.email || "").trim().toLowerCase() === email
+          )
+        : null;
+    if (byEmail?.username) return String(byEmail.username).trim();
+
+    const byMobile = list.find((u) => {
+        const um = normalizeLoosePhone(u.mobile);
+        if (!um) return false;
+        return (
+            (mobile && (um === mobile || um.endsWith(mobile) || mobile.endsWith(um))) ||
+            (withCc && (um === withCc || um.endsWith(withCc) || withCc.endsWith(um)))
+        );
+    });
+    if (byMobile?.username) return String(byMobile.username).trim();
+
+    // Last resort: keep OOMS username (works when OC username matches)
+    return wanted;
+}
+
 async function proxyOneChattingPost(url, token, body, res) {
     const response = await axios.post(url, body, {
         headers: {
@@ -1415,8 +1507,28 @@ router.get("/onechatting/chat-assign-permission", auth, validateBranch, async (r
             return res.status(400).json(response.data);
         }
 
+        const upstream = response.data || {};
+        const nested =
+            upstream.data &&
+            typeof upstream.data === "object" &&
+            !Array.isArray(upstream.data)
+                ? upstream.data
+                : null;
+        const flat = {
+            ...upstream,
+            ...(nested || {}),
+        };
+        const users = extractAssigningUsers(upstream);
+        const me_username = await resolveOneChattingAssignUsername({
+            branchId: branch_id,
+            oomsUsername: username,
+            users,
+        });
+
         return res.status(response.status).json({
-            ...(response.data || {}),
+            ...flat,
+            me_username,
+            ooms_username: username,
             developer_token: resolved.token,
         });
     } catch (error) {
@@ -1462,12 +1574,57 @@ router.post("/onechatting/chat-assign", auth, validateBranch, async (req, res) =
             return res.status(resolved.status).json(resolved.data);
         }
 
+        let resolvedTarget = target;
+        if (type === "assign") {
+            const selfAliases = new Set(
+                [username, "__me__", "me", "self"]
+                    .map((v) => String(v || "").trim().toLowerCase())
+                    .filter(Boolean)
+            );
+            const wantsSelf = selfAliases.has(resolvedTarget.toLowerCase());
+
+            // Always resolve OC username when assigning to self / OOMS username.
+            // Transfer targets from assigning.users are already OC usernames.
+            if (wantsSelf) {
+                let users = [];
+                try {
+                    const permRes = await axios.get(
+                        ONECHATTING_CHAT_ASSIGN_PERMISSION_URL,
+                        {
+                            headers: { token: resolved.token },
+                            params: { number },
+                        }
+                    );
+                    users = extractAssigningUsers(permRes.data);
+                } catch (permError) {
+                    console.warn(
+                        "chat-assign: failed to load users for self target resolve",
+                        permError?.response?.data || permError.message
+                    );
+                }
+
+                resolvedTarget = await resolveOneChattingAssignUsername({
+                    branchId: branch_id,
+                    oomsUsername: username,
+                    users,
+                });
+
+                if (!resolvedTarget) {
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            "Could not resolve your OneChatting username for assign-to-me",
+                    });
+                }
+            }
+        }
+
         const body = {
             number,
             type,
         };
         if (type === "assign") {
-            body.target = target;
+            body.target = resolvedTarget;
         }
 
         const response = await axios.post(ONECHATTING_CHAT_ASSIGN_URL, body, {
@@ -1483,6 +1640,7 @@ router.post("/onechatting/chat-assign", auth, validateBranch, async (req, res) =
 
         return res.status(response.status).json({
             ...(response.data || {}),
+            target_resolved: type === "assign" ? resolvedTarget : undefined,
             developer_token: resolved.token,
         });
     } catch (error) {
