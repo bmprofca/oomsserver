@@ -176,13 +176,13 @@ function extractAssigningUsers(payload) {
         nested.assigning && typeof nested.assigning === "object"
             ? nested.assigning
             : payload.assigning && typeof payload.assigning === "object"
-              ? payload.assigning
-              : {};
+                ? payload.assigning
+                : {};
     const users = Array.isArray(assigning.users)
         ? assigning.users
         : Array.isArray(nested.users)
-          ? nested.users
-          : [];
+            ? nested.users
+            : [];
     return users.filter((u) => u && typeof u === "object");
 }
 
@@ -235,8 +235,8 @@ async function resolveOneChattingAssignUsername({
 
     const byEmail = email
         ? list.find(
-              (u) => String(u.email || "").trim().toLowerCase() === email
-          )
+            (u) => String(u.email || "").trim().toLowerCase() === email
+        )
         : null;
     if (byEmail?.username) return String(byEmail.username).trim();
 
@@ -252,6 +252,41 @@ async function resolveOneChattingAssignUsername({
 
     // Last resort: keep OOMS username (works when OC username matches)
     return wanted;
+}
+
+function isBlockedDownloadHost(hostname) {
+    const host = String(hostname || "").toLowerCase();
+    if (!host) return true;
+    if (
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host === "::1" ||
+        host === "0.0.0.0" ||
+        host.endsWith(".local") ||
+        host.endsWith(".internal")
+    ) {
+        return true;
+    }
+
+    const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+        const parts = ipv4.slice(1).map(Number);
+        if (parts[0] === 10) return true;
+        if (parts[0] === 127) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 169 && parts[1] === 254) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    }
+
+    return false;
+}
+
+function sanitizeDownloadFilename(name, fallback = "download.bin") {
+    const cleaned = String(name || "")
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+        .trim();
+    if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
+    return cleaned.slice(0, 180);
 }
 
 async function proxyOneChattingPost(url, token, body, res) {
@@ -648,8 +683,8 @@ async function resolveOneChattingCampaignRecipients(branchId, audience = {}) {
         const group_ids = [
             ...new Set(
                 (Array.isArray(audience.group_ids) ? audience.group_ids : [])
-                    .map((id) => Number(id))
-                    .filter((id) => Number.isFinite(id) && id > 0)
+                    .map((id) => String(id ?? "").trim())
+                    .filter((id) => id.length > 0)
             ),
         ];
         if (!group_ids.length) {
@@ -802,9 +837,9 @@ async function resolveOneChattingCampaignRecipients(branchId, audience = {}) {
 function isBulkUpsertJobDone(statusPayload) {
     const status = String(
         statusPayload?.status ||
-            statusPayload?.job_status ||
-            statusPayload?.data?.status ||
-            ""
+        statusPayload?.job_status ||
+        statusPayload?.data?.status ||
+        ""
     )
         .trim()
         .toLowerCase();
@@ -1510,8 +1545,8 @@ router.get("/onechatting/chat-assign-permission", auth, validateBranch, async (r
         const upstream = response.data || {};
         const nested =
             upstream.data &&
-            typeof upstream.data === "object" &&
-            !Array.isArray(upstream.data)
+                typeof upstream.data === "object" &&
+                !Array.isArray(upstream.data)
                 ? upstream.data
                 : null;
         const flat = {
@@ -1669,6 +1704,121 @@ router.post("/onechatting/mark-as-read", auth, validateBranch, async (req, res) 
         );
     } catch (error) {
         return handleOneChattingAxiosError(error, res, "Failed to mark as read");
+    }
+});
+
+/**
+ * Force-download chat media (avoids browser opening cross-origin URLs).
+ * GET /onechatting/media-download?url=&filename=
+ */
+router.get("/onechatting/media-download", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const rawUrl = req.query.url ? String(req.query.url).trim() : "";
+        const filenameHint = req.query.filename
+            ? String(req.query.filename).trim()
+            : "";
+
+        if (!rawUrl) {
+            return res.status(400).json({
+                success: false,
+                message: "url is required",
+            });
+        }
+
+        let parsed;
+        try {
+            parsed = new URL(rawUrl);
+        } catch {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid media url",
+            });
+        }
+
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+            return res.status(400).json({
+                success: false,
+                message: "Only http/https media urls are allowed",
+            });
+        }
+
+        if (isBlockedDownloadHost(parsed.hostname)) {
+            return res.status(400).json({
+                success: false,
+                message: "Media host is not allowed",
+            });
+        }
+
+        const resolved = await resolveOneChattingToken(username, branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        const upstream = await axios.get(rawUrl, {
+            responseType: "arraybuffer",
+            timeout: 120000,
+            maxContentLength: 80 * 1024 * 1024,
+            maxBodyLength: 80 * 1024 * 1024,
+            validateStatus: (status) => status >= 200 && status < 400,
+            headers: {
+                // Some CDNs require a UA; token not usually needed for public media URLs
+                Accept: "*/*",
+            },
+        });
+
+        const contentType =
+            String(upstream.headers["content-type"] || "application/octet-stream")
+                .split(";")[0]
+                .trim() || "application/octet-stream";
+
+        let filename = sanitizeDownloadFilename(filenameHint, "");
+        if (!filename) {
+            try {
+                const segment = decodeURIComponent(
+                    parsed.pathname.split("/").pop() || ""
+                );
+                filename = sanitizeDownloadFilename(segment, "download.bin");
+            } catch {
+                filename = "download.bin";
+            }
+        }
+
+        if (!filename.includes(".")) {
+            const extByType = {
+                "image/jpeg": ".jpg",
+                "image/jpg": ".jpg",
+                "image/png": ".png",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+                "video/mp4": ".mp4",
+                "audio/mpeg": ".mp3",
+                "audio/ogg": ".ogg",
+                "application/pdf": ".pdf",
+            };
+            filename += extByType[contentType] || ".bin";
+        }
+
+        res.setHeader("Content-Type", contentType);
+        res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename.replace(/"/g, "")}"`
+        );
+        res.setHeader("Cache-Control", "private, no-store");
+        return res.status(200).send(Buffer.from(upstream.data));
+    } catch (error) {
+        if (error.response) {
+            return res.status(502).json({
+                success: false,
+                message: "Failed to fetch media from source",
+            });
+        }
+        console.error("ONECHATTING MEDIA DOWNLOAD ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to download media",
+        });
     }
 });
 
