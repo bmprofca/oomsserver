@@ -43,7 +43,9 @@ import {
     normalizeMobileDigits,
 } from "../helpers/clientPhone.js";
 
-const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
+const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
+    .trim()
+    .replace(/\/$/, "");
 const ONECHATTING_CHAT_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-list`;
 const ONECHATTING_CHAT_HISTORY_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-history`;
 const ONECHATTING_CHAT_ASSIGN_PERMISSION_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign-permission`;

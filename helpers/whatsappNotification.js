@@ -6,7 +6,9 @@ import { getTemplateBySystemName } from "../services/whatsappWebTemplateMappingS
 import { sendOomsSystemTemplateMessage } from "../services/wpSystemWhatsappSendService.js";
 import { resolveComponentMedia } from "./onechattingTemplateMedia.js";
 
-const ONECHATTING_BASE_URL = process.env.ONECHATTING_BASE_URL || "https://server.onechatting.com";
+const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
+    .trim()
+    .replace(/\/$/, "");
 const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
 const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
 

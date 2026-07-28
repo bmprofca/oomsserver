@@ -1,9 +1,12 @@
 import axios from "axios";
 import pool from "../db.js";
 
-export const WHATSAPPWEB_BASE_URL =
-    process.env.WHATSAPPWEB_BASE_URL || "https://whatsappweb.onesaasbackend.com";
-export const WHATSAPPWEB_API_KEY = process.env.WHATSAPPWEB_API_KEY || "onedevelopers";
+export const WHATSAPPWEB_BASE_URL = String(
+    process.env.WHATSAPPWEB_BASE_URL || ""
+).trim().replace(/\/$/, "");
+export const WHATSAPPWEB_API_KEY = String(
+    process.env.WHATSAPPWEB_API_KEY || ""
+).trim();
 
 function whatsappWebHeaders() {
     return {

@@ -690,14 +690,88 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 router.get("/list", auth, validateBranch, async (req, res) => {
     try {
         const { branch_id } = req;
-        const { search, page = 1, limit = 20 } = req.query; // Get from middleware (added to query)
+        const { search, page = 1, limit = 20, status } = req.query;
 
-        const pageNum = Number(page) || 1;
-        const limitNum = Number(limit) || 20;
+        const pageNum = Math.max(1, Number(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
         const offset = (pageNum - 1) * limitNum;
+        const searchTerm = search != null ? String(search).trim() : "";
+        const statusFilter = status != null ? String(status).trim().toUpperCase() : "";
 
-        let query = `
-            SELECT 
+        const whereParts = [
+            "c.user_type = 'client'",
+            "c.is_deleted = '0'",
+            "c.branch_id = ?",
+        ];
+        const queryParams = [branch_id];
+
+        if (statusFilter === "ACTIVE") {
+            whereParts.push("c.status = '1'");
+        } else if (statusFilter === "INACTIVE") {
+            whereParts.push("c.status = '0'");
+        }
+
+        if (searchTerm) {
+            const searchPattern = `%${searchTerm}%`;
+            whereParts.push(`(
+                c.username LIKE ?
+                OR p.name LIKE ?
+                OR p.mobile LIKE ?
+                OR p.email LIKE ?
+                OR p.pan_number LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM firms f
+                    WHERE f.username = c.username
+                      AND f.branch_id = c.branch_id
+                      AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                      AND (
+                          IFNULL(f.firm_name, '') LIKE ?
+                          OR IFNULL(f.pan_no, '') LIKE ?
+                          OR IFNULL(f.gst_no, '') LIKE ?
+                          OR IFNULL(f.vat_no, '') LIKE ?
+                          OR IFNULL(f.tan_no, '') LIKE ?
+                          OR IFNULL(f.cin_no, '') LIKE ?
+                          OR IFNULL(f.file_no, '') LIKE ?
+                      )
+                )
+            )`);
+            queryParams.push(
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern
+            );
+        }
+
+        const whereSql = whereParts.join(" AND ");
+
+        // Dedicated count query — do NOT regex-replace the SELECT (nested FROM profile breaks it)
+        const countSql = `
+            SELECT COUNT(*) AS total
+            FROM clients c
+            LEFT JOIN profile p
+                ON p.username = c.username
+               AND p.id = (
+                    SELECT MAX(p2.id)
+                    FROM profile p2
+                    WHERE p2.username = c.username
+               )
+            WHERE ${whereSql}
+        `;
+        const [countResult] = await pool.query(countSql, queryParams);
+        const total = Number(countResult[0]?.total) || 0;
+
+        const listSql = `
+            SELECT
                 c.id,
                 c.username,
                 c.branch_id,
@@ -722,102 +796,129 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 p.pincode,
                 p.image
             FROM clients c
-            LEFT JOIN profile p ON c.username = p.username 
-                AND p.id = (
-                    SELECT MAX(p2.id) 
-                    FROM profile p2 
+            LEFT JOIN profile p
+                ON p.username = c.username
+               AND p.id = (
+                    SELECT MAX(p2.id)
+                    FROM profile p2
                     WHERE p2.username = c.username
-                )
-            WHERE c.user_type = 'client' 
-            AND c.is_deleted = '0'
-            AND c.branch_id = ?
+               )
+            WHERE ${whereSql}
+            ORDER BY c.id DESC
+            LIMIT ? OFFSET ?
         `;
+        const [rows] = await pool.query(listSql, [...queryParams, limitNum, offset]);
 
-        const queryParams = [branch_id];
+        const usernames = rows
+            .map((row) => String(row.username || "").trim())
+            .filter(Boolean);
 
-        // Add search filter if provided (profile + firm details)
-        if (search && String(search).trim() !== "") {
-            const searchPattern = `%${String(search).trim()}%`;
-            query += ` AND (
-                c.username LIKE ?
-                OR p.name LIKE ?
-                OR p.mobile LIKE ?
-                OR p.email LIKE ?
-                OR p.pan_number LIKE ?
-                OR EXISTS (
-                    SELECT 1
-                    FROM firms f
-                    WHERE f.username = c.username
-                      AND f.branch_id = c.branch_id
-                      AND (f.is_deleted = '0' OR f.is_deleted = 0)
-                      AND (
-                          IFNULL(f.firm_name, '') LIKE ?
-                          OR IFNULL(f.pan_no, '') LIKE ?
-                          OR IFNULL(f.gst_no, '') LIKE ?
-                          OR IFNULL(f.vat_no, '') LIKE ?
-                          OR IFNULL(f.tan_no, '') LIKE ?
-                          OR IFNULL(f.cin_no, '') LIKE ?
-                          OR IFNULL(f.file_no, '') LIKE ?
-                      )
-                )
-            )`;
-            queryParams.push(
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern,
-                searchPattern
+        const firmsByUsername = new Map();
+        const balanceByUsername = new Map();
+
+        if (usernames.length) {
+            const firmPlaceholders = usernames.map(() => "?").join(",");
+            const [firmRows] = await pool.query(
+                `SELECT
+                    firm_id,
+                    firm_name,
+                    firm_type,
+                    username,
+                    status,
+                    create_date,
+                    modify_date,
+                    address_line_1,
+                    address_line_2,
+                    city,
+                    state,
+                    pincode,
+                    country,
+                    gst_no,
+                    pan_no,
+                    file_no,
+                    cin_no,
+                    vat_no,
+                    tan_no
+                 FROM firms
+                 WHERE branch_id = ?
+                   AND is_deleted = '0'
+                   AND username IN (${firmPlaceholders})
+                 ORDER BY id DESC`,
+                [branch_id, ...usernames]
             );
-        }
 
-        // Get total count for pagination
-        const countQuery = query.replace(
-            /SELECT[\s\S]*?FROM/,
-            'SELECT COUNT(*) as total FROM'
-        );
-        const [countResult] = await pool.query(countQuery, queryParams);
-        const total = countResult[0]?.total || 0;
-
-        // Add ordering and pagination
-        query += ` ORDER BY c.id DESC LIMIT ? OFFSET ?`;
-        queryParams.push(limitNum, offset);
-
-        const [rows] = await pool.query(query, queryParams);
-
-        // Transform rows: add image URL and fetch firms for each client
-        const transformedRows = await Promise.all(rows.map(async (row) => {
-            const transformedRow = { ...row };
-
-            // Transform image field to include BASE_DOMAIN if not null/empty
-            if (transformedRow.image && transformedRow.image.trim() !== '') {
-                transformedRow.image = resolveProfileImageUrl(transformedRow.image);
-            } else {
-                transformedRow.image = null;
+            for (const firm of firmRows) {
+                const key = String(firm.username || "").trim();
+                if (!key) continue;
+                if (!firmsByUsername.has(key)) firmsByUsername.set(key, []);
+                firmsByUsername.get(key).push({
+                    firm_id: firm.firm_id,
+                    firm_name: firm.firm_name,
+                    firm_type: firm.firm_type,
+                    username: firm.username,
+                    gst_no: firm.gst_no,
+                    pan_no: firm.pan_no,
+                    file_no: firm.file_no,
+                    cin_no: firm.cin_no,
+                    vat_no: firm.vat_no,
+                    tan_no: firm.tan_no,
+                    status: firm.status == "1",
+                    create_date: firm.create_date,
+                    modify_date: firm.modify_date,
+                    address: {
+                        address_line_1: firm.address_line_1,
+                        address_line_2: firm.address_line_2,
+                        city: firm.city,
+                        state: firm.state,
+                        pincode: firm.pincode,
+                        country: firm.country,
+                    },
+                });
             }
 
-            // Fetch firms for this client using GET_FIRMS_BY_USERNAME
-            const firms = await GET_FIRMS_BY_USERNAME({
-                username: transformedRow.username,
-                branch_id: branch_id
-            });
-            transformedRow.firms = firms || [];
+            const balancePlaceholders = usernames.map(() => "?").join(",");
+            const [balanceRows] = await pool.query(
+                `SELECT
+                    party_id AS username,
+                    COALESCE(SUM(debit), 0) - COALESCE(SUM(credit), 0) AS balance
+                 FROM (
+                    SELECT party2_id AS party_id, ABS(amount) AS debit, 0 AS credit
+                    FROM transactions
+                    WHERE branch_id = ?
+                      AND party2_type = 'client'
+                      AND party2_id IN (${balancePlaceholders})
+                    UNION ALL
+                    SELECT party1_id AS party_id, 0 AS debit, ABS(amount) AS credit
+                    FROM transactions
+                    WHERE branch_id = ?
+                      AND party1_type = 'client'
+                      AND party1_id IN (${balancePlaceholders})
+                 ) t
+                 GROUP BY party_id`,
+                [branch_id, ...usernames, branch_id, ...usernames]
+            );
 
-            const balanceResult = await GET_BALANCE({
-                party_type: "client",
-                party_id: transformedRow.username,
-                branch_id
-            });
-            transformedRow.balance = balanceResult?.balance ?? 0;
+            for (const row of balanceRows) {
+                const key = String(row.username || "").trim();
+                if (!key) continue;
+                balanceByUsername.set(key, Number(row.balance) || 0);
+            }
+        }
 
-            return transformedRow;
-        }));
+        const transformedRows = rows.map((row) => {
+            const username = String(row.username || "").trim();
+            const image =
+                row.image && String(row.image).trim() !== ""
+                    ? resolveProfileImageUrl(row.image)
+                    : null;
+
+            return {
+                ...row,
+                image,
+                firms: firmsByUsername.get(username) || [],
+                balance: balanceByUsername.get(username) ?? 0,
+            };
+        });
 
         return res.status(200).json({
             success: true,
@@ -827,17 +928,16 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 page: pageNum,
                 limit: limitNum,
                 total,
-                total_pages: Math.ceil(total / limitNum),
-                is_last_page: offset + rows.length >= total
-            }
+                total_pages: Math.max(1, Math.ceil(total / limitNum)),
+                is_last_page: offset + rows.length >= total,
+            },
         });
-
     } catch (error) {
-        console.error('Error fetching Client list:', error);
+        console.error("Error fetching Client list:", error);
         return res.status(500).json({
             success: false,
             message: "Failed to fetch Client list",
-            error: error.message
+            error: error.message,
         });
     }
 });
