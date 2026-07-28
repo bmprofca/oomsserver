@@ -52,10 +52,38 @@ function normalizeNotificationType(typeRaw) {
         "task create": "task create",
         "task complete": "task complete",
         "task cancel": "task cancel",
-        "birthday reminder": "birthday reminder",
+        birthday: "birthday wish",
+        "birthday reminder": "birthday wish",
+        "birthday wish": "birthday wish",
     };
 
     return aliases[compact] || compact;
+}
+
+/** Alternate template names used across email / SMS / WhatsApp for the same intent. */
+function notificationTypeCandidates(notificationType) {
+    const primary = String(notificationType || "").trim().toLowerCase();
+    if (!primary) return [];
+
+    const candidates = new Set([
+        primary,
+        primary.replace(/ /g, "_"),
+        primary.replace(/ /g, "-"),
+    ]);
+
+    if (primary === "birthday wish" || primary === "birthday reminder" || primary === "birthday") {
+        [
+            "birthday",
+            "birthday wish",
+            "birthday reminder",
+            "birthday_wish",
+            "birthday_reminder",
+            "birthday-wish",
+            "birthday-reminder",
+        ].forEach((item) => candidates.add(item));
+    }
+
+    return [...candidates];
 }
 
 function channelResult(available, reason = "") {
@@ -79,15 +107,16 @@ async function checkSmsAvailability(branch_id, notificationType) {
             return channelResult(false, "SMS config is not active");
         }
 
+        const typeCandidates = notificationTypeCandidates(notificationType);
         const [[activeTemplate]] = await poolQuery(
             `SELECT template_id
              FROM sms_templates
              WHERE branch_id = ?
                AND status = 'active'
-               AND LOWER(TRIM(template_name)) IN (?, REPLACE(?, ' ', '_'), REPLACE(?, ' ', '-'))
+               AND LOWER(TRIM(template_name)) IN (${typeCandidates.map(() => "?").join(", ")})
              ORDER BY id DESC
              LIMIT 1`,
-            [branch_id, notificationType, notificationType, notificationType]
+            [branch_id, ...typeCandidates]
         );
         if (!activeTemplate?.template_id) {
             return channelResult(false, `SMS template is not configured for type '${notificationType}'`);
@@ -114,15 +143,16 @@ async function checkEmailAvailability(branch_id, notificationType) {
             return channelResult(false, "Email config is not active");
         }
 
+        const typeCandidates = notificationTypeCandidates(notificationType);
         const [[activeTemplate]] = await poolQuery(
             `SELECT template_id
              FROM email_static_templates
              WHERE branch_id = ?
                AND status = 'active'
-               AND LOWER(TRIM(template_type)) IN (?, REPLACE(?, ' ', '_'), REPLACE(?, ' ', '-'))
+               AND LOWER(TRIM(template_type)) IN (${typeCandidates.map(() => "?").join(", ")})
              ORDER BY is_default DESC, id DESC
              LIMIT 1`,
-            [branch_id, notificationType, notificationType, notificationType]
+            [branch_id, ...typeCandidates]
         );
         if (!activeTemplate?.template_id) {
             return channelResult(false, `Email template is not configured for type '${notificationType}'`);
@@ -179,16 +209,17 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
                 return channelResult(false, "No enabled OneChatting user token found");
             }
 
+            const typeCandidates = notificationTypeCandidates(notificationType);
             const [[mapping]] = await poolQuery(
                 `SELECT map_id
                  FROM onechatting_template_mapping
                  WHERE branch_id = ?
                    AND status = 1
-                   AND LOWER(TRIM(template)) = ?
+                   AND LOWER(TRIM(template)) IN (${typeCandidates.map(() => "?").join(", ")})
                    AND onechatting_template_name IS NOT NULL
                    AND TRIM(onechatting_template_name) <> ''
                  LIMIT 1`,
-                [branch_id, notificationType]
+                [branch_id, ...typeCandidates]
             );
             if (!mapping?.map_id) {
                 return channelResult(false, `OneChatting template mapping missing for type '${notificationType}'`);
@@ -197,16 +228,17 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
         }
 
         if (channel === "ooms web") {
+            const typeCandidates = notificationTypeCandidates(notificationType);
             const [[templateRow]] = await poolQuery(
                 `SELECT template_id
                  FROM whatsappweb_template_mapping
                  WHERE branch_id = ?
                    AND status = 'active'
-                   AND LOWER(TRIM(template_name)) = ?
+                   AND LOWER(TRIM(template_name)) IN (${typeCandidates.map(() => "?").join(", ")})
                    AND content_json IS NOT NULL
                    AND TRIM(content_json) <> ''
                  LIMIT 1`,
-                [branch_id, notificationType]
+                [branch_id, ...typeCandidates]
             );
             if (!templateRow?.template_id) {
                 return channelResult(false, `WhatsApp Web template mapping missing for type '${notificationType}'`);
@@ -215,14 +247,15 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
         }
 
         if (channel === "ooms system") {
+            const typeCandidates = notificationTypeCandidates(notificationType);
             const [[mapping]] = await poolQuery(
                 `SELECT map_id
                  FROM wp_system_template_mapping
                  WHERE branch_id = ?
                    AND status = 1
-                   AND LOWER(TRIM(type)) = ?
+                   AND LOWER(TRIM(type)) IN (${typeCandidates.map(() => "?").join(", ")})
                  LIMIT 1`,
-                [branch_id, notificationType]
+                [branch_id, ...typeCandidates]
             );
             if (!mapping?.map_id) {
                 return channelResult(false, `OOMS system template mapping missing for type '${notificationType}'`);

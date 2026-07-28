@@ -1045,6 +1045,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.username,
                 t.firm_id,
                 t.task_type,
+                t.compliance_year,
+                t.compliance_period,
                 t.due_date,
                 t.status,
                 t.fees,
@@ -1061,6 +1063,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.target_date,
                 t.in_user,
                 s.name as service_name,
+                s.frequency as service_frequency,
                 f.firm_name,
                 f.username as firm_username,
                 f.pan_no as firm_pan_no,
@@ -1153,6 +1156,9 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 NULL AS target_date,
                 NULL AS in_user,
                 s.name AS service_name,
+                s.frequency AS service_frequency,
+                cs.financial_year AS compliance_year,
+                cs.period_name AS compliance_period,
                 f.firm_name,
                 f.username AS firm_username,
                 f.pan_no AS firm_pan_no,
@@ -1434,7 +1440,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 task_type: task.task_type || null,
                 service: {
                     service_id: task.service_id,
-                    service_name: task.service_name
+                    service_name: task.service_name,
+                    frequency: task.service_frequency || null,
                 },
                 client: {
                     username: task.username,
@@ -1463,7 +1470,11 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                     completed_by: completedByUser,
                     task_kind: task.task_kind,
                     task_type: task.task_type || null,
+                    compliance_year: task.compliance_year || null,
+                    compliance_period: task.compliance_period || null,
                 },
+                compliance_year: task.compliance_year || null,
+                compliance_period: task.compliance_period || null,
                 in_user: inUserData,
                 financials: {
                     fees: parseFloat(task.fees || 0),
@@ -5052,6 +5063,9 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
         let tasksQuery = `
             SELECT DISTINCT
                 t.task_id,
+                t.task_type,
+                t.compliance_year,
+                t.compliance_period,
                 t.due_date,
                 t.target_date,
                 t.status as task_status,
@@ -5061,9 +5075,11 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
                 t.fees,
                 t.total,
                 s.name as service_name,
+                s.frequency as service_frequency,
                 p.name as client_name,
                 p.mobile as client_mobile,
-                f.firm_name
+                f.firm_name,
+                f.file_no as firm_file_no
             FROM task_staffs ts
             INNER JOIN tasks t ON ts.task_id = t.task_id AND t.branch_id = ts.branch_id
             LEFT JOIN services s ON t.service_id = s.service_id
@@ -5090,15 +5106,38 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
         // Format response
         const taskList = tasks.map(task => ({
             task_id: task.task_id,
+            task_type: task.task_type || null,
             service_name: task.service_name,
+            service: {
+                name: task.service_name,
+                frequency: task.service_frequency || null,
+            },
             client_name: task.client_name,
             client_mobile: task.client_mobile,
             firm_name: task.firm_name,
+            firm: {
+                firm_name: task.firm_name,
+                file_no: task.firm_file_no || null,
+            },
             status: task.task_status,
             due_date: task.due_date,
             target_date: task.target_date,
             create_date: task.create_date,
             complete_date: task.complete_date,
+            compliance_year: task.compliance_year || null,
+            compliance_period: task.compliance_period || null,
+            dates: {
+                due_date: task.due_date,
+                create_date: task.create_date,
+                target_date: task.target_date,
+                complete_date: task.complete_date || null,
+                compliance_year: task.compliance_year || null,
+                compliance_period: task.compliance_period || null,
+            },
+            charges: {
+                fees: parseFloat(task.fees || 0),
+                total: parseFloat(task.total || 0),
+            },
             financials: {
                 fees: parseFloat(task.fees || 0),
                 total: parseFloat(task.total || 0),

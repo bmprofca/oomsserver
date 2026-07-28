@@ -947,6 +947,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.firm_id,
                 t.service_id,
                 t.task_type,
+                t.compliance_year,
+                t.compliance_period,
                 t.has_ca,
                 t.ca_id,
                 t.has_agent,
@@ -958,12 +960,14 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.billing_status,
                 t.status,
                 t.create_date,
+                t.complete_date,
                 t.create_by,
                 t.is_recurring,
                 t.in_user,
                 f.username AS firm_username,
                 f.firm_name,
-                s.name AS service_name
+                s.name AS service_name,
+                s.frequency AS service_frequency
             ${baseQuery}
             ORDER BY t.create_date DESC, t.id DESC
             LIMIT ? OFFSET ?
@@ -1006,7 +1010,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 },
                 service: {
                     service_id: service_data?.service_id,
-                    name: service_data?.name
+                    name: service_data?.name,
+                    frequency:
+                        element?.service_frequency ||
+                        service_data?.frequency ||
+                        null,
                 },
                 charges: {
                     fees: feesNum,
@@ -1018,7 +1026,13 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     due_date: element?.due_date,
                     create_date: element?.create_date,
                     target_date: element?.target_date,
+                    complete_date: element?.complete_date ?? null,
+                    compliance_year: element?.compliance_year ?? null,
+                    compliance_period: element?.compliance_period ?? null,
                 },
+                complete_date: element?.complete_date ?? null,
+                compliance_year: element?.compliance_year ?? null,
+                compliance_period: element?.compliance_period ?? null,
                 billing_status: element?.billing_status == "0" ? 'pending' : element?.billing_status == "1" ? 'complete' : 'non billable',
                 status: element?.status,
                 create_by,

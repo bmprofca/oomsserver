@@ -32,10 +32,129 @@ import {
     renderTemplate,
     sendEmail,
 } from "./payment_reminder.js";
-import { sendPaymentReminderWhatsapp } from "../helpers/whatsappNotification.js";
+import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp } from "../helpers/whatsappNotification.js";
 import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
+
+const BIRTHDAY_EMAIL_TEMPLATE_TYPES = [
+    "birthday",
+    "birthday_reminder",
+    "birthday reminder",
+    "birthday_wish",
+    "birthday wish",
+];
+
+const BIRTHDAY_SMS_TEMPLATE_NAMES = [
+    "birthday",
+    "birthday reminder",
+    "birthday wish",
+    "birthday_reminder",
+    "birthday_wish",
+];
+
+function isBirthdayToday(dateOfBirth) {
+    if (!dateOfBirth) return false;
+    const dob = new Date(dateOfBirth);
+    if (Number.isNaN(dob.getTime())) return false;
+    const today = new Date();
+    return dob.getMonth() === today.getMonth() && dob.getDate() === today.getDate();
+}
+
+function formatBirthdayDisplay(dateOfBirth) {
+    if (!dateOfBirth) return "";
+    const dob = new Date(dateOfBirth);
+    if (Number.isNaN(dob.getTime())) return String(dateOfBirth);
+    return dob.toLocaleDateString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+    });
+}
+
+async function getActiveBirthdayEmailTemplate(branch_id) {
+    for (const template_type of BIRTHDAY_EMAIL_TEMPLATE_TYPES) {
+        try {
+            return await getActivePaymentTemplate(branch_id, template_type);
+        } catch {
+            // try next alias
+        }
+    }
+    throw new Error("No active birthday email template found");
+}
+
+async function prepareBirthdayReminderVariables(branch_id, username, user) {
+    const [firmRows] = await pool.query(
+        `SELECT firm_name
+         FROM firms
+         WHERE username = ? AND branch_id = ? AND status = '1' AND (is_deleted = '0' OR is_deleted = 0)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [username, branch_id]
+    );
+    const firmName = firmRows[0]?.firm_name || "";
+    let company = firmName;
+    try {
+        const [branchRows] = await pool.query(
+            `SELECT * FROM branch_list WHERE branch_id = ? LIMIT 1`,
+            [branch_id]
+        );
+        company =
+            branchRows[0]?.branch_name ||
+            branchRows[0]?.name ||
+            firmName ||
+            "";
+    } catch {
+        company = firmName;
+    }
+    const ageYears = user?.date_of_birth
+        ? Math.max(0, new Date().getFullYear() - new Date(user.date_of_birth).getFullYear())
+        : "";
+
+    return {
+        "{{name}}": user?.name != null ? String(user.name) : String(username),
+        name: user?.name != null ? String(user.name) : String(username),
+        "{{email}}": user?.email != null ? String(user.email) : "",
+        email: user?.email != null ? String(user.email) : "",
+        "{{mobile}}": user?.mobile != null ? String(user.mobile) : "",
+        mobile: user?.mobile != null ? String(user.mobile) : "",
+        "{{firm_name}}": firmName,
+        firm_name: firmName,
+        "{{company}}": company,
+        company,
+        "{{birthday_date}}": formatBirthdayDisplay(user?.date_of_birth),
+        birthday_date: formatBirthdayDisplay(user?.date_of_birth),
+        "{{age}}": ageYears !== "" ? String(ageYears) : "",
+        age: ageYears !== "" ? String(ageYears) : "",
+        "{{offer}}": "",
+        offer: "",
+        "{{coupon_code}}": "",
+        coupon_code: "",
+        "{{username}}": String(username),
+        username: String(username),
+    };
+}
+
+async function sendBirthdaySmsWithFallback({ branch_id, mobile, variables }) {
+    let lastError = null;
+    for (const templateName of BIRTHDAY_SMS_TEMPLATE_NAMES) {
+        try {
+            return await sendSingleSmsNotification({
+                branch_id,
+                mobile,
+                templateName,
+                variables,
+            });
+        } catch (error) {
+            lastError = error;
+            const message = String(error?.message || "").toLowerCase();
+            if (!message.includes("sms template is not configured")) {
+                throw error;
+            }
+        }
+    }
+    throw lastError || new Error("SMS template is not configured for birthday");
+}
 
 // Note file configuration (NOTE_FILE_DIR, NOTE_VOICE_DIR imported from helpers/NoteFile.js)
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -399,6 +518,226 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
         return res.status(500).json({
             success: false,
             message: error.message || "Failed to send payment reminder",
+        });
+    }
+});
+
+router.post("/birthday-reminder", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const sent_by = req.headers.username || req.headers.Username || "";
+        const isAll = req.body?.is_all === true || req.body?.is_all === "true";
+        const rawUsernames = isAll
+            ? []
+            : Array.isArray(req.body?.usernames)
+                ? req.body.usernames
+                : req.body?.username
+                    ? [req.body.username]
+                    : [];
+        let usernames = [
+            ...new Set(rawUsernames.map((item) => String(item || "").trim()).filter(Boolean)),
+        ];
+        const requestedChannels = Array.isArray(req.body?.channels)
+            ? [...new Set(req.body.channels.map((item) => String(item).trim().toLowerCase()))]
+            : [];
+        const allowedChannels = new Set(["email", "sms", "whatsapp"]);
+        const channels = requestedChannels.filter((channel) => allowedChannels.has(channel));
+
+        if (!isAll && usernames.length === 0) {
+            return res.status(400).json({ success: false, message: "usernames array is required" });
+        }
+        if (!isAll && usernames.length > 100) {
+            return res.status(400).json({
+                success: false,
+                message: "A maximum of 100 clients can be processed at once",
+            });
+        }
+        if (channels.length === 0 || channels.length !== requestedChannels.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Select at least one valid channel: email, sms or whatsapp",
+            });
+        }
+
+        if (isAll) {
+            const [birthdayRows] = await pool.query(
+                `SELECT DISTINCT p.username
+                 FROM profile p
+                 INNER JOIN clients c
+                    ON c.username = p.username
+                   AND c.branch_id = ?
+                   AND c.user_type = 'client'
+                   AND c.is_deleted = '0'
+                 WHERE p.status = '1'
+                   AND p.username IS NOT NULL
+                   AND TRIM(p.username) <> ''
+                   AND p.date_of_birth IS NOT NULL
+                   AND DATE_FORMAT(p.date_of_birth, '%m-%d') = DATE_FORMAT(CURDATE(), '%m-%d')`,
+                [branch_id]
+            );
+            usernames = birthdayRows.map((row) => String(row.username).trim());
+        }
+
+        if (usernames.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No birthday clients found",
+            });
+        }
+
+        const summary = {
+            total: usernames.length,
+            is_all: isAll,
+            sent: 0,
+            partial: 0,
+            skipped: 0,
+            failed: 0,
+            details: [],
+        };
+
+        for (const username of usernames) {
+            try {
+                const [clientRows] = await pool.query(
+                    `SELECT p.*
+                     FROM profile p
+                     INNER JOIN clients c
+                        ON c.username = p.username
+                       AND c.branch_id = ?
+                       AND c.user_type = 'client'
+                       AND c.is_deleted = '0'
+                     WHERE p.username = ? AND p.status = '1'
+                     ORDER BY p.id DESC
+                     LIMIT 1`,
+                    [branch_id, username]
+                );
+                const client = clientRows[0];
+                if (!client) {
+                    summary.failed += 1;
+                    summary.details.push({
+                        username,
+                        status: "failed",
+                        reason: "Client not found",
+                        channels: {},
+                    });
+                    continue;
+                }
+
+                if (!isBirthdayToday(client.date_of_birth)) {
+                    summary.skipped += 1;
+                    summary.details.push({
+                        username,
+                        status: "skipped",
+                        reason: "Birthday is not today",
+                        channels: {},
+                    });
+                    continue;
+                }
+
+                const variables = await prepareBirthdayReminderVariables(
+                    branch_id,
+                    username,
+                    client
+                );
+                const channelResults = {};
+
+                for (const channel of channels) {
+                    try {
+                        if (channel === "email") {
+                            if (!client.email) throw new Error("Client does not have an email address");
+                            const template = await getActiveBirthdayEmailTemplate(branch_id);
+                            const smtpConfig = await getActiveSmtpConfig(branch_id);
+                            const sendResult = await sendEmail(
+                                smtpConfig,
+                                client.email,
+                                renderTemplate(template.subject, variables),
+                                renderTemplate(template.html_body, variables),
+                                template.text_body
+                                    ? renderTemplate(template.text_body, variables)
+                                    : null
+                            );
+                            channelResults.email = {
+                                status: "sent",
+                                message_id: sendResult.messageId || null,
+                            };
+                        } else if (channel === "sms") {
+                            if (!client.mobile) throw new Error("Client does not have a mobile number");
+                            const sendResult = await sendBirthdaySmsWithFallback({
+                                branch_id,
+                                mobile: client.mobile,
+                                variables,
+                            });
+                            channelResults.sms = {
+                                status: "sent",
+                                message_id: sendResult.request_id || null,
+                            };
+                        } else if (channel === "whatsapp") {
+                            await sendBirthdayWishWhatsapp({
+                                branch_id,
+                                username,
+                                sent_by,
+                                variables,
+                            });
+                            channelResults.whatsapp = { status: "sent" };
+                        }
+                    } catch (channelError) {
+                        console.error(`Birthday reminder ${channel} failed for ${username}:`, channelError);
+                        channelResults[channel] = {
+                            status: "failed",
+                            reason:
+                                channelError?.response?.data?.message ||
+                                channelError?.message ||
+                                `Failed to send via ${channel}`,
+                        };
+                    }
+                }
+
+                const sentChannels = Object.values(channelResults).filter(
+                    (result) => result.status === "sent"
+                ).length;
+                const status =
+                    sentChannels === channels.length
+                        ? "sent"
+                        : sentChannels > 0
+                            ? "partial"
+                            : "failed";
+
+                if (status === "sent") summary.sent += 1;
+                else if (status === "partial") summary.partial += 1;
+                else summary.failed += 1;
+
+                summary.details.push({
+                    username,
+                    status,
+                    channels: channelResults,
+                });
+            } catch (clientError) {
+                console.error(`Birthday reminder failed for ${username}:`, clientError);
+                summary.failed += 1;
+                summary.details.push({
+                    username,
+                    status: "failed",
+                    reason: clientError?.message || "Failed to process client",
+                    channels: {},
+                });
+            }
+        }
+
+        const delivered = summary.sent + summary.partial;
+        return res.status(200).json({
+            success: delivered > 0,
+            message:
+                delivered === summary.total
+                    ? `Birthday reminders sent to ${delivered} client${delivered === 1 ? "" : "s"}`
+                    : delivered > 0
+                        ? `Birthday reminders sent to ${delivered} of ${summary.total} clients`
+                        : "Birthday reminders could not be sent",
+            data: summary,
+        });
+    } catch (error) {
+        console.error("Client birthday reminder error:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to send birthday reminder",
         });
     }
 });

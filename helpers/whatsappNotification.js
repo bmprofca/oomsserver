@@ -16,6 +16,7 @@ const TASK_CREATE_TEMPLATE_NAME = "task create";
 const TASK_COMPLETE_TEMPLATE_NAME = "task complete";
 const PAYMENT_RECEIVE_TEMPLATE_NAME = "payment receive";
 const PAYMENT_REMINDER_TEMPLATE_NAME = "payment reminder";
+const BIRTHDAY_WISH_TEMPLATE_NAME = "birthday wish";
 const WHATSAPP_CHANNEL_ONECHATTING = "onechatting";
 const WHATSAPP_CHANNEL_OOMS_WEB = "ooms web";
 const WHATSAPP_CHANNEL_OOMS_SYSTEM = "ooms system";
@@ -58,10 +59,18 @@ function formatWhatsappNumber(countryCode, mobile) {
 function replaceVariablesInString(str, variables) {
     if (typeof str !== "string") return str;
     let out = str;
-    for (const [key, value] of Object.entries(variables)) {
-        if (Object.prototype.hasOwnProperty.call(variables, key)) {
-            out = out.split(key).join(value ?? "");
-        }
+    // Only replace {{placeholder}} keys. Bare keys (e.g. age) corrupt JSON
+    // fields like type:"image" → type:"im1".
+    const entries = Object.entries(variables || {})
+        .filter(
+            ([key]) =>
+                typeof key === "string" &&
+                key.startsWith("{{") &&
+                key.endsWith("}}")
+        )
+        .sort((a, b) => b[0].length - a[0].length);
+    for (const [key, value] of entries) {
+        out = out.split(key).join(value ?? "");
     }
     return out;
 }
@@ -81,6 +90,17 @@ function replaceVariablesInValue(value, variables) {
         return next;
     }
     return value;
+}
+
+/** WhatsApp components must only get {{placeholder}} keys — bare keys like `age` corrupt "image" → "im1". */
+function pickBracedTemplateVariables(source = {}) {
+    const out = {};
+    for (const [key, value] of Object.entries(source || {})) {
+        if (typeof key === "string" && key.startsWith("{{") && key.endsWith("}}")) {
+            out[key] = value ?? "";
+        }
+    }
+    return out;
 }
 
 async function getBranchWhatsappChannel(branch_id) {
@@ -352,16 +372,28 @@ async function buildPaymentReceiveVariables({
 }
 
 async function sendOnechattingTemplateMessage({ token, number, template_id, component }) {
-    await axios.post(
-        ONECHATTING_SEND_TEMPLATE_URL,
-        { number, template_id, component },
-        {
-            headers: {
-                token,
-                "Content-Type": "application/json",
-            },
-        }
-    );
+    try {
+        await axios.post(
+            ONECHATTING_SEND_TEMPLATE_URL,
+            { number, template_id, component },
+            {
+                headers: {
+                    token,
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+    } catch (error) {
+        const apiMessage =
+            error?.response?.data?.error ||
+            error?.response?.data?.message ||
+            error?.message ||
+            "Failed to send WhatsApp template";
+        const err = new Error(apiMessage);
+        err.cause = error;
+        err.response = error?.response;
+        throw err;
+    }
 }
 
 async function sendOnechattingByChannel({
@@ -652,6 +684,90 @@ async function sendPaymentReminderWhatsapp({
     });
 }
 
+async function sendBirthdayWishWhatsapp({
+    branch_id,
+    username,
+    sent_by,
+    variables: extraVariables = {},
+}) {
+    if (!branch_id || !username) {
+        throw new Error("branch_id and username are required");
+    }
+
+    const clientData = await USER_SNIPPED_DATA(username);
+    const recipientNumber = formatWhatsappNumber(
+        clientData?.country_code,
+        clientData?.mobile
+    );
+    if (!recipientNumber) {
+        throw new Error("Client does not have a valid mobile number");
+    }
+
+    const channel = await getBranchWhatsappChannel(branch_id);
+    if (!channel || channel === "disabled") {
+        throw new Error("WhatsApp channel is disabled");
+    }
+    if (channel === WHATSAPP_CHANNEL_ONECHATTING) {
+        const mapping = await loadActiveTemplateMapping(
+            branch_id,
+            BIRTHDAY_WISH_TEMPLATE_NAME
+        );
+        if (!mapping?.onechatting_template_name || !parseStoredComponent(mapping.component)) {
+            throw new Error("Birthday wish WhatsApp template is not configured");
+        }
+        if (!await getBranchDeveloperToken(branch_id)) {
+            throw new Error("OneChatting developer token is not configured");
+        }
+        if (!await getUserOnechattingToken(sent_by, branch_id)) {
+            throw new Error("Your OneChatting user token is not enabled");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
+        const template = await getTemplateBySystemName({
+            branch_id,
+            systemTemplateName: BIRTHDAY_WISH_TEMPLATE_NAME,
+        });
+        if (!template || template.status !== "active" || !template.content) {
+            throw new Error("Birthday wish WhatsApp Web template is not configured");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_SYSTEM) {
+        const [rows] = await pool.query(
+            `SELECT map_id
+             FROM wp_system_template_mapping
+             WHERE branch_id = ? AND status = 1 AND LOWER(TRIM(type)) = ?
+             LIMIT 1`,
+            [branch_id, BIRTHDAY_WISH_TEMPLATE_NAME]
+        );
+        if (!rows[0]?.map_id) {
+            throw new Error("Birthday wish OOMS WhatsApp template is not configured");
+        }
+    } else {
+        throw new Error("Unsupported WhatsApp channel");
+    }
+
+    const variables = {
+        "{{name}}": clientData?.name != null ? String(clientData.name) : String(username),
+        "{{username}}": String(username),
+        "{{mobile}}": clientData?.mobile != null ? String(clientData.mobile) : "",
+        "{{email}}": clientData?.email != null ? String(clientData.email) : "",
+        "{{current_date}}": formatDateOnly(new Date()),
+        ...pickBracedTemplateVariables(extraVariables),
+    };
+
+    // Prefer profile name if extra vars accidentally overwrote with empty.
+    if (!String(variables["{{name}}"] || "").trim()) {
+        variables["{{name}}"] =
+            clientData?.name != null ? String(clientData.name) : String(username);
+    }
+
+    await sendWhatsappByChannel({
+        branch_id,
+        systemTemplateName: BIRTHDAY_WISH_TEMPLATE_NAME,
+        senderUsername: sent_by,
+        recipientNumber,
+        variables,
+    });
+}
+
 function notifyPaymentReceiveWhatsapp(params) {
     void sendPaymentReceiveWhatsapp(params).catch((err) => {
         console.error("Payment receive WhatsApp failed:", err?.response?.data || err?.message || err);
@@ -666,6 +782,7 @@ export {
     sendTaskCompletedWhatsapp,
     sendPaymentReceiveWhatsapp,
     sendPaymentReminderWhatsapp,
+    sendBirthdayWishWhatsapp,
     replaceVariablesInValue,
     TASK_CREATE_TEMPLATE_NAME,
     TASK_COMPLETE_TEMPLATE_NAME,
