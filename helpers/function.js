@@ -318,13 +318,98 @@ async function GET_BALANCE({
 
 async function GET_FIRMS_BY_USERNAME({
     username = "",
-    branch_id = ""
+    branch_id = "",
+    search = "",
+    status = "",
 }) {
-    const [rows] = await pool.query("SELECT * FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0' ORDER BY id DESC", [username, branch_id]);
+    let sql = `
+        SELECT *
+        FROM firms
+        WHERE username = ?
+          AND branch_id = ?
+          AND is_deleted = '0'
+    `;
+    const params = [username, branch_id];
+
+    const statusKey = String(status || "").trim().toLowerCase();
+    if (statusKey === "active" || statusKey === "1") {
+        sql += ` AND status = '1'`;
+    } else if (statusKey === "inactive" || statusKey === "0") {
+        sql += ` AND status = '0'`;
+    }
+
+    const searchTerm = String(search || "").trim();
+    if (searchTerm) {
+        const pattern = `%${searchTerm}%`;
+        sql += `
+            AND (
+                firm_name LIKE ?
+                OR firm_type LIKE ?
+                OR pan_no LIKE ?
+                OR gst_no LIKE ?
+                OR file_no LIKE ?
+                OR tan_no LIKE ?
+                OR vat_no LIKE ?
+                OR cin_no LIKE ?
+                OR address_line_1 LIKE ?
+                OR city LIKE ?
+                OR state LIKE ?
+            )
+        `;
+        params.push(
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern
+        );
+    }
+
+    sql += ` ORDER BY id DESC`;
+
+    const [rows] = await pool.query(sql, params);
 
     if (rows.length == 0) {
         return [];
     } else {
+        const firmIds = rows.map((row) => row.firm_id).filter(Boolean);
+        const groupsByFirmId = {};
+
+        if (firmIds.length > 0 && branch_id) {
+            const [groupRows] = await pool.query(
+                `SELECT
+                    gf.firm_id,
+                    g.group_id,
+                    g.name AS group_name,
+                    g.status AS group_status
+                 FROM group_firms gf
+                 INNER JOIN groups g
+                    ON g.group_id = gf.group_id
+                   AND g.branch_id = ?
+                   AND (g.is_deleted = '0' OR g.is_deleted = 0)
+                 WHERE gf.firm_id IN (?)
+                   AND (gf.is_deleted = '0' OR gf.is_deleted = 0)
+                 ORDER BY g.name ASC`,
+                [branch_id, firmIds]
+            );
+
+            for (const groupRow of groupRows) {
+                const firmId = groupRow.firm_id;
+                if (!groupsByFirmId[firmId]) groupsByFirmId[firmId] = [];
+                groupsByFirmId[firmId].push({
+                    group_id: groupRow.group_id,
+                    group_name: groupRow.group_name || "",
+                    is_active: String(groupRow.group_status) === "1",
+                });
+            }
+        }
+
         const firm_list = [];
         for (let index = 0; index < rows.length; index++) {
             const element = rows[index];
@@ -374,6 +459,7 @@ async function GET_FIRMS_BY_USERNAME({
                 vat_no,
                 tan_no,
                 status,
+                groups: groupsByFirmId[firm_id] || [],
                 create_by: {
                     name: create_by?.name,
                     email: create_by?.email,
@@ -437,6 +523,130 @@ async function CAPITAL_SNIPPED_DATA(capital_id = "") {
             remark: row[0].remark,
         };
     }
+}
+
+/**
+ * Collect linked records that must block soft-deleting a firm.
+ * Returns [{ key, label, count }, ...] — empty when safe to delete.
+ */
+async function GET_FIRM_DELETE_BLOCKERS({ firm_id, branch_id, conn = null }) {
+    const db = conn || pool;
+    const firmId = String(firm_id || "").trim();
+    const branchId = String(branch_id || "").trim();
+    if (!firmId || !branchId) return [];
+
+    const checks = [
+        {
+            key: "tasks",
+            label: "task(s)",
+            sql: `SELECT COUNT(*) AS c FROM tasks WHERE firm_id = ? AND branch_id = ?`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "sales",
+            label: "sale(s)",
+            sql: `SELECT COUNT(*) AS c FROM sale_entries WHERE firm_id = ? AND branch_id = ?`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "documents",
+            label: "document(s)",
+            sql: `SELECT COUNT(*) AS c FROM documents
+                  WHERE firm_id = ? AND branch_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "compliance_firms",
+            label: "compliance service assignment(s)",
+            sql: `SELECT COUNT(*) AS c FROM compliance_firms
+                  WHERE firm_id = ? AND branch_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "compliance_assignments",
+            label: "active compliance assignment(s)",
+            sql: `SELECT COUNT(*) AS c FROM compliance_assignments
+                  WHERE firm_id = ? AND status = 'active'`,
+            params: [firmId],
+        },
+        {
+            key: "quotations",
+            label: "quotation(s)",
+            sql: `SELECT COUNT(*) AS c FROM quotations WHERE firm_id = ? AND branch_id = ?`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "service_requests",
+            label: "service request(s)",
+            sql: `SELECT COUNT(*) AS c FROM service_requests WHERE firm_id = ? AND branch_id = ?`,
+            params: [firmId, branchId],
+        },
+        {
+            key: "password_group_firms",
+            label: "password / credential link(s)",
+            sql: `SELECT COUNT(*) AS c FROM password_group_firms
+                  WHERE firm_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId],
+        },
+        {
+            key: "file_index",
+            label: "file index record(s)",
+            sql: `SELECT COUNT(*) AS c FROM file_index
+                  WHERE firm_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId],
+        },
+        {
+            key: "group_firms",
+            label: "group membership(s)",
+            sql: `SELECT COUNT(*) AS c FROM group_firms
+                  WHERE firm_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId],
+        },
+        {
+            key: "notes",
+            label: "note(s)",
+            sql: `SELECT COUNT(*) AS c FROM notes
+                  WHERE firm_id = ? AND branch_id = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [firmId, branchId],
+        },
+    ];
+
+    const blockers = [];
+    for (const check of checks) {
+        try {
+            const [rows] = await db.query(check.sql, check.params);
+            const count = Number(rows?.[0]?.c || 0);
+            if (count > 0) {
+                blockers.push({
+                    key: check.key,
+                    label: check.label,
+                    count,
+                });
+            }
+        } catch (error) {
+            // Skip missing optional tables so delete still works in older DBs
+            if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+        }
+    }
+    return blockers;
+}
+
+function FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE(blockers = []) {
+    if (!Array.isArray(blockers) || blockers.length === 0) {
+        return "This firm cannot be deleted because it is linked to other records.";
+    }
+    const parts = blockers.map((b) => `${b.count} ${b.label}`);
+    if (parts.length === 1) {
+        return `This firm cannot be deleted because it is linked to ${parts[0]}.`;
+    }
+    const last = parts.pop();
+    return `This firm cannot be deleted because it is linked to ${parts.join(", ")} and ${last}.`;
 }
 
 async function SINGLE_FIRM_DATA(firm_id = "") {
@@ -524,6 +734,8 @@ export {
     GET_BALANCE,
     FORMAT_DATE,
     GET_FIRMS_BY_USERNAME,
+    GET_FIRM_DELETE_BLOCKERS,
+    FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE,
     TIMESTAMP,
     USER_SNIPPED_DATA,
     SINGLE_FIRM_DATA,

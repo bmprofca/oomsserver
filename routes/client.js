@@ -8,7 +8,7 @@ import {
     filterSchedulesByRecurringRules
 } from "../helpers/recurringTaskHelper.js";
 import { auth, CheckUserProjectMaping, validateBranch } from "../middleware/auth.js";
-import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA, GET_FIRM_DELETE_BLOCKERS, FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE } from "../helpers/function.js";
 import { Decrypt } from "../helpers/Decrypt.js";
 import { BASE_DOMAIN, DOCUMENT_RESERVED_CATEGORIES } from "../helpers/Config.js";
 import {
@@ -1785,41 +1785,59 @@ router.post("/details/edit-profile", auth, validateBranch, async (req, res) => {
 
 router.get("/details/firms/list", auth, validateBranch, async (req, res) => {
     try {
-        const { username } = req.query;
+        const { username, search = "", status = "" } = req.query;
         const branch_id = req.branch_id;
 
+        if (!username || String(username).trim() === "") {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required",
+            });
+        }
+
         const firm_list = await GET_FIRMS_BY_USERNAME({
-            username,
-            branch_id
+            username: String(username).trim(),
+            branch_id,
+            search: String(search || "").trim(),
+            status: String(status || "").trim(),
         });
 
-
-        const [total_row] = await pool.query("SELECT COUNT(*) as total FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0'", [username, branch_id]);
+        const [total_row] = await pool.query(
+            "SELECT COUNT(*) as total FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0'",
+            [username, branch_id]
+        );
         const total = total_row[0]?.total || 0;
 
-        const [active_row] = await pool.query("SELECT COUNT(*) as active FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0' AND status = '1'", [username, branch_id]);
+        const [active_row] = await pool.query(
+            "SELECT COUNT(*) as active FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0' AND status = '1'",
+            [username, branch_id]
+        );
         const active = active_row[0]?.active || 0;
 
-        const [inactive_row] = await pool.query("SELECT COUNT(*) as inactive FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0' AND status = '0'", [username, branch_id]);
+        const [inactive_row] = await pool.query(
+            "SELECT COUNT(*) as inactive FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0' AND status = '0'",
+            [username, branch_id]
+        );
         const inactive = inactive_row[0]?.inactive || 0;
 
         return res.status(200).json({
             success: true,
-            message: 'Client firms retrieved successfully',
+            message: "Client firms retrieved successfully",
             data: {
                 firms: firm_list,
                 meta: {
                     total,
                     active,
-                    inactive
-                }
+                    inactive,
+                    filtered: firm_list.length,
+                },
             },
         });
     } catch (error) {
         return res.status(500).json({
             success: false,
-            message: 'Failed to retrieve client firms',
-            error: error.message
+            message: "Failed to retrieve client firms",
+            error: error.message,
         });
     }
 });
@@ -2502,7 +2520,7 @@ router.post("/details/firms/create", auth, validateBranch, async (req, res) => {
 router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
     try {
-        const { firm_id, username, type, pan, firm, gst, tan, vat, cin, file, address = {}, groups = [] } = req.body;
+        const { firm_id, username, type, pan, firm, gst, tan, vat, cin, file, address = {} } = req.body;
         const branch_id = req.branch_id;
         const modifyBy = req.headers["username"] || "";
 
@@ -2611,36 +2629,7 @@ router.post("/details/firms/edit", auth, validateBranch, async (req, res) => {
             ]
         );
 
-        // Delete existing group mappings for this firm (soft delete)
-        await conn.query(
-            "UPDATE group_firms SET is_deleted = '1', deleted_by = ? WHERE firm_id = ? AND is_deleted = '0'",
-            [modifyBy, firm_id.trim()]
-        );
-
-        // Insert new group mappings (validate each group_id belongs to branch, status = '1', is_deleted = '0')
-        if (groups && Array.isArray(groups) && groups.length > 0) {
-            for (const groupId of groups) {
-                if (groupId && groupId.trim() !== '') {
-                    const [groupCheck] = await conn.query(
-                        "SELECT 1 FROM groups WHERE group_id = ? AND branch_id = ? AND status = '1' AND is_deleted = '0' LIMIT 1",
-                        [groupId.trim(), branch_id]
-                    );
-                    if (!groupCheck || groupCheck.length === 0) {
-                        await conn.rollback();
-                        conn.release();
-                        return res.status(400).json({
-                            success: false,
-                            message: `Group "${groupId.trim()}" not found or does not belong to this branch or is inactive/deleted`
-                        });
-                    }
-                    const unique_id = await UNIQUE_RANDOM_STRING("group_firms", "unique_id", { length: ID_LENGTH, conn });
-                    await conn.query(
-                        "INSERT INTO group_firms (unique_id, firm_id, group_id, create_by, modify_by) VALUES (?, ?, ?, ?, ?)",
-                        [unique_id, firm_id.trim(), groupId.trim(), modifyBy, modifyBy]
-                    );
-                }
-            }
-        }
+        // Group memberships are managed via /group/group-firms/* — do not rewrite on firm edit
 
         await conn.commit();
 
@@ -2711,6 +2700,20 @@ router.delete(
                 return res.status(404).json({
                     success: false,
                     message: "Firm not found",
+                });
+            }
+
+            const blockers = await GET_FIRM_DELETE_BLOCKERS({
+                firm_id,
+                branch_id,
+                conn,
+            });
+            if (blockers.length > 0) {
+                await conn.rollback();
+                return res.status(409).json({
+                    success: false,
+                    message: FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE(blockers),
+                    data: { firm_id, blockers },
                 });
             }
 

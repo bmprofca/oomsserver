@@ -13,6 +13,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`birthday-reminder.md`](./birthday-reminder.md) | `POST /client/birthday-reminder`, availability aliases, WhatsApp `{{…}}` only |
 | [`task-list.md`](./task-list.md) | `/task/list` + report payloads: `complete_date`, compliance fields |
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
+| [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |
 | [`account-profile.md`](./account-profile.md) | Logged-in user profile (`/account`), contact OTP, profile image |
 
 ## Pair with client

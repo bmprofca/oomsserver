@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { GET_FIRMS_BY_USERNAME, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
+import { GET_FIRMS_BY_USERNAME, UNIQUE_RANDOM_STRING, ID_LENGTH, GET_FIRM_DELETE_BLOCKERS, FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE } from "../helpers/function.js";
 import { validateAgentSession } from "../middleware/validateAgentSession.js";
 import {
     deleteProfileImage,
@@ -1160,6 +1160,18 @@ router.delete("/client/firms/:firm_id", validateAgentSession, async (req, res) =
             return res.status(403).json({
                 success: false,
                 message: "Firm can only be deleted while client is under review",
+            });
+        }
+
+        const blockers = await GET_FIRM_DELETE_BLOCKERS({
+            firm_id,
+            branch_id,
+        });
+        if (blockers.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE(blockers),
+                data: { firm_id, blockers },
             });
         }
 

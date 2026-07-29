@@ -26,9 +26,24 @@ groups (branch-scoped)
 | GET | `/group/group-firms/list` | Paginated firms + client balance + `last_payment` |
 | GET | `/group/group-firms/debtor-clients` | Unique clients in group with `balance > 0.02` (bulk reminder) |
 | POST | `/group/group-firms/add-firms` | Add firms to group |
+| POST | `/group/group-firms/set-firm-groups` | Sync one firm's groups (`firm_id` + `group_ids[]`) — add missing, soft-delete removed, revive prior soft maps |
 | DELETE | `/group/group-firms/remove` | Soft-remove; supports `is_all` + `search` |
 
 All require `auth` + `validateBranch` (`branch` header).
+
+### Firm membership on client firms list
+
+`GET_FIRMS_BY_USERNAME` (`SERVER/helpers/function.js`) accepts optional `search` and `status` (`active` / `inactive`) and attaches:
+
+```js
+groups: [{ group_id, group_name, is_active }]
+```
+
+via a batch join on `group_firms` + `groups`. Used by `GET /client/details/firms/list`. The Firms tab omits `status` so the list returns all firms; meta `total` / `active` / `inactive` remain overall counts for the client.
+
+`POST /client/details/firms/edit` updates firm fields only and **does not** rewrite `group_firms`. Membership changes use `/group/group-firms/add-firms`, `/group/group-firms/remove`, or **`/group/group-firms/set-firm-groups`** (full sync for one firm).
+
+Firm create/edit (`/client/details/firms/create|edit`) accept `groups: [group_id]` — edit replaces memberships (soft-delete all for firm, then insert).
 
 ---
 

@@ -743,6 +743,158 @@ router.post('/group-firms/add-firms', auth, validateBranch, async (req, res) => 
     }
 });
 
+/**
+ * Replace a firm's group memberships in one call.
+ * Body: { firm_id, group_ids: string[] }
+ * Adds missing mappings and soft-deletes removed ones.
+ */
+router.post('/group-firms/set-firm-groups', auth, validateBranch, async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+        const firm_id = String(req.body?.firm_id || '').trim();
+        const group_ids = Array.isArray(req.body?.group_ids)
+            ? [...new Set(req.body.group_ids.map((id) => String(id || '').trim()).filter(Boolean))]
+            : [];
+        const modifiedBy = req.headers['username'] || '';
+        const branch_id = req.branch_id;
+
+        if (!firm_id) {
+            return res.status(400).json({
+                success: false,
+                message: 'firm_id is required',
+            });
+        }
+
+        await conn.beginTransaction();
+
+        const [firmRows] = await conn.query(
+            `SELECT firm_id
+             FROM firms
+             WHERE firm_id = ?
+               AND branch_id = ?
+               AND (is_deleted = '0' OR is_deleted = 0)
+             LIMIT 1`,
+            [firm_id, branch_id]
+        );
+
+        if (!firmRows.length) {
+            await conn.rollback();
+            return res.status(404).json({
+                success: false,
+                message: 'Firm not found or does not belong to this branch',
+            });
+        }
+
+        if (group_ids.length > 0) {
+            const [validGroups] = await conn.query(
+                `SELECT group_id
+                 FROM groups
+                 WHERE group_id IN (?)
+                   AND branch_id = ?
+                   AND (is_deleted = '0' OR is_deleted = 0)
+                   AND status = '1'`,
+                [group_ids, branch_id]
+            );
+            if (validGroups.length !== group_ids.length) {
+                await conn.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'One or more groups are invalid, inactive, or not in this branch',
+                });
+            }
+        }
+
+        const [currentRows] = await conn.query(
+            `SELECT group_id
+             FROM group_firms
+             WHERE firm_id = ?
+               AND (is_deleted = '0' OR is_deleted = 0)`,
+            [firm_id]
+        );
+        const currentIds = currentRows.map((r) => r.group_id).filter(Boolean);
+        const currentSet = new Set(currentIds);
+        const nextSet = new Set(group_ids);
+
+        const toAdd = group_ids.filter((id) => !currentSet.has(id));
+        const toRemove = currentIds.filter((id) => !nextSet.has(id));
+
+        if (toRemove.length > 0) {
+            await conn.query(
+                `UPDATE group_firms
+                 SET is_deleted = '1',
+                     deleted_by = ?,
+                     modify_by = ?,
+                     modify_date = NOW()
+                 WHERE firm_id = ?
+                   AND group_id IN (?)
+                   AND (is_deleted = '0' OR is_deleted = 0)`,
+                [modifiedBy, modifiedBy, firm_id, toRemove]
+            );
+        }
+
+        for (const group_id of toAdd) {
+            const [softDeleted] = await conn.query(
+                `SELECT unique_id
+                 FROM group_firms
+                 WHERE firm_id = ?
+                   AND group_id = ?
+                   AND (is_deleted = '1' OR is_deleted = 1)
+                 ORDER BY id DESC
+                 LIMIT 1`,
+                [firm_id, group_id]
+            );
+
+            if (softDeleted.length > 0) {
+                await conn.query(
+                    `UPDATE group_firms
+                     SET is_deleted = '0',
+                         deleted_by = NULL,
+                         modify_by = ?,
+                         modify_date = NOW()
+                     WHERE unique_id = ?`,
+                    [modifiedBy, softDeleted[0].unique_id]
+                );
+            } else {
+                const unique_id = await UNIQUE_RANDOM_STRING('group_firms', 'unique_id', {
+                    conn,
+                    length: ID_LENGTH,
+                });
+                await conn.query(
+                    `INSERT INTO group_firms
+                     (unique_id, group_id, firm_id, create_by, modify_by, is_deleted, create_date, modify_date)
+                     VALUES (?, ?, ?, ?, ?, '0', NOW(), NOW())`,
+                    [unique_id, group_id, firm_id, modifiedBy, modifiedBy]
+                );
+            }
+        }
+
+        await conn.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: 'Firm groups updated successfully',
+            data: {
+                firm_id,
+                group_ids,
+                added: toAdd,
+                removed: toRemove,
+                added_count: toAdd.length,
+                removed_count: toRemove.length,
+            },
+        });
+    } catch (error) {
+        await conn.rollback();
+        console.error('SET FIRM GROUPS ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to update firm groups',
+            error: error.message,
+        });
+    } finally {
+        conn.release();
+    }
+});
+
 router.get("/group-firms/list/", auth, validateBranch, async (req, res) => {
     try {
         /* ===============================
