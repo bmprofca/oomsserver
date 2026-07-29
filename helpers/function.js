@@ -321,28 +321,27 @@ async function GET_FIRMS_BY_USERNAME({
     branch_id = "",
     search = "",
     status = "",
+    page = null,
+    limit = null,
 }) {
-    let sql = `
-        SELECT *
-        FROM firms
-        WHERE username = ?
-          AND branch_id = ?
-          AND is_deleted = '0'
-    `;
+    const whereParts = [
+        `username = ?`,
+        `branch_id = ?`,
+        `is_deleted = '0'`,
+    ];
     const params = [username, branch_id];
 
     const statusKey = String(status || "").trim().toLowerCase();
     if (statusKey === "active" || statusKey === "1") {
-        sql += ` AND status = '1'`;
+        whereParts.push(`status = '1'`);
     } else if (statusKey === "inactive" || statusKey === "0") {
-        sql += ` AND status = '0'`;
+        whereParts.push(`status = '0'`);
     }
 
     const searchTerm = String(search || "").trim();
     if (searchTerm) {
         const pattern = `%${searchTerm}%`;
-        sql += `
-            AND (
+        whereParts.push(`(
                 firm_name LIKE ?
                 OR firm_type LIKE ?
                 OR pan_no LIKE ?
@@ -354,8 +353,7 @@ async function GET_FIRMS_BY_USERNAME({
                 OR address_line_1 LIKE ?
                 OR city LIKE ?
                 OR state LIKE ?
-            )
-        `;
+            )`);
         params.push(
             pattern,
             pattern,
@@ -371,12 +369,33 @@ async function GET_FIRMS_BY_USERNAME({
         );
     }
 
-    sql += ` ORDER BY id DESC`;
+    const whereSql = whereParts.join(" AND ");
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Number(limit);
+    const usePagination = Number.isFinite(limitNum) && limitNum > 0;
+    const safeLimit = usePagination ? Math.min(100, Math.max(1, Math.floor(limitNum))) : null;
+    const offset = usePagination ? (pageNum - 1) * safeLimit : 0;
 
-    const [rows] = await pool.query(sql, params);
+    let filteredTotal = null;
+    if (usePagination) {
+        const [countRows] = await pool.query(
+            `SELECT COUNT(*) AS c FROM firms WHERE ${whereSql}`,
+            params
+        );
+        filteredTotal = Number(countRows?.[0]?.c || 0);
+    }
+
+    let sql = `SELECT * FROM firms WHERE ${whereSql} ORDER BY id DESC`;
+    const queryParams = [...params];
+    if (usePagination) {
+        sql += ` LIMIT ? OFFSET ?`;
+        queryParams.push(safeLimit, offset);
+    }
+
+    const [rows] = await pool.query(sql, queryParams);
 
     if (rows.length == 0) {
-        return [];
+        return usePagination ? { firms: [], filtered_total: filteredTotal || 0 } : [];
     } else {
         const firmIds = rows.map((row) => row.firm_id).filter(Boolean);
         const groupsByFirmId = {};
@@ -474,6 +493,15 @@ async function GET_FIRMS_BY_USERNAME({
                 modify_date,
                 address
             });
+        }
+
+        if (usePagination) {
+            return {
+                firms: firm_list,
+                filtered_total: filteredTotal || 0,
+                page: pageNum,
+                limit: safeLimit,
+            };
         }
         return firm_list;
     }

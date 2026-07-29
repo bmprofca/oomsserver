@@ -33,13 +33,9 @@ All require `auth` + `validateBranch` (`branch` header).
 
 ### Firm membership on client firms list
 
-`GET_FIRMS_BY_USERNAME` (`SERVER/helpers/function.js`) accepts optional `search` and `status` (`active` / `inactive`) and attaches:
+`GET_FIRMS_BY_USERNAME` (`SERVER/helpers/function.js`) accepts optional `search`, `status` (`active` / `inactive`), and when `limit` is provided also `page` / `limit` (returns `{ firms, filtered_total, page, limit }`). Without `limit` it still returns a plain array for legacy callers.
 
-```js
-groups: [{ group_id, group_name, is_active }]
-```
-
-via a batch join on `group_firms` + `groups`. Used by `GET /client/details/firms/list`. The Firms tab omits `status` so the list returns all firms; meta `total` / `active` / `inactive` remain overall counts for the client.
+Used by `GET /client/details/firms/list` with pagination meta (`page`, `limit`, `filtered`, `total_pages`). Overall `total` / `active` / `inactive` remain unfiltered client-wide counts.
 
 `POST /client/details/firms/edit` updates firm fields only and **does not** rewrite `group_firms`. Membership changes use `/group/group-firms/add-firms`, `/group/group-firms/remove`, or **`/group/group-firms/set-firm-groups`** (full sync for one firm).
 

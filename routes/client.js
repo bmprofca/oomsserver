@@ -1787,6 +1787,8 @@ router.get("/details/firms/list", auth, validateBranch, async (req, res) => {
     try {
         const { username, search = "", status = "" } = req.query;
         const branch_id = req.branch_id;
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
 
         if (!username || String(username).trim() === "") {
             return res.status(400).json({
@@ -1795,12 +1797,20 @@ router.get("/details/firms/list", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const firm_list = await GET_FIRMS_BY_USERNAME({
+        const result = await GET_FIRMS_BY_USERNAME({
             username: String(username).trim(),
             branch_id,
             search: String(search || "").trim(),
             status: String(status || "").trim(),
+            page,
+            limit,
         });
+
+        const firm_list = Array.isArray(result) ? result : (result?.firms || []);
+        const filtered = Array.isArray(result)
+            ? firm_list.length
+            : Number(result?.filtered_total || 0);
+        const totalPages = Math.max(1, Math.ceil(filtered / limit) || 1);
 
         const [total_row] = await pool.query(
             "SELECT COUNT(*) as total FROM firms WHERE username = ? AND branch_id = ? AND is_deleted = '0'",
@@ -1829,7 +1839,11 @@ router.get("/details/firms/list", auth, validateBranch, async (req, res) => {
                     total,
                     active,
                     inactive,
-                    filtered: firm_list.length,
+                    filtered,
+                    page,
+                    limit,
+                    total_pages: totalPages,
+                    is_last_page: page >= totalPages,
                 },
             },
         });
