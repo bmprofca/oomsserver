@@ -69,7 +69,7 @@ Fulfillment also via `razorpayWebhookService` → `activatePlan`.
 `requirePlan(allowedPlans)` / `requireFeature(featureKey)`:
 
 - Deny if no active plans (`expires_at > now`).
-- Features: `core` (any paid), `salary-management` / `attendance-management` (Plus|Pro), `live-chat` (Pro).
+- Features: `core` (any paid), `salary-management` (Plus|Pro), `live-chat` (Pro).
 
 ---
 

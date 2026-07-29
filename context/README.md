@@ -16,6 +16,8 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |
 | [`account-profile.md`](./account-profile.md) | Logged-in user profile (`/account`), contact OTP, profile image |
 | [`wp_system.md`](./wp_system.md) | OOMS System WhatsApp channel: JSON templates, mappings, OneChatting send + header image URLs |
+| [`attendance.md`](./attendance.md) | Phase-1 punch/break APIs, `username` on `break`, IST timestamps (not MySQL `NOW()`), `breaks[]` |
+| [`attendance-removed.md`](./attendance-removed.md) | Legacy notes from attendance removal / pre-rebuild (salary kept on `/salary`) |
 
 ## Pair with client
 
@@ -31,3 +33,4 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | `account-profile.md` | `CLIENT/context/account-profile.md` |
 | — | `CLIENT/context/layout.md` (shell width; client-only) |
 | — | `CLIENT/context/settings-branch.md` (Branch Settings UI + GST Config tab) |
+| `attendance.md` | `CLIENT/context/attendance.md` |

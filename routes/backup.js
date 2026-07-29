@@ -394,15 +394,6 @@ async function generateBackupPDF(allDataSets, branch_id) {
                     { header: "Mobile", key: "mobile", width: 100 },
                     { header: "Status", key: "status", width: 70 }
                 ];
-            } else if (sectionName === "Attendance") {
-                columnsToDraw = [
-                    { header: "Date", key: "attendance_date", width: 90 },
-                    { header: "Employee", key: "employee_name", width: 140 },
-                    { header: "Check In", key: "check_in_time", width: 90 },
-                    { header: "Check Out", key: "check_out_time", width: 90 },
-                    { header: "Status", key: "status", width: 80 },
-                    { header: "Salary", key: "salary_amount", width: 90 }
-                ];
             } else {
                 const firstRow = data[0];
                 columnsToDraw = Object.keys(firstRow).slice(0, 6).map(key => ({
@@ -498,7 +489,6 @@ router.get("/summary", auth, validateBranch, async (req, res) => {
         const hasTasksDeleted = await tableHasColumn("tasks", "is_deleted");
         const hasTxDeleted = await tableHasColumn("transactions", "is_deleted");
         const hasInvDeleted = await tableHasColumn("invoice", "is_deleted");
-        const hasAttDeleted = await tableHasColumn("attendance", "is_deleted");
 
         // Tasks Count
         let tasksQuery = "SELECT COUNT(*) AS total FROM tasks WHERE branch_id = ?";
@@ -536,7 +526,7 @@ router.get("/summary", auth, validateBranch, async (req, res) => {
         if (hasInvDeleted) billingQuery += " AND is_deleted = '0'";
         const [[billingCount]] = await pool.query(billingQuery, [branch_id]);
 
-        // Staff & Attendance Count
+        // Staff Count
         const [[staffCount]] = await pool.query(
             `SELECT COUNT(*) AS total 
              FROM branch_mapping bm 
@@ -544,10 +534,7 @@ router.get("/summary", auth, validateBranch, async (req, res) => {
              WHERE bm.branch_id = ? AND bm.is_deleted = '0'`,
             [branch_id]
         );
-        let attendanceQuery = "SELECT COUNT(*) AS total FROM attendance WHERE branch_id = ?";
-        if (hasAttDeleted) attendanceQuery += " AND is_deleted = '0'";
-        const [[attendanceCount]] = await pool.query(attendanceQuery, [branch_id]);
-        const staffTotal = (staffCount?.total || 0) + (attendanceCount?.total || 0);
+        const staffTotal = staffCount?.total || 0;
 
         return res.json({
             success: true,
@@ -558,7 +545,7 @@ router.get("/summary", auth, validateBranch, async (req, res) => {
                 finance: { title: "Finance Transactions", count: financeCount?.total || 0, description: "Financial ledger transactions" },
                 recurring_tasks: { title: "Recurring Tasks & Schedules", count: recurringTotal, description: "Compliance assignments and recurring calendar schedules" },
                 billing: { title: "Billing Invoices", count: billingCount?.total || 0, description: "Generated billing invoices" },
-                staff_management: { title: "Staff & Attendance", count: staffTotal, description: "Active staff mapping list and daily attendance logs" }
+                staff_management: { title: "Staff", count: staffTotal, description: "Active staff mapping list" }
             }
         });
     } catch (error) {
@@ -607,7 +594,6 @@ router.post("/run", auth, validateBranch, async (req, res) => {
         const hasTasksDeleted = await tableHasColumn("tasks", "is_deleted");
         const hasTxDeleted = await tableHasColumn("transactions", "is_deleted");
         const hasInvDeleted = await tableHasColumn("invoice", "is_deleted");
-        const hasAttDeleted = await tableHasColumn("attendance", "is_deleted");
 
         const allDataSets = {};
 
@@ -731,17 +717,7 @@ router.post("/run", auth, validateBranch, async (req, res) => {
                  WHERE bm.branch_id = ? AND bm.is_deleted = '0'`,
                 [branch_id]
             );
-            let attendanceQuery = `
-                SELECT p.name AS employee_name, DATE(a.punch_in_time) AS attendance_date, 
-                       TIME(a.punch_in_time) AS check_in_time, TIME(a.punch_out_time) AS check_out_time, 
-                       a.attendance_status AS status, a.final_calculated_amount AS salary_amount
-                FROM attendance a 
-                LEFT JOIN profile p ON a.username = p.username 
-                WHERE a.branch_id = ?`;
-            if (hasAttDeleted) attendanceQuery += " AND a.is_deleted = '0'";
-            const [attendance] = await pool.query(attendanceQuery, [branch_id]);
             allDataSets["Staff"] = staff;
-            allDataSets["Attendance"] = attendance;
         }
 
         // Generate file based on export_type

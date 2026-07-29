@@ -1670,16 +1670,8 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
         );
         const totalStaff = totalStaffResult[0]?.total || 0;
 
-        // 6. Present Today (staff who punched in today)
-        const [presentTodayResult] = await pool.query(
-            `SELECT COUNT(DISTINCT map_id) as total 
-     FROM attendance 
-     WHERE branch_id = ? 
-     AND is_deleted = '0'
-     AND DATE(punch_in_time) = CURDATE()`,  // Remove status filter
-            [branch_id]
-        );
-        const presentToday = presentTodayResult[0]?.total || 0;
+        // 6. Present Today - attendance system removed, will be rebuilt later
+        const presentToday = 0;
         // 7. Task Created Today
         const [tasksCreatedResult] = await pool.query(
             `SELECT COUNT(*) as total 
@@ -2183,11 +2175,7 @@ router.get("/dashboard-summary-detail/:metric", auth, validateBranch, async (req
                         (
                             SELECT COUNT(*) FROM task_assignments ta
                             WHERE ta.assign_id = bm.id AND ta.branch_id = ?
-                        ) as assigned_tasks,
-                        (
-                            SELECT COUNT(DISTINCT DATE(punch_in_time)) FROM attendance a
-                            WHERE a.map_id = bm.id AND a.branch_id = ? AND a.is_deleted = '0'
-                        ) as total_present_days
+                        ) as assigned_tasks
                     FROM branch_mapping bm
                     WHERE bm.branch_id = ? 
                     AND bm.is_deleted = '0'
@@ -2204,7 +2192,7 @@ router.get("/dashboard-summary-detail/:metric", auth, validateBranch, async (req
                     ${search ? `AND (bm.name LIKE ? OR bm.email LIKE ? OR bm.mobile LIKE ?)` : ''}
                 `;
 
-                params = [branch_id, branch_id, branch_id];
+                params = [branch_id, branch_id];
                 if (search) {
                     const searchPattern = `%${search}%`;
                     params.push(searchPattern, searchPattern, searchPattern);
@@ -2219,6 +2207,8 @@ router.get("/dashboard-summary-detail/:metric", auth, validateBranch, async (req
                 break;
 
             case 'present_today':
+                // Attendance system removed (to be rebuilt later) - return empty result set,
+                // no query against the attendance table.
                 query = `
                     SELECT 
                         bm.id as staff_id,
@@ -2226,45 +2216,19 @@ router.get("/dashboard-summary-detail/:metric", auth, validateBranch, async (req
                         bm.email,
                         bm.mobile,
                         bm.role,
-                        a.punch_in_time,
-                        a.punch_out_time,
-                        a.attendance_status,
-                        TIMESTAMPDIFF(MINUTE, a.punch_in_time, COALESCE(a.punch_out_time, NOW())) as working_minutes
-                    FROM attendance a
-                    INNER JOIN branch_mapping bm ON a.map_id = bm.id
-                    WHERE a.branch_id = ? 
-                    AND a.is_deleted = '0'
-                    AND DATE(a.punch_in_time) = CURDATE()
-                    AND a.attendance_status IN ('present', 'late', 'half_day')
-                    ${search ? `AND (bm.name LIKE ? OR bm.email LIKE ? OR bm.mobile LIKE ?)` : ''}
-                    GROUP BY a.id
-                    ORDER BY a.punch_in_time ASC
+                        NULL as punch_in_time,
+                        NULL as punch_out_time,
+                        NULL as attendance_status,
+                        NULL as working_minutes
+                    FROM branch_mapping bm
+                    WHERE 1 = 0
                     LIMIT ? OFFSET ?
                 `;
 
-                countQuery = `
-                    SELECT COUNT(DISTINCT a.map_id) as total
-                    FROM attendance a
-                    INNER JOIN branch_mapping bm ON a.map_id = bm.id
-                    WHERE a.branch_id = ? 
-                    AND a.is_deleted = '0'
-                    AND DATE(a.punch_in_time) = CURDATE()
-                    AND a.attendance_status IN ('present', 'late', 'half_day')
-                    ${search ? `AND (bm.name LIKE ? OR bm.email LIKE ? OR bm.mobile LIKE ?)` : ''}
-                `;
+                countQuery = `SELECT 0 as total`;
 
-                params = [branch_id];
-                if (search) {
-                    const searchPattern = `%${search}%`;
-                    params.push(searchPattern, searchPattern, searchPattern);
-                }
-                params.push(parseInt(limit), offset);
-
-                countParams = [branch_id];
-                if (search) {
-                    const searchPattern = `%${search}%`;
-                    countParams.push(searchPattern, searchPattern, searchPattern);
-                }
+                params = [parseInt(limit), offset];
+                countParams = [];
                 break;
 
             case 'task_created_today':

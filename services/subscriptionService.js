@@ -27,7 +27,6 @@ const emptyStatus = (branchId = '') => ({
     features: {
         core: false,
         'salary-management': false,
-        'attendance-management': false,
         'live-chat': false,
     },
 });
@@ -69,7 +68,6 @@ export function buildFeatureAccess(activePlanNames = []) {
     return {
         core: hasCore,
         'salary-management': hasPlusOrPro,
-        'attendance-management': hasPlusOrPro,
         'live-chat': hasLiveChat,
     };
 }
@@ -448,7 +446,6 @@ export function hasFeatureAccess(status, feature) {
 
     if (feature === 'core') return features.core;
     if (feature === 'salary-management') return features['salary-management'];
-    if (feature === 'attendance-management') return features['attendance-management'];
     if (feature === 'live-chat') return features['live-chat'];
     return features.core;
 }

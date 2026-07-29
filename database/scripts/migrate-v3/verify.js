@@ -29,7 +29,6 @@ const CHECKS = [
     { label: "sale_entries", sql: `SELECT COUNT(*) AS cnt FROM sale_entries WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
     { label: "purchase_entries", sql: `SELECT COUNT(*) AS cnt FROM purchase_entries WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
     { label: "purchase_items", sql: `SELECT COUNT(*) AS cnt FROM purchase_items WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
-    { label: "attendance", sql: `SELECT COUNT(*) AS cnt FROM attendance WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
     { label: "documents", sql: `SELECT COUNT(*) AS cnt FROM documents WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
     { label: "branch_mapping", sql: `SELECT COUNT(*) AS cnt FROM branch_mapping WHERE branch_id = ?`, params: [NEW_BRANCH_ID] },
 ];
