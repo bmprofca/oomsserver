@@ -77,7 +77,7 @@ flowchart TB
 | `services/wpSystemWhatsappSendService.js` | Resolve `template_id`, build `component`, send via OneChatting                                            |
 | `helpers/whatsappNotification.js`         | Channel router; builds variables; calls send on task/payment events                                       |
 | `routes/whatsapp.js`                      | HTTP endpoints for channel + OOMS system template mapping                                                 |
-| `media/wp_system/`                        | Header images referenced in templates (`{BASE_DOMAIN}/media/wp_system/...`)                               |
+| `media/wp_system/`                        | Optional local assets (not required when header URLs are absolute OneChatting links)                      |
 | `server.js`                               | Serves static files at `/media/wp_system`                                                                 |
 | `.env`                                    | `ONECHATTING_SYSTEM_DEVELOPER_TOKEN`, `ONECHATTING_PROJECT_DEVELOPER_TOKEN`                               |
 
@@ -129,20 +129,18 @@ Each entry:
 
 **Body variables** are defined in `template.components[BODY].example.body_text[0]` as `{{name}}`, `{{branch_name}}`, etc. Order maps to WhatsApp `{{1}}`, `{{2}}`, …
 
-**Header images** use `{BASE_DOMAIN}/media/wp_system/<file>` — replaced at send time with `BASE_DOMAIN` from env/Config.
+**Header images** use the full absolute URL from each template’s `header_handle` (typically the OneChatting proxy URL from the approved template). That same URL is sent as the header `image.link` for every notification type — no `{BASE_DOMAIN}` rewriting.
 
 ### Currently defined templates
 
-| type               | template_name      | Image                    |
-| ------------------ | ------------------ | ------------------------ |
-| `payment reminder` | `payment_reminder` | `payment-reminder-1.jpg` |
-| `task create`      | `task_create`      | `task-create-1.png`      |
-
-### Not yet in JSON (but referenced elsewhere)
-
-- `task complete` — hook exists in `whatsappNotification.js` but no JSON entry yet
-- `payment receive` — used by transactions flow via generic channel router
-- Other types in `utils/WhatsAppTemplates.js` (`birthday wish`, `payment`, etc.)
+| type               | template_name      | Image                     |
+| ------------------ | ------------------ | ------------------------- |
+| `payment reminder` | `payment_reminder` | `payment-reminder-1.jpg`  |
+| `task create`      | `task_create`      | `task-create-1.png`       |
+| `payment receive`  | `payment_receive`  | `payment-receive-1.jpg`   |
+| `payment`          | `payment`          | `payment-1.jpg`           |
+| `birthday wish`    | `birthday_wish`    | `birthday-wish-1.jpg`     |
+| `task complete`    | `task_complete`    | `task-complete-1.png`     |
 
 To add a new type: add entry to `WP_SYSTEM_TEMPLATES.json`, ensure matching template is **APPROVED** in OneChatting portal under the same `template_name`, then branches map it via API.
 
@@ -154,7 +152,6 @@ To add a new type: add entry to `WP_SYSTEM_TEMPLATES.json`, ensure matching temp
 ONECHATTING_SYSTEM_DEVELOPER_TOKEN=<user developer token>   # SEND messages
 ONECHATTING_PROJECT_DEVELOPER_TOKEN=<project developer token> # LIST templates
 ONECHATTING_BASE_URL=https://server.onechatting.com         # optional override
-BASE_DOMAIN=https://server.ooms.in                             # image URLs in templates
 ```
 
 ### Critical token split (verified working)
@@ -228,13 +225,16 @@ Returns `{ ok, reason?, template_id?, response? }` — failures are silent to en
 
 Implemented in `helpers/whatsappNotification.js`. Fired asynchronously via `notify*` helpers (fire-and-forget).
 
-| Event           | Helper                         | systemType / type string | Called from                                                             |
-| --------------- | ------------------------------ | ------------------------ | ----------------------------------------------------------------------- |
-| Task create     | `notifyTaskCreatedWhatsapp`    | `task create`            | `routes/task.js` (multi + legacy create), `helpers/taskCreateHelper.js` |
-| Task complete   | `notifyTaskCompletedWhatsapp`  | `task complete`          | `routes/task.js`                                                        |
-| Payment receive | `notifyPaymentReceiveWhatsapp` | `payment receive`        | `routes/transactions.js`                                                |
+| Event             | Helper                         | systemType / type string | Called from                                                             |
+| ----------------- | ------------------------------ | ------------------------ | ----------------------------------------------------------------------- |
+| Task create       | `notifyTaskCreatedWhatsapp`    | `task create`            | `routes/task.js` (multi + legacy create), `helpers/taskCreateHelper.js` |
+| Task complete     | `notifyTaskCompletedWhatsapp`  | `task complete`          | `routes/task.js`, `routes/compliance.js`                                |
+| Payment receive   | `notifyPaymentReceiveWhatsapp` | `payment receive`        | `routes/transactions.js`                                                |
+| Payment           | `notifyPaymentWhatsapp`        | `payment`                | `routes/transactions.js`                                                |
+| Payment reminder  | `sendPaymentReminderWhatsapp`  | `payment reminder`       | `routes/client.js`                                                      |
+| Birthday wish     | `sendBirthdayWishWhatsapp`     | `birthday wish`          | `routes/client.js`                                                      |
 
-**Task create** uses an explicit `ooms system` branch in `sendTaskCreatedWhatsapp` before falling back to other channels.
+**Task create** uses an explicit `ooms system` branch in `sendTaskCreatedWhatsapp` before falling back to other channels. Other events use `sendWhatsappByChannel`, which routes to OOMS system when the branch channel is `ooms system`.
 
 **Requirements for send:**
 
@@ -251,6 +251,18 @@ Implemented in `helpers/whatsappNotification.js`. Fired asynchronously via `noti
 ### Task complete variables (`buildTaskCompleteVariables`)
 
 `{{name}}`, `{{service_name}}`, `{{fees}}`, `{{completed_by}}`, `{{completed_date}}`, `{{branch_name}}`, etc.
+
+### Payment receive variables (`buildPaymentReceiveVariables`)
+
+`{{name}}`, `{{received_amount}}`, `{{amount}}`, `{{received_by}}`, `{{transaction_date}}`, `{{invoice_no}}`, `{{opening_balance}}`, `{{closing_balance}}`, plus `{{branch_name}}` at send time.
+
+### Payment variables (`buildPaymentVariables`)
+
+`{{name}}`, `{{amount}}`, `{{firm_name}}`, `{{paid_by}}`, `{{transaction_date}}`, `{{invoice_no}}`, plus `{{branch_name}}` at send time.
+
+### Birthday wish variables
+
+`{{name}}`, `{{username}}`, `{{mobile}}`, `{{email}}`, `{{current_date}}`, plus `{{branch_name}}` at send time.
 
 ---
 
@@ -289,16 +301,15 @@ Preview from API response:
 - `wp_system_template_mapping` CRUD service
 - Send service with dual-token split (project list + system send)
 - Task create auto-send on `ooms system` channel
+- Task complete / payment receive / payment / payment reminder / birthday wish JSON + channel router
 - Generic `sendWhatsappByChannel` OOMS system path for other events
 - Static media served at `/media/wp_system`
 - Debug logging removed after verification
 
 ### Pending / future work
 
-- Add `task complete` entry to `WP_SYSTEM_TEMPLATES.json` + test mapping
-- Wire `payment reminder` to a scheduled/manual trigger if not already
-- Add more template variants per type in JSON
-- Payment receive / other types on OOMS system channel (router supports it; need JSON + mappings)
+- Add more template variants (designs) per type in JSON
+- Replace placeholder header images in `media/wp_system/` with production artwork
 - Optional: admin API to hot-reload templates without deploy
 
 ---
@@ -307,7 +318,7 @@ Preview from API response:
 
 1. Create Meta-approved template in OneChatting portal; note exact `template_name`
 2. Add entry to `utils/WP_SYSTEM_TEMPLATES.json` (match `template_name`, define `type`, components, variables)
-3. Add header image to `media/wp_system/` if needed
+3. Add absolute `header_handle` URL from the OneChatting approved template (no `{BASE_DOMAIN}`)
 4. Expose in frontend via existing list/set endpoints (types auto-discovered from JSON)
 5. Call `sendOomsSystemTemplateMessage({ branch_id, systemType: "<type>", recipientNumber, variables })` from the relevant event hook, or rely on `sendWhatsappByChannel` if `systemTemplateName` matches the type string
 6. Restart PM2 if only code changed; JSON is read at runtime (cached in memory until process restart)
@@ -332,6 +343,9 @@ Preview from API response:
 TASK_CREATE_TEMPLATE_NAME = "task create";
 TASK_COMPLETE_TEMPLATE_NAME = "task complete";
 PAYMENT_RECEIVE_TEMPLATE_NAME = "payment receive";
+PAYMENT_TEMPLATE_NAME = "payment";
+PAYMENT_REMINDER_TEMPLATE_NAME = "payment reminder";
+BIRTHDAY_WISH_TEMPLATE_NAME = "birthday wish";
 WHATSAPP_CHANNEL_OOMS_SYSTEM = "ooms system";
 ```
 

@@ -12,7 +12,7 @@
                     "format": "IMAGE",
                     "example": {
                         "header_handle": [
-                            "{BASE_DOMAIN}/media/wp_system/payment-reminder-1.jpg"
+                            "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/k1i7hx7lo5r2uh935h25e58xnl3k3co32j87t61m53p/5d28a3c5-b567-4781-99c6-e5af071cbb94.jpeg"
                         ]
                     }
                 },
@@ -38,7 +38,7 @@
                 "format": "IMAGE",
                 "example": {
                     "header_handle": [
-                        "{BASE_DOMAIN}/media/wp_system/payment-reminder-1.jpg"
+                        "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/k1i7hx7lo5r2uh935h25e58xnl3k3co32j87t61m53p/5d28a3c5-b567-4781-99c6-e5af071cbb94.jpeg"
                     ]
                 }
             },
@@ -48,10 +48,10 @@
                 "example": {
                     "body_text": [
                         [
-                            "John Doe",
-                            "10000",
-                            "OneSaaS",
-                            "OneSaaS"
+                            "Mubarak",
+                            "29000",
+                            "bmtax",
+                            "Bmtax"
                         ]
                     ]
                 }
@@ -71,7 +71,7 @@
                     "format": "IMAGE",
                     "example": {
                         "header_handle": [
-                            "{BASE_DOMAIN}/media/wp_system/task-create-1.png"
+                            "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/x0801m57fzo84369ywmgj5max3d0d7cvf8niq5in1jk/ju18n2n2usn8h00317sh2g35om51651dx81h2kxmv17.jpg"
                         ]
                     }
                 },
@@ -99,7 +99,7 @@
                 "format": "IMAGE",
                 "example": {
                     "header_handle": [
-                        "{BASE_DOMAIN}/media/wp_system/task-create-1.png"
+                        "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/x0801m57fzo84369ywmgj5max3d0d7cvf8niq5in1jk/ju18n2n2usn8h00317sh2g35om51651dx81h2kxmv17.jpg"
                     ]
                 }
             },
@@ -109,12 +109,71 @@
                 "example": {
                     "body_text": [
                         [
-                            "John Doe",
+                            "Mubarak Ali",
                             "GST Registration",
                             "3000",
-                            "John Doe",
+                            "Mubarak Ali",
                             "21-12-2026",
-                            "OneSaaS"
+                            "Bmtax"
+                        ]
+                    ]
+                }
+            }
+        ]
+    },
+    {
+        "type": "task complete",
+        "template_name": "task_complete",
+        "template": {
+            "name": "task_complete",
+            "category": "UTILITY",
+            "language": "en",
+            "components": [
+                {
+                    "type": "HEADER",
+                    "format": "IMAGE",
+                    "example": {
+                        "header_handle": [
+                            "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/kwyk84xyr6ipi82s6xz08t921759jcn1a8q8yb83dss/ttjr115yj83jj9k74z50up7b331b1ev1v136uwc2bar.jpg"
+                        ]
+                    }
+                },
+                {
+                    "type": "BODY",
+                    "text": "Dear *{{1}}*,\n\nYour task *{{2}}* was complited sucessfully, complited  by *{{3}}*. \n\nThaks and Regards\nTeam *{{4}}*\n*Your compliance partner*",
+                    "example": {
+                        "body_text": [
+                            [
+                                "{{name}}",
+                                "{{service_name}}",
+                                "{{completed_by}}",
+                                "{{branch_name}}"
+                            ]
+                        ]
+                    }
+                }
+            ]
+        },
+        "example": [
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {
+                    "header_handle": [
+                        "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/kwyk84xyr6ipi82s6xz08t921759jcn1a8q8yb83dss/ttjr115yj83jj9k74z50up7b331b1ev1v136uwc2bar.jpg"
+                    ]
+                }
+            },
+            {
+                "type": "BODY",
+                "text": "Dear *{{1}}*,\n\nYour task *{{2}}* was complited sucessfully, complited  by *{{3}}*. \n\nThaks and Regards\nTeam *{{4}}*\n*Your compliance partner*",
+                "example": {
+                    "body_text": [
+                        [
+                            "Mubarak",
+                            "GST ",
+                            "Mubarak",
+                            "BmtaxMubarak"
                         ]
                     ]
                 }

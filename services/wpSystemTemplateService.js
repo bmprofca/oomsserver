@@ -3,7 +3,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import pool from "../db.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,32 +26,52 @@ function newMapId() {
     return `WSTM_${crypto.randomBytes(8).toString("hex")}`;
 }
 
+function formatCategoryLabel(category) {
+    const raw = category != null ? String(category).trim() : "";
+    if (!raw) return "";
+    return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+function buildContentPreview(entry, maxLen = 140) {
+    const example = Array.isArray(entry?.example) ? entry.example : [];
+    const body = example.find((item) => item?.type === "BODY");
+    let text = body?.text != null ? String(body.text) : "";
+    const samples = body?.example?.body_text?.[0];
+    if (Array.isArray(samples)) {
+        text = samples.reduce((result, sample, index) => {
+            const placeholder = new RegExp(`\\{\\{${index + 1}\\}\\}`, "g");
+            return result.replace(placeholder, sample != null ? String(sample) : "");
+        }, text);
+    }
+
+    text = text
+        .replace(/\*+/g, "")
+        .replace(/\r\n|\r|\n/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!text) return "";
+    if (text.length <= maxLen) return text;
+    return `${text.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`;
+}
+
 function formatTemplatePreview(entry) {
     const example = Array.isArray(entry.example) ? entry.example : [];
-    const previewExample = example.map((item) => {
-        if (item?.type === "HEADER" && item.format === "IMAGE") {
-            const handle = item.example?.header_handle?.[0] || "";
-            return {
-                ...item,
-                example: {
-                    header_handle: [handle.replace(/\{BASE_DOMAIN\}/g, BASE_DOMAIN)],
-                },
-            };
-        }
-        return item;
-    });
-
     const bodyComponent = entry.template?.components?.find((item) => item.type === "BODY");
     const available_variables = (bodyComponent?.example?.body_text?.[0] || []).map((key) => ({
         key: String(key),
         label: String(key).replace(/[{}]/g, ""),
     }));
+    const categoryRaw = entry.template?.category || entry.category || "";
 
     return {
         type: entry.type,
         template_name: entry.template_name,
+        category: formatCategoryLabel(categoryRaw),
+        category_raw: categoryRaw ? String(categoryRaw).trim().toUpperCase() : "",
+        content_preview: buildContentPreview(entry),
         template: entry.template,
-        example: previewExample,
+        example,
         available_variables,
     };
 }
@@ -150,6 +169,18 @@ async function listBranchMappings(branch_id) {
             (item) => normalizeType(item.type) === normalizeType(type)
         );
 
+        const selectedEntry = isSet
+            ? findSystemTemplate(type, mapping.template_name) || {
+                type,
+                template_name: mapping.template_name,
+                template: { components: [] },
+                example: [],
+            }
+            : null;
+        const selected_template = selectedEntry
+            ? formatTemplatePreview(selectedEntry)
+            : null;
+
         return {
             type,
             available_templates: templates.map((item) => item.template_name),
@@ -157,16 +188,9 @@ async function listBranchMappings(branch_id) {
             map_id: mapping?.map_id ?? null,
             template_name: mapping?.template_name ?? null,
             status: mapping?.status ?? 0,
-            selected_template: isSet
-                ? formatTemplatePreview(
-                    findSystemTemplate(type, mapping.template_name) || {
-                        type,
-                        template_name: mapping.template_name,
-                        template: { components: [] },
-                        example: [],
-                    }
-                )
-                : null,
+            category: selected_template?.category || null,
+            content_preview: selected_template?.content_preview || null,
+            selected_template,
         };
     });
 }
@@ -211,12 +235,15 @@ async function setTemplateMapping({ branch_id, username, type, template_name }) 
             [storedType, normalizedTemplateName, username || null, existing[0].id]
         );
 
+        const preview = formatTemplatePreview(templateEntry);
         return {
             map_id: existing[0].map_id,
             type: storedType,
             template_name: normalizedTemplateName,
             status: 1,
-            template: formatTemplatePreview(templateEntry),
+            category: preview.category,
+            content_preview: preview.content_preview,
+            template: preview,
         };
     }
 
@@ -235,12 +262,15 @@ async function setTemplateMapping({ branch_id, username, type, template_name }) 
         ]
     );
 
+    const preview = formatTemplatePreview(templateEntry);
     return {
         map_id,
         type: storedType,
         template_name: normalizedTemplateName,
         status: 1,
-        template: formatTemplatePreview(templateEntry),
+        category: preview.category,
+        content_preview: preview.content_preview,
+        template: preview,
     };
 }
 

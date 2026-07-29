@@ -9,7 +9,10 @@ import {
     notifyPaymentEmail,
     notifyReceivedEmail
 } from "../helpers/transactionStaticEmail.js";
-import { notifyPaymentReceiveWhatsapp } from "../helpers/whatsappNotification.js";
+import {
+    notifyPaymentReceiveWhatsapp,
+    notifyPaymentWhatsapp,
+} from "../helpers/whatsappNotification.js";
 
 const router = express.Router();
 
@@ -1129,6 +1132,7 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
         const p2_type = String(party2_type).trim();
         const remarkVal = remark != null ? String(remark).trim() : null;
         const shouldNotifyEmail = notification?.email !== false;
+        const shouldNotifyWhatsapp = notification?.whatsapp !== false;
         const shouldNotifySms = notification?.sms === true;
 
         let transaction_id;
@@ -1184,6 +1188,17 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
                     transaction_date: txnDate,
                     remark: remarkVal,
                     invoice_no: invoice_no
+                });
+            }
+            if (shouldNotifyWhatsapp) {
+                notifyPaymentWhatsapp({
+                    branch_id,
+                    amount: amountNum,
+                    party2_id: p2_id,
+                    party2_type: p2_type,
+                    transaction_date: txnDate,
+                    invoice_no,
+                    paid_by: username,
                 });
             }
             if (shouldNotifySms) {

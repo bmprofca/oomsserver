@@ -15,6 +15,7 @@ const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/templat
 const TASK_CREATE_TEMPLATE_NAME = "task create";
 const TASK_COMPLETE_TEMPLATE_NAME = "task complete";
 const PAYMENT_RECEIVE_TEMPLATE_NAME = "payment receive";
+const PAYMENT_TEMPLATE_NAME = "payment";
 const PAYMENT_REMINDER_TEMPLATE_NAME = "payment reminder";
 const BIRTHDAY_WISH_TEMPLATE_NAME = "birthday wish";
 const WHATSAPP_CHANNEL_ONECHATTING = "onechatting";
@@ -363,11 +364,58 @@ async function buildPaymentReceiveVariables({
         "{{mobile}}": clientData?.mobile != null ? String(clientData.mobile) : "",
         "{{email}}": clientData?.email != null ? String(clientData.email) : "",
         "{{received_amount}}": receivedAmount,
+        "{{amount}}": receivedAmount,
         "{{received_by}}": receivedByDisplay,
         "{{transaction_date}}": formatDateOnly(transaction_date),
         "{{invoice_no}}": invoice_no != null ? String(invoice_no) : "",
         "{{opening_balance}}": opening_balance,
         "{{closing_balance}}": closing_balance,
+    };
+}
+
+async function buildPaymentVariables({
+    branch_id,
+    party2_id,
+    party2_type,
+    amount,
+    transaction_date,
+    invoice_no,
+    paid_by_username,
+}) {
+    const receiverData = await USER_SNIPPED_DATA(party2_id);
+    const payer = await USER_SNIPPED_DATA(paid_by_username || "");
+    const paidByDisplay =
+        (payer?.name && String(payer.name).trim()) ||
+        payer?.username ||
+        String(paid_by_username || "").trim() ||
+        "";
+
+    const paymentAmount = Number(amount).toFixed(2);
+
+    let firm_name = "";
+    try {
+        const [branchRows] = await pool.query(
+            `SELECT name FROM branch_list WHERE branch_id = ? AND is_deleted = '0' LIMIT 1`,
+            [branch_id]
+        );
+        firm_name = branchRows[0]?.name != null ? String(branchRows[0].name) : "";
+    } catch {
+        firm_name = "";
+    }
+
+    return {
+        "{{name}}":
+            receiverData?.name != null
+                ? String(receiverData.name)
+                : receiverData?.username || String(party2_id),
+        "{{mobile}}": receiverData?.mobile != null ? String(receiverData.mobile) : "",
+        "{{email}}": receiverData?.email != null ? String(receiverData.email) : "",
+        "{{firm_name}}": firm_name,
+        "{{amount}}": paymentAmount,
+        "{{paid_by}}": paidByDisplay,
+        "{{transaction_date}}": formatDateOnly(transaction_date),
+        "{{invoice_no}}": invoice_no != null ? String(invoice_no) : "",
+        "{{party_type}}": party2_type != null ? String(party2_type) : "",
     };
 }
 
@@ -601,6 +649,43 @@ async function sendPaymentReceiveWhatsapp({
     });
 }
 
+async function sendPaymentWhatsapp({
+    branch_id,
+    amount,
+    party2_id,
+    party2_type,
+    transaction_date,
+    invoice_no,
+    paid_by,
+}) {
+    if (!branch_id || !party2_id) return;
+
+    const receiverData = await USER_SNIPPED_DATA(party2_id);
+    const recipientNumber = formatWhatsappNumber(
+        receiverData?.country_code,
+        receiverData?.mobile
+    );
+    if (!recipientNumber) return;
+
+    const variables = await buildPaymentVariables({
+        branch_id,
+        party2_id,
+        party2_type,
+        amount,
+        transaction_date,
+        invoice_no,
+        paid_by_username: paid_by,
+    });
+
+    await sendWhatsappByChannel({
+        branch_id,
+        systemTemplateName: PAYMENT_TEMPLATE_NAME,
+        senderUsername: paid_by,
+        recipientNumber,
+        variables,
+    });
+}
+
 async function sendPaymentReminderWhatsapp({
     branch_id,
     username,
@@ -774,18 +859,28 @@ function notifyPaymentReceiveWhatsapp(params) {
     });
 }
 
+function notifyPaymentWhatsapp(params) {
+    void sendPaymentWhatsapp(params).catch((err) => {
+        console.error("Payment WhatsApp failed:", err?.response?.data || err?.message || err);
+    });
+}
+
 export {
     notifyTaskCreatedWhatsapp,
     notifyTaskCompletedWhatsapp,
     notifyPaymentReceiveWhatsapp,
+    notifyPaymentWhatsapp,
     sendTaskCreatedWhatsapp,
     sendTaskCompletedWhatsapp,
     sendPaymentReceiveWhatsapp,
+    sendPaymentWhatsapp,
     sendPaymentReminderWhatsapp,
     sendBirthdayWishWhatsapp,
     replaceVariablesInValue,
     TASK_CREATE_TEMPLATE_NAME,
     TASK_COMPLETE_TEMPLATE_NAME,
     PAYMENT_RECEIVE_TEMPLATE_NAME,
+    PAYMENT_TEMPLATE_NAME,
     PAYMENT_REMINDER_TEMPLATE_NAME,
+    BIRTHDAY_WISH_TEMPLATE_NAME,
 };

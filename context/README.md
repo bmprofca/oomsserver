@@ -15,6 +15,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
 | [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |
 | [`account-profile.md`](./account-profile.md) | Logged-in user profile (`/account`), contact OTP, profile image |
+| [`wp_system.md`](./wp_system.md) | OOMS System WhatsApp channel: JSON templates, mappings, OneChatting send + header image URLs |
 
 ## Pair with client
 

@@ -1,6 +1,5 @@
 import axios from "axios";
 import pool from "../db.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
     findSystemTemplate,
     getActiveMapping,
@@ -47,8 +46,7 @@ function buildSendComponent(templateEntry, variables) {
 
     for (const comp of templateComponents) {
         if (comp.type === "HEADER" && comp.format === "IMAGE") {
-            const handle = comp.example?.header_handle?.[0] || "";
-            const link = String(handle).replace(/\{BASE_DOMAIN\}/g, BASE_DOMAIN);
+            const link = String(comp.example?.header_handle?.[0] || "").trim();
             if (!link) {
                 continue;
             }
