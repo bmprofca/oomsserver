@@ -47,6 +47,55 @@ function getUsername(req) {
     return String(req.headers.username || req.headers.Username || "").trim();
 }
 
+/** Branch owners (`branch_mapping.type = 'admin'`) cannot use attendance. */
+async function assertStaffAttendanceAccess(req, res) {
+    const username = getUsername(req);
+    const branch_id = req.branch_id;
+    if (!username || !branch_id) {
+        res.status(400).json({ success: false, message: "Username and branch are required" });
+        return false;
+    }
+
+    const [rows] = await pool.query(
+        `SELECT type
+         FROM branch_mapping
+         WHERE username = ?
+           AND branch_id = ?
+           AND is_deleted = '0'
+         LIMIT 1`,
+        [username, branch_id]
+    );
+    const mapping = rows[0];
+    if (!mapping) {
+        res.status(403).json({
+            success: false,
+            message: "You are not mapped to this branch",
+        });
+        return false;
+    }
+    if (String(mapping.type || "").toLowerCase() === "admin") {
+        res.status(403).json({
+            success: false,
+            message: "Attendance is available for staff only",
+        });
+        return false;
+    }
+    return true;
+}
+
+async function requireStaffAttendance(req, res, next) {
+    try {
+        const allowed = await assertStaffAttendanceAccess(req, res);
+        if (allowed) next();
+    } catch (error) {
+        console.error("ATTENDANCE STAFF CHECK ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to verify attendance access",
+        });
+    }
+}
+
 function buildState(attendance, openBreak) {
     if (!attendance) return "not_punched";
     if (attendance.out_time) return "punched_out";
@@ -150,7 +199,7 @@ async function loadTodayStatusPayload(conn, { branch_id, username, date }) {
     };
 }
 
-router.get("/today-status", auth, validateBranch, async (req, res) => {
+router.get("/today-status", auth, validateBranch, requireStaffAttendance, async (req, res) => {
     try {
         const username = getUsername(req);
         const branch_id = req.branch_id;
@@ -175,7 +224,7 @@ router.get("/today-status", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/punch-in", auth, validateBranch, async (req, res) => {
+router.post("/punch-in", auth, validateBranch, requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -242,7 +291,7 @@ router.post("/punch-in", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/punch-out", auth, validateBranch, async (req, res) => {
+router.post("/punch-out", auth, validateBranch, requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -324,7 +373,7 @@ router.post("/punch-out", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/break/start", auth, validateBranch, async (req, res) => {
+router.post("/break/start", auth, validateBranch, requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -399,7 +448,7 @@ router.post("/break/start", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/break/end", auth, validateBranch, async (req, res) => {
+router.post("/break/end", auth, validateBranch, requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);

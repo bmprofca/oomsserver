@@ -74,8 +74,9 @@ States: `not_punched` | `punched_in` | `on_break` | `punched_out`.
 
 Mount: [`SERVER/routes/index.js`](../routes/index.js) → `/api/v1/attendance/*`  
 File: [`SERVER/routes/attendance.js`](../routes/attendance.js)  
-Auth: `auth` + `validateBranch` (no subscription gate).  
-Username: request header `username`.
+Auth: `auth` + `validateBranch` + **staff-only** (`branch_mapping.type !== 'admin'`).
+
+Branch **admins/owners** receive `403` — attendance is for staff mappings only.
 
 | Method | Path | Action |
 |--------|------|--------|
