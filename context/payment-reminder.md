@@ -49,3 +49,4 @@ Returns per-client / aggregate status such as `sent` / `partial` / `skipped` / `
 
 - Send reminders for credit or zero balance
 - Require only email; multi-channel is intentional
+- Pass bare (non-`{{…}}`) template keys into WhatsApp component JSON — see [`birthday-reminder.md`](./birthday-reminder.md)
