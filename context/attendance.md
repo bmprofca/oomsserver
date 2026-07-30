@@ -54,7 +54,8 @@ Multiple rows per staff/day. Link via **`branch_id` + `username` + `date`** (not
 - Env: `ATTENDANCE_TIMEZONE` (default **`Asia/Kolkata`**)
 - Helpers in [`SERVER/routes/attendance.js`](../routes/attendance.js):
   - `getAttendanceDateString()` → calendar `date` (`en-CA`)
-  - `getAttendanceNowString()` → MySQL DATETIME for `in_time` / `out_time` / break times / `modify_date`
+  - `getAttendanceNowTimeString()` → MySQL TIME for `in_time` / `out_time` / break times
+  - `getAttendanceNowString()` → MySQL DATETIME for audit fields like `modify_date`
 - Do **not** use SQL `NOW()` for punch or break times (DB server clock often differs from IST).
 
 ---
@@ -115,9 +116,9 @@ Staff source: `branch_mapping` where `type='staff'`, `is_deleted='0'`, `status='
 - No attendance row for `date` → `state: "not_marked"` (counts in `summary.absent`; treated as absent)
 - Explicit `status = 'absent'` → `state: "absent"`
 - Else state from punch/break / leave / half day: `punched_in` | `on_break` | `punched_out` | `present` | `leave` | `half_day`
-- Includes `summary` (full filtered set), `is_approved`, `pagination` `{ page, limit, total, totalPages, is_last_page }`
+- Includes `summary` (full filtered set), `is_approved`, `breaks[]`, `pagination` `{ page, limit, total, totalPages, is_last_page }`
 - Default `limit=100` (max 100)
-- Staff payload includes `mobile` + `country_code` for local display
+- Staff payload includes `mobile` + `country_code` for local display and raw `image` for client-side media-proxy resolution
 
 ### Manage mark (`POST /manage/mark`)
 
@@ -125,7 +126,7 @@ Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time
 
 - Upserts attendance for that staff/day
 - Always sets `is_approved = 1` and `approved_by`
-- `present` requires `in_time` (TIME); `out_time` optional
+- `present` requires both `in_time` and `out_time` (TIME only)
 - Other statuses clear `in_time` / `out_time`
 
 ### Manage APIs (`/attendance/manage/*`)
