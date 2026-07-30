@@ -158,6 +158,12 @@ function buildState(attendance, openBreak) {
     return "not_punched";
 }
 
+/** Office-managed day statuses — personal punch/break not applicable. */
+function isOfficeMarkedStatus(attendance) {
+    const mark = String(attendance?.status || "").toLowerCase();
+    return mark === "leave" || mark === "half day" || mark === "absent";
+}
+
 function buildListState(attendance, openBreak) {
     if (!attendance) return "not_marked";
     const state = buildState(attendance, openBreak);
@@ -250,11 +256,17 @@ async function loadTodayStatusPayload(conn, { branch_id, username, date }) {
     const attendance = attendanceRows[0] || null;
     const breakRows = await getTodayBreaks(conn, { branch_id, username, date });
     const openBreak = breakRows.find((row) => !row.end_time) || null;
+    const officeMarked = isOfficeMarkedStatus(attendance);
+    const markStatus = attendance
+        ? String(attendance.status || "").trim().toLowerCase() || null
+        : null;
 
     return {
         date,
         timezone: ATTENDANCE_TIMEZONE,
         state: buildState(attendance, openBreak),
+        mark_status: markStatus,
+        office_marked: officeMarked,
         attendance: formatAttendanceRow(attendance),
         open_break: formatBreakRow(openBreak),
         breaks: breakRows.map(formatBreakRow),
@@ -310,6 +322,15 @@ router.post("/punch-in", auth, validateBranch, requireStaffAttendance, async (re
 
         if (existing) {
             await connection.rollback();
+            if (isOfficeMarkedStatus(existing)) {
+                const mark = String(existing.status || "").toLowerCase();
+                const label =
+                    mark === "half day" ? "half day" : mark === "leave" ? "leave" : "absent";
+                return res.status(400).json({
+                    success: false,
+                    message: `Attendance is marked as ${label} for today. Punch in is not available.`,
+                });
+            }
             if (existing.out_time) {
                 return res.status(400).json({
                     success: false,
@@ -381,6 +402,14 @@ router.post("/punch-out", auth, validateBranch, requireStaffAttendance, async (r
             return res.status(400).json({
                 success: false,
                 message: "Not punched in. Punch in first.",
+            });
+        }
+
+        if (isOfficeMarkedStatus(existing)) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "Attendance was marked by the office for today. Punch out is not available.",
             });
         }
 
@@ -1197,6 +1226,120 @@ router.post("/manage/approve", auth, validateBranch, async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to update approval",
+        });
+    } finally {
+        connection.release();
+    }
+});
+
+/**
+ * Bulk approve: set is_approved = 1 only when punch in AND punch out exist for the date.
+ * Skips missing records, incomplete punches, open breaks, and non-staff usernames.
+ * Body: { usernames: string[], date?: "YYYY-MM-DD" }
+ */
+router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        const actor = getUsername(req);
+        const branch_id = req.branch_id;
+        if (!actor) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+
+        const rawList = Array.isArray(req.body?.usernames)
+            ? req.body.usernames
+            : Array.isArray(req.body?.username)
+              ? req.body.username
+              : [];
+        const usernames = [
+            ...new Set(
+                rawList
+                    .map((u) => String(u || "").trim())
+                    .filter(Boolean)
+            ),
+        ];
+        if (usernames.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "At least one username is required",
+            });
+        }
+
+        const date = normalizeManageDate(req.body?.date);
+        const now = getAttendanceNowString();
+
+        let done = 0;
+        let not_done = 0;
+        const done_usernames = [];
+        const skipped_usernames = [];
+
+        await connection.beginTransaction();
+
+        for (const targetUsername of usernames) {
+            const okStaff = await assertTargetStaffUser(branch_id, targetUsername);
+            if (!okStaff) {
+                not_done += 1;
+                skipped_usernames.push(targetUsername);
+                continue;
+            }
+
+            const existing = await getTodayAttendance(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            });
+            const hasPunchIn = Boolean(existing?.in_time);
+            const hasPunchOut = Boolean(existing?.out_time);
+            if (!existing || !hasPunchIn || !hasPunchOut) {
+                not_done += 1;
+                skipped_usernames.push(targetUsername);
+                continue;
+            }
+
+            const openBreak = await getOpenBreak(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+                forUpdate: true,
+            });
+            if (openBreak) {
+                not_done += 1;
+                skipped_usernames.push(targetUsername);
+                continue;
+            }
+
+            await connection.query(
+                `UPDATE attendance
+                 SET is_approved = 1,
+                     approved_by = ?,
+                     modify_by = ?,
+                     modify_date = ?
+                 WHERE id = ?`,
+                [actor, actor, now, existing.id]
+            );
+            done += 1;
+            done_usernames.push(targetUsername);
+        }
+
+        await connection.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: `Approved ${done} staff. Skipped ${not_done} staff.`,
+            data: {
+                date,
+                done,
+                not_done,
+                done_usernames,
+                skipped_usernames,
+            },
+        });
+    } catch (error) {
+        await connection.rollback();
+        console.error("POST ATTENDANCE MANAGE BULK APPROVE ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to bulk approve attendance",
         });
     } finally {
         connection.release();

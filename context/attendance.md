@@ -88,6 +88,7 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
 | POST | `/manage/break/start` | Start break for staff |
 | POST | `/manage/break/end` | End open break for staff |
 | POST | `/manage/approve` | `{ username, date?, is_approved: 0\|1 }` |
+| POST | `/manage/bulk-approve` | `{ usernames: string[], date? }` — approve only rows with punch in + punch out; skip others |
 | GET | `/today-status` | Today state + attendance + `open_break` + `breaks[]` (staff punch modal) |
 | POST | `/punch-in` | Body optional `{ method }` (default `manual`) |
 | POST | `/punch-out` | Body optional `{ method }` |
@@ -101,13 +102,17 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
   "date": "2026-07-30",
   "timezone": "Asia/Kolkata",
   "state": "punched_in",
-  "attendance": { "attendance_id": "…", "in_time": "…", "out_time": null, "…" : "…" },
+  "mark_status": "present" | "absent" | "leave" | "half day" | null,
+  "office_marked": false,
+  "attendance": { "attendance_id": "…", "in_time": "…", "out_time": null, "status": "…", "is_approved": "0|1", "…" : "…" },
   "open_break": null,
   "breaks": [
     { "break_id": "…", "username": "…", "start_time": "…", "end_time": "…", "…" : "…" }
   ]
 }
 ```
+
+`state` may also be `absent` | `leave` | `half_day` when office-marked via manage mark. `office_marked: true` means punch/break are not available for that day.
 
 ### Day list payload (`GET /day-list`)
 
@@ -128,6 +133,15 @@ Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time
 - Always sets `is_approved = 1` and `approved_by`
 - `present` requires both `in_time` and `out_time` (TIME only)
 - Other statuses clear `in_time` / `out_time`
+
+### Bulk approve (`POST /manage/bulk-approve`)
+
+Body: `{ usernames: string[], date?: "YYYY-MM-DD" }`
+
+- Sets `is_approved = 1` (+ `approved_by`) only when the attendance row has **both** `in_time` and `out_time` and no open break
+- Skips missing staff, incomplete punches, open breaks
+- Response: `{ message, data: { date, done, not_done, done_usernames, skipped_usernames } }`
+- Success message includes done / not_done counts
 
 ### Manage APIs (`/attendance/manage/*`)
 
