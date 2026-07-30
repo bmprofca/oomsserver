@@ -19,6 +19,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`wp_system.md`](./wp_system.md) | OOMS System WhatsApp channel: JSON templates, mappings, OneChatting send + header image URLs |
 | [`attendance.md`](./attendance.md) | Phase-1 punch/break APIs, `username` on `break`, IST timestamps (not MySQL `NOW()`), `breaks[]` |
 | [`attendance-removed.md`](./attendance-removed.md) | Legacy notes from attendance removal / pre-rebuild (salary kept on `/salary`) |
+| [`invoice.md`](./invoice.md) | `POST /invoice/generate`, allowed types, PDFKit, list `downloadable`, no Puppeteer |
 
 ## Pair with client
 
@@ -36,3 +37,4 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | — | `CLIENT/context/layout.md` (shell width; client-only) |
 | — | `CLIENT/context/settings-branch.md` (Branch Settings UI + GST Config tab) |
 | `attendance.md` | `CLIENT/context/attendance.md` |
+| `invoice.md` | `CLIENT/context/invoice.md`, `CLIENT/context/ledger-tab.md` |
