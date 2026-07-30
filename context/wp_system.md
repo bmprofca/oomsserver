@@ -140,6 +140,7 @@ Do **not** swap tokens (list with system token → `Invalid token`).
 | `type` | `template_name` | Body vars (order) |
 |--------|-----------------|-------------------|
 | `payment reminder` | `payment_reminder` | `{{name}}`, `{{balance}}`, `{{branch_name}}`, `{{branch_name}}` |
+| `payment reminder` | `payment_reminder2` | `{{name}}`, `{{balance}}`, `{{branch_name}}` |
 | `task create` | `task_create` | `{{name}}`, `{{service_name}}`, `{{fees}}`, `{{created_by}}`, `{{due_date}}`, `{{branch_name}}` |
 | `task complete` | `task_complete` | `{{name}}`, `{{service_name}}`, `{{completed_by}}`, `{{branch_name}}` |
 

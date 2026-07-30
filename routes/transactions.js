@@ -13,6 +13,7 @@ import {
     notifyPaymentReceiveWhatsapp,
     notifyPaymentWhatsapp,
 } from "../helpers/whatsappNotification.js";
+import { isSupportedGenerateType } from "../helpers/invoiceFormatMapping.js";
 
 const router = express.Router();
 
@@ -906,6 +907,9 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 payment: { debit: rowDebit, credit: rowCredit, balance: runningBalance },
                 invoice_id: row.invoice_id,
                 invoice_no: row.invoice_no,
+                downloadable: Boolean(
+                    row.invoice_id && isSupportedGenerateType(row.transaction_type)
+                ),
                 create_by,
                 modify_by,
                 particular

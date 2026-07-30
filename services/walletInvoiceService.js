@@ -1,8 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import pool from "../db.js";
-import { renderHtmlTemplate, htmlToPdfBuffer } from "../helpers/invoiceTemplateEngine.js";
-import { buildTemplateData } from "../helpers/invoiceDataBuilder.js";
+import { buildUnifiedInvoicePdfBuffer } from "../helpers/pdfGenerator.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 
 async function getBranchIssuer(branchId) {
@@ -63,19 +62,14 @@ export async function generateWalletTransactionInvoice({ branchId, transactionId
     const safeId = String(tx.transaction_id).replace(/[^\w.-]+/g, "_");
     const filename = `wallet-invoice-${safeId}.pdf`;
 
-    // Prepare standard invoice fields for templateData
     const invoiceData = {
         invoice_id: tx.transaction_id,
         invoice_no: tx.transaction_id,
         created_at: tx.create_date,
         amount: tx.amount,
+        grand_total: tx.amount,
         tax_amount: 0,
-        remark: tx.details || ""
-    };
-
-    const txRow = {
-        payment_method: null,
-        reference_no: null
+        remark: tx.details || "",
     };
 
     const lines = [
@@ -86,23 +80,17 @@ export async function generateWalletTransactionInvoice({ branchId, transactionId
         { label: "Details", value: tx.details || "-" },
     ];
 
-    const templateData = buildTemplateData({
-        type: "payment", // Map to payment layout (voucher layout)
+    const pdfBuffer = await buildUnifiedInvoicePdfBuffer({
+        title: "WALLET TRANSACTION RECEIPT",
+        pdfSubject: `Wallet ${typeLabel} ${tx.transaction_id}`,
         invoice: invoiceData,
-        transactionRow: txRow,
+        transactionRow: { transaction_date: tx.create_date },
         items: [],
         partyName: typeLabel === "Credit" ? "Wallet Credit" : "Wallet Debit",
         issuer,
         lines,
     });
 
-    // Customise labels
-    templateData.type_label = "WALLET TRANSACTION RECEIPT";
-
-    const html = await renderHtmlTemplate("payment", "classic", templateData);
-    const pdfBuffer = await htmlToPdfBuffer(html);
-
-    // Save to media/wallet/
     const walletFolder = path.join(process.cwd(), "media", "wallet");
     await fs.mkdir(walletFolder, { recursive: true });
     const filePath = path.join(walletFolder, filename);

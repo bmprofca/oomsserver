@@ -1,7 +1,7 @@
-import puppeteer from "puppeteer";
 import fs from "fs/promises";
 import path from "path";
 import Handlebars from "handlebars";
+import PDFDocument from "pdfkit";
 
 // Register helper for money formatting
 Handlebars.registerHelper("money", function (num) {
@@ -29,73 +29,56 @@ export async function renderHtmlTemplate(type, templateName, data) {
     }
 }
 
-/**
- * Converts a raw HTML string into a PDF Buffer using headless Puppeteer.
- * Opens a new page in a temporary browser, renders, and closes.
- */
-export async function htmlToPdfBuffer(html) {
-    const browser = await puppeteer.launch({
-        headless: "shell",
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--hide-scrollbars",
-            "--mute-audio"
-        ]
-    });
-    try {
-        const page = await browser.newPage();
-        await page.setContent(html, { waitUntil: "domcontentloaded" });
-        // Small delay to let CSS paint
-        await new Promise((r) => setTimeout(r, 300));
-        const pdfBuffer = await page.pdf({
-            format: "A4",
-            printBackground: true,
-            margin: { top: "0px", bottom: "0px", left: "0px", right: "0px" }
-        });
-        return pdfBuffer;
-    } finally {
-        await browser.close();
-    }
+function stripHtmlToText(html) {
+    return String(html || "")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<\/(p|div|tr|h[1-6]|li|section)>/gi, "\n")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/[ \t]+\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
 }
 
 /**
- * Batch-render multiple HTML strings into PDF buffers using a SINGLE browser instance.
- * Much faster than calling htmlToPdfBuffer() in a loop (avoids 56 browser launches).
- *
- * @param {string[]} htmlArray - Array of compiled HTML strings
- * @returns {Promise<Buffer[]>} - Array of PDF buffers in same order
+ * Converts HTML into a PDF Buffer using PDFKit (no browser / Puppeteer).
+ * Styles from HTML templates are not preserved — content is flattened to text.
+ * Prefer buildUnifiedInvoicePdfBuffer for structured invoice downloads.
+ */
+export async function htmlToPdfBuffer(html) {
+    const text = stripHtmlToText(html);
+    return new Promise((resolve, reject) => {
+        try {
+            const doc = new PDFDocument({ size: "A4", margin: 48 });
+            const buffers = [];
+            doc.on("data", (chunk) => buffers.push(chunk));
+            doc.on("end", () => resolve(Buffer.concat(buffers)));
+            doc.on("error", reject);
+
+            doc.font("Helvetica").fontSize(10).fillColor("#0f172a")
+                .text(text || "Invoice", { width: doc.page.width - 96, align: "left" });
+            doc.end();
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+/**
+ * Batch-render multiple HTML strings into PDF buffers (single PDFKit pass per page).
  */
 export async function htmlToPdfBufferBatch(htmlArray) {
-    const browser = await puppeteer.launch({
-        headless: "shell",
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--hide-scrollbars",
-            "--mute-audio"
-        ]
-    });
-    try {
-        const buffers = [];
-        for (let i = 0; i < htmlArray.length; i++) {
-            const page = await browser.newPage();
-            await page.setContent(htmlArray[i], { waitUntil: "domcontentloaded" });
-            await new Promise((r) => setTimeout(r, 200));
-            const pdfBuffer = await page.pdf({
-                format: "A4",
-                printBackground: true,
-                margin: { top: "0px", bottom: "0px", left: "0px", right: "0px" }
-            });
-            buffers.push(pdfBuffer);
-            await page.close();
-        }
-        return buffers;
-    } finally {
-        await browser.close();
+    const buffers = [];
+    for (let i = 0; i < htmlArray.length; i++) {
+        buffers.push(await htmlToPdfBuffer(htmlArray[i]));
     }
+    return buffers;
 }

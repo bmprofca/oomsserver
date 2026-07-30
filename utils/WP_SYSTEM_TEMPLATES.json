@@ -59,6 +59,63 @@
         ]
     },
     {
+        "type": "payment reminder",
+        "template_name": "payment_reminder2",
+        "template": {
+            "name": "payment_reminder2",
+            "category": "UTILITY",
+            "language": "en",
+            "components": [
+                {
+                    "type": "HEADER",
+                    "format": "IMAGE",
+                    "example": {
+                        "header_handle": [
+                            "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/461ri9g4085bx93zaw81n534tgnb34530wbksq3a71p/3c4f285d-f5f2-4698-a8ad-20cfc75d706b.png"
+                        ]
+                    }
+                },
+                {
+                    "type": "BODY",
+                    "text": "Dear *{{1}}*,\nThis is a friendly reminder that your payment is due of Rs. *{{2}}*. Kindly make the payment at the earliest to avoid any inconvenience. \n\nThanks and Regards\nTeam *{{3}}*, Your Compliance partner.",
+                    "example": {
+                        "body_text": [
+                            [
+                                "{{name}}",
+                                "{{balance}}",
+                                "{{branch_name}}"
+                            ]
+                        ]
+                    }
+                }
+            ]
+        },
+        "example": [
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {
+                    "header_handle": [
+                        "https://server.onechatting.com/proxy/templates/6a3265ba4f0c62596b0eb169/461ri9g4085bx93zaw81n534tgnb34530wbksq3a71p/3c4f285d-f5f2-4698-a8ad-20cfc75d706b.png"
+                    ]
+                }
+            },
+            {
+                "type": "BODY",
+                "text": "Dear *{{1}}*,\nThis is a friendly reminder that your payment is due of Rs. *{{2}}*. Kindly make the payment at the earliest to avoid any inconvenience. \n\nThanks and Regards\nTeam *{{3}}*, Your Compliance partner.",
+                "example": {
+                    "body_text": [
+                        [
+                            "Mubarak",
+                            "25",
+                            "Bmtax"
+                        ]
+                    ]
+                }
+            }
+        ]
+    },
+    {
         "type": "task create",
         "template_name": "task_create",
         "template": {

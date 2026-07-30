@@ -694,7 +694,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     service_id: ir.service_id,
                     fees: ir.fees != null ? Number(ir.fees) : null,
                     tax_perc: null,
-                    tax_value: null,
+                    tax_value:
+                        ir.total != null && ir.fees != null
+                            ? Number((Number(ir.total) - Number(ir.fees)).toFixed(2))
+                            : null,
                     total: ir.total != null ? Number(ir.total) : null,
                     remark: ir.remark,
                     service: svc
@@ -760,7 +763,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[amountStats]] = await pool.query(
             `SELECT
                 COALESCE(SUM(invoice.grand_total), 0) AS amount_total,
-                COALESCE(SUM(invoice.grand_total), 0) AS amount_tax,
+                COALESCE(SUM(
+                    invoice.total
+                    - (invoice.subtotal - COALESCE(invoice.discount_value, 0))
+                    - COALESCE(invoice.additional_charge, 0)
+                ), 0) AS amount_tax,
                 COALESCE(SUM(invoice.subtotal), 0) AS amount_net
              FROM sale_entries se
              INNER JOIN invoice ON invoice.invoice_id = se.invoice_id
@@ -794,6 +801,19 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             const create_by = createByKey ? await USER_SNIPPED_DATA(createByKey) : {};
             const modify_by = modifyByKey ? await USER_SNIPPED_DATA(modifyByKey) : {};
 
+            // Invoice has no tax column; reconstruct from totals:
+            // total = (subtotal - discount) + tax + additional_charge
+            const subtotalNum = Number(row.subtotal) || 0;
+            const discountNum = Number(row.discount_value) || 0;
+            const additionalNum = Number(row.additional_charge) || 0;
+            const totalNum = Number(row.total) || 0;
+            const taxableSubtotal = Number((subtotalNum - discountNum).toFixed(2));
+            const gstValue = Number((totalNum - taxableSubtotal - additionalNum).toFixed(2));
+            const taxRate =
+                taxableSubtotal > 0
+                    ? Number(((gstValue / taxableSubtotal) * 100).toFixed(2))
+                    : 0;
+
             data.push({
                 transaction_id: row.transaction_id,
                 transaction_date: row.transaction_date ?? row.sale_entry_date,
@@ -815,8 +835,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     discount_type: row.discount_type,
                     discount_perc_rate: row.discount_perc_rate,
                     discount_value: row.discount_value,
-                    tax_rate: row.tax_rate,
-                    gst_value: row.tax_value,
+                    tax_rate: taxRate,
+                    gst_value: gstValue,
                     additional_charge: row.additional_charge,
                     total: row.total,
                     round_off: row.round_off,

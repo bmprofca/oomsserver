@@ -1,8 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import pool from "../db.js";
-import { renderHtmlTemplate, htmlToPdfBuffer } from "../helpers/invoiceTemplateEngine.js";
-import { buildTemplateData } from "../helpers/invoiceDataBuilder.js";
+import { buildUnifiedInvoicePdfBuffer } from "../helpers/pdfGenerator.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 
 const ALLOWED_GENERATE_TYPES = new Set([
@@ -11,7 +10,6 @@ const ALLOWED_GENERATE_TYPES = new Set([
     "payment",
     "receive",
     "journal",
-    "contra",
     "expense",
 ]);
 
@@ -33,15 +31,9 @@ function getSimpleDocTitleForInvoiceType(type) {
         payment: "PAYMENT VOUCHER",
         receive: "RECEIPT",
         journal: "JOURNAL VOUCHER",
-        contra: "CONTRA VOUCHER",
         expense: "EXPENSE VOUCHER",
     };
     return map[normInvoiceType(type)] || "VOUCHER";
-}
-
-function downloadFilenameForInvoice(invoice) {
-    const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
-    return `invoice_${safeNo}.pdf`;
 }
 
 async function isBranchStaffOrAdmin(username, branch_id) {
@@ -132,10 +124,6 @@ async function getBranchInvoiceProfile(branch_id) {
     };
 }
 
-function mapFormatKeyToTemplateName(key) {
-    return String(key || "classic").trim().toLowerCase();
-}
-
 async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {
     const map = {
         sale: "sale",
@@ -144,7 +132,6 @@ async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {
         receive: "receive",
         "payment receive": "receive",
         journal: "journal",
-        contra: "contra",
         expense: "expense",
     };
     const col = map[String(invoiceType).trim().toLowerCase()];
@@ -199,21 +186,48 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
     }
 
     const issuer = await getBranchInvoiceProfile(branch_id);
-    const filename = downloadFilenameForInvoice(invoice);
+    const title = getSimpleDocTitleForInvoiceType(invoiceType);
 
     let items = [];
     let partyName = "-";
     let lines = [];
 
     if (invoiceType === "sale" || invoiceType === "purchase") {
-        const [itemRows] = await pool.query(
-            `SELECT si.*, s.name AS service_name
-             FROM sale_items si
-             LEFT JOIN services s ON s.service_id = si.service_id
-             WHERE si.invoice_id = ?
-             ORDER BY si.id ASC`,
-            [invId]
-        );
+        // Prefer typed items table; fall back to sale_items if purchase_items is missing
+        let itemRows = [];
+        if (invoiceType === "purchase") {
+            try {
+                const [rows] = await pool.query(
+                    `SELECT si.*, s.name AS service_name
+                     FROM purchase_items si
+                     LEFT JOIN services s ON s.service_id = si.service_id
+                     WHERE si.invoice_id = ?
+                     ORDER BY si.id ASC`,
+                    [invId]
+                );
+                itemRows = rows;
+            } catch {
+                const [rows] = await pool.query(
+                    `SELECT si.*, s.name AS service_name
+                     FROM sale_items si
+                     LEFT JOIN services s ON s.service_id = si.service_id
+                     WHERE si.invoice_id = ?
+                     ORDER BY si.id ASC`,
+                    [invId]
+                );
+                itemRows = rows;
+            }
+        } else {
+            const [rows] = await pool.query(
+                `SELECT si.*, s.name AS service_name
+                 FROM sale_items si
+                 LEFT JOIN services s ON s.service_id = si.service_id
+                 WHERE si.invoice_id = ?
+                 ORDER BY si.id ASC`,
+                [invId]
+            );
+            itemRows = rows;
+        }
         items = itemRows;
 
         const counterpartyId = invoiceType === "sale" ? tx.party2_id : tx.party1_id;
@@ -225,14 +239,20 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         const b = await formatPartyLine(tx.party2_type, tx.party2_id);
         if (a) lines.push(a);
         if (b) lines.push(b);
+        if (a?.value) partyName = a.value;
     }
 
     const rawFormatKey = await getActiveFormatKeyForInvoiceType(branch_id, invoiceType);
-    const activeTemplate = mapFormatKeyToTemplateName(rawFormatKey);
 
-    const templateData = buildTemplateData({
-        type: invoiceType,
-        invoice,
+    const invoiceForPdf = {
+        ...invoice,
+        remark: invoice.remark || tx.remark || null,
+    };
+
+    const buffer = await buildUnifiedInvoicePdfBuffer({
+        title,
+        pdfSubject: `${title} ${invoice.invoice_no || invId}`,
+        invoice: invoiceForPdf,
         transactionRow: tx,
         items,
         partyName,
@@ -240,13 +260,9 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         lines,
     });
 
-    const html = await renderHtmlTemplate(invoiceType, activeTemplate, templateData);
-    const buffer = await htmlToPdfBuffer(html);
-
-    // Save the file on the server in media/format/<invoice_type>/<filename>.pdf
     const typeFolder = path.join(process.cwd(), "media", "format", invoiceType);
     await fs.mkdir(typeFolder, { recursive: true });
-    
+
     const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
     const saveFilename = `${safeNo}.pdf`;
     const filePath = path.join(typeFolder, saveFilename);
@@ -254,13 +270,13 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
 
     const localUrl = `${BASE_DOMAIN}/media/format/${invoiceType}/${saveFilename}`;
 
-    return { 
-        buffer, 
-        filename: saveFilename, 
-        formatKey: rawFormatKey, 
-        type: invoiceType, 
+    return {
+        buffer,
+        filename: saveFilename,
+        formatKey: rawFormatKey,
+        type: invoiceType,
         invoice_id: invId,
-        url: localUrl
+        url: localUrl,
     };
 }
 

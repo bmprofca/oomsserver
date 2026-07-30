@@ -298,6 +298,7 @@ router.post("/punch-in", auth, validateBranch, requireStaffAttendance, async (re
         const method = normalizeMethod(req.body?.method);
         const date = getAttendanceDateString();
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -365,6 +366,7 @@ router.post("/punch-out", auth, validateBranch, requireStaffAttendance, async (r
         const method = normalizeMethod(req.body?.method);
         const date = getAttendanceDateString();
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -446,6 +448,7 @@ router.post("/break/start", auth, validateBranch, requireStaffAttendance, async 
 
         const date = getAttendanceDateString();
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -521,6 +524,7 @@ router.post("/break/end", auth, validateBranch, requireStaffAttendance, async (r
 
         const date = getAttendanceDateString();
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -790,6 +794,7 @@ router.post("/manage/punch-in", auth, validateBranch, async (req, res) => {
         const method = normalizeMethod(req.body?.method);
         const date = normalizeManageDate(req.body?.date);
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -865,6 +870,7 @@ router.post("/manage/punch-out", auth, validateBranch, async (req, res) => {
         const method = normalizeMethod(req.body?.method);
         const date = normalizeManageDate(req.body?.date);
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -957,6 +963,7 @@ router.post("/manage/break/start", auth, validateBranch, async (req, res) => {
 
         const date = normalizeManageDate(req.body?.date);
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 
@@ -1050,6 +1057,7 @@ router.post("/manage/break/end", auth, validateBranch, async (req, res) => {
 
         const date = normalizeManageDate(req.body?.date);
         const now = getAttendanceNowString();
+        const nowTime = getAttendanceNowTimeString();
 
         await connection.beginTransaction();
 

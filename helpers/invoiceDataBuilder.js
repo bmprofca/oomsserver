@@ -41,11 +41,6 @@ export function buildTemplateData({ type, invoice, transactionRow, items, partyN
         party2Label = "Credit Party";
         showParties = true;
         isSimple = true;
-    } else if (invoiceType === "contra") {
-        billToLabel = "From Account";
-        party2Label = "To Account";
-        showParties = true;
-        isSimple = true;
     } else if (invoiceType === "expense") {
         billToLabel = "Paid To";
         showParties = true;
@@ -58,7 +53,6 @@ export function buildTemplateData({ type, invoice, transactionRow, items, partyN
         payment: "PAYMENT VOUCHER",
         receive: "RECEIPT",
         journal: "JOURNAL VOUCHER",
-        contra: "CONTRA VOUCHER",
         expense: "EXPENSE VOUCHER",
     };
 
@@ -108,7 +102,7 @@ export function buildTemplateData({ type, invoice, transactionRow, items, partyN
         partyDetail = pDetails.join(" | ");
     }
 
-    // Party 2 (if journal/contra)
+    // Party 2 (if journal)
     let party2Name = "";
     let party2Detail = "";
     if (lines && lines.length > 1) {

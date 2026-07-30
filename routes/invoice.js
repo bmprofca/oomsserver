@@ -10,7 +10,7 @@ import {
     normInvoiceType,
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
-import { isValidFormatForType } from "../helpers/invoiceFormatMapping.js";
+import { isValidFormatForType, INVOICE_GENERATE_TYPES } from "../helpers/invoiceFormatMapping.js";
 
 const router = express.Router();
 
@@ -21,11 +21,10 @@ const INVOICE_TYPE_TO_FORMAT_COLUMN = {
     receive: "receive",
     "payment receive": "receive",
     journal: "journal",
-    contra: "contra",
     expense: "expense",
 };
 
-const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
+const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "expense"];
 
 
 
@@ -81,20 +80,28 @@ router.get("/formats", auth, validateBranch, async (req, res) => {
         const branch_id = req.branch_id;
         const rawType = req.query?.type;
         const bodyType = normInvoiceType(rawType || "sale");
+
+        if (!ALLOWED_GENERATE_TYPES.has(bodyType)) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid type. Allowed: ${INVOICE_GENERATE_TYPES.join(", ")}`,
+            });
+        }
+
         const active_format = await getActiveFormatKeyForInvoiceType(branch_id, bodyType);
-        
+
         let samples = [];
         try {
             samples = await getFormatSamplePdfsBase64(bodyType);
         } catch (err) {
-            // If the type is not supported for formats (e.g., "opening balance"), return empty array
+            // If the type is not supported for formats, return empty array
             if (err.message && err.message.includes("Invalid type")) {
                 samples = [];
             } else {
                 throw err;
             }
         }
-        
+
         return res.status(200).json({
             success: true,
             message: "Format sample PDFs retrieved successfully",
@@ -173,7 +180,7 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
             const c = INVOICE_FORMAT_COLUMNS[i];
             settings[c] = row[c] || "classic";
         }
-        
+
         return res.status(200).json({
             success: true,
             message: "Invoice format updated successfully",
@@ -194,7 +201,6 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
     }
 });
 
-// Support both /generate and /generate-invoice under /invoice
 const generateHandler = async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -208,7 +214,7 @@ const generateHandler = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message:
-                    "type is required (e.g. sale, purchase, payment, receive, payment receive, journal, contra, expense)",
+                    "type is required (e.g. sale, purchase, payment, receive, payment receive, journal, expense)",
             });
         }
         if (!ALLOWED_GENERATE_TYPES.has(normInvoiceType(bodyType))) {
@@ -281,7 +287,6 @@ const generateHandler = async (req, res) => {
 };
 
 router.post("/generate", auth, validateBranch, generateHandler);
-router.post("/generate-invoice", auth, validateBranch, generateHandler);
 
 router.get("/prefix/list", auth, validateBranch, async (req, res) => {
     try {

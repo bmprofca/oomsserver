@@ -1,23 +1,27 @@
 import fs from "fs/promises";
 import path from "path";
 import { BASE_DOMAIN } from "./Config.js";
-import { renderHtmlTemplate, htmlToPdfBufferBatch } from "./invoiceTemplateEngine.js";
-import { buildTemplateData } from "./invoiceDataBuilder.js";
-
+import { buildUnifiedInvoicePdfBuffer } from "./pdfGenerator.js";
 import { getAvailableFormatsForType } from "./invoiceFormatMapping.js";
 
-const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "contra", "expense"];
+const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "expense"];
 
 const SAMPLE_INVOICE = {
     invoice_id: "format-sample",
     invoice_no: "SAMPLE-001",
     created_at: new Date("2026-01-15T12:00:00.000Z"),
     amount: 12050,
+    grand_total: 12050,
+    subtotal: 10000,
+    total: 11800,
+    discount_value: 0,
+    additional_charge: 0,
     tax_amount: 1800,
     remark: "This is a sample document for previewing invoice layout only.",
 };
 
 const SAMPLE_TRANSACTION = {
+    transaction_date: new Date("2026-01-15T12:00:00.000Z"),
     payment_method: "Bank Transfer",
     reference_no: "TXN-884729104",
     remark: "This is a sample document for previewing invoice layout only.",
@@ -27,15 +31,13 @@ const SAMPLE_ITEMS = [
     {
         service_name: "Professional services (sample)",
         fees: 6000,
-        rate: 6000,
-        quantity: 1,
+        total: 7080,
         description: "Quarterly software development support",
     },
     {
         service_name: "Consulting — quarterly (sample)",
         fees: 4000,
-        rate: 4000,
-        quantity: 1,
+        total: 4720,
         description: "IT architecture consultation",
     },
 ];
@@ -53,10 +55,6 @@ const SAMPLE_LINES_BY_FORMAT_COLUMN = {
         { label: "Debit (party)", value: "Sample Ledger A" },
         { label: "Credit (party)", value: "Sample Ledger B" },
     ],
-    contra: [
-        { label: "From", value: "Sample Bank A" },
-        { label: "To", value: "Sample Bank B" },
-    ],
     expense: [
         { label: "Paid to", value: "Sample Expense Vendor" },
         { label: "Book", value: "Office expenses (sample)" },
@@ -70,38 +68,14 @@ const SAMPLE_ISSUER = {
     address: "101, Business Tower, Tech Park, Sector 62, Noida, UP, 201301",
 };
 
-function mapFormatKeyToTemplateName(key) {
-    return String(key || "classic").trim().toLowerCase();
-}
-
-/**
- * Build the compiled HTML string for one sample (no PDF yet).
- */
-async function buildOneSampleHtml(columnKey, formatKey) {
-    const activeTemplate = mapFormatKeyToTemplateName(formatKey);
-    const isSale = columnKey === "sale";
-    const isPurchase = columnKey === "purchase";
-    
-    let partyName = "Sample Client Pvt. Ltd.";
-    if (isPurchase) partyName = "Sample Supplier & Co.";
-    else if (columnKey === "payment") partyName = "Sample Vendor";
-    else if (columnKey === "receive") partyName = "Sample Client";
-    else if (columnKey === "expense") partyName = "Office Expenses";
-
-    const lines = SAMPLE_LINES_BY_FORMAT_COLUMN[columnKey] || [];
-
-    const templateData = buildTemplateData({
-        type: columnKey,
-        invoice: SAMPLE_INVOICE,
-        transactionRow: SAMPLE_TRANSACTION,
-        items: (isSale || isPurchase) ? SAMPLE_ITEMS : [],
-        partyName,
-        issuer: SAMPLE_ISSUER,
-        lines,
-    });
-
-    return renderHtmlTemplate(columnKey, activeTemplate, templateData);
-}
+const TYPE_TITLES = {
+    sale: "TAX INVOICE",
+    purchase: "PURCHASE INVOICE",
+    payment: "PAYMENT VOUCHER",
+    receive: "RECEIPT",
+    journal: "JOURNAL VOUCHER",
+    expense: "EXPENSE VOUCHER",
+};
 
 async function fileExists(filePath) {
     try {
@@ -112,16 +86,39 @@ async function fileExists(filePath) {
     }
 }
 
+async function buildOneSamplePdf(columnKey) {
+    const isSale = columnKey === "sale";
+    const isPurchase = columnKey === "purchase";
+
+    let partyName = "Sample Client Pvt. Ltd.";
+    if (isPurchase) partyName = "Sample Supplier & Co.";
+    else if (columnKey === "payment") partyName = "Sample Vendor";
+    else if (columnKey === "receive") partyName = "Sample Client";
+    else if (columnKey === "expense") partyName = "Office Expenses";
+
+    const lines = SAMPLE_LINES_BY_FORMAT_COLUMN[columnKey] || [];
+
+    return buildUnifiedInvoicePdfBuffer({
+        title: TYPE_TITLES[columnKey] || "INVOICE",
+        pdfSubject: `Sample ${columnKey}`,
+        invoice: SAMPLE_INVOICE,
+        transactionRow: SAMPLE_TRANSACTION,
+        items: isSale || isPurchase ? SAMPLE_ITEMS : [],
+        partyName,
+        issuer: SAMPLE_ISSUER,
+        lines,
+    });
+}
+
 /**
- * Checks if the PDFs for a specific type (e.g. "sale") already exist.
- * If any are missing, it batch-generates all in ~2 seconds.
+ * Checks if the PDFs for a specific type already exist.
+ * Missing files are generated with PDFKit (no Puppeteer).
  */
 async function ensureTypeFormatSamples(columnKey) {
     const formats = getAvailableFormatsForType(columnKey);
     const dir = path.join(process.cwd(), "media", "format", columnKey);
     await fs.mkdir(dir, { recursive: true });
 
-    // Check if ALL variants already exist
     let allExist = true;
     for (const formatKey of formats) {
         if (!(await fileExists(path.join(dir, `${formatKey}.pdf`)))) {
@@ -129,38 +126,16 @@ async function ensureTypeFormatSamples(columnKey) {
             break;
         }
     }
-
-    if (allExist) {
-        return; // Already generated, instantly return
-    }
-
-    const startTime = Date.now();
-    // console.log(`[InvoiceFormats] Missing PDFs for '${columnKey}'. Generating now...`);
-
-    const jobs = [];
-    for (const formatKey of formats) {
-        try {
-            const html = await buildOneSampleHtml(columnKey, formatKey);
-            jobs.push({ formatKey, html });
-        } catch (err) {
-            console.error(`[InvoiceFormats] Template error ${columnKey}/${formatKey}:`, err.message);
-        }
-    }
-
-    if (jobs.length === 0) return;
+    if (allExist) return;
 
     try {
-        const buffers = await htmlToPdfBufferBatch(jobs.map(j => j.html));
-        for (let i = 0; i < jobs.length; i++) {
-            const buf = buffers[i];
-            if (buf && buf.length > 0) {
-                await fs.writeFile(path.join(dir, `${jobs[i].formatKey}.pdf`), buf);
-            }
+        // One PDFKit layout for all format keys (HTML theme variants need a browser).
+        const buffer = await buildOneSamplePdf(columnKey);
+        for (const formatKey of formats) {
+            await fs.writeFile(path.join(dir, `${formatKey}.pdf`), buffer);
         }
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        // console.log(`[InvoiceFormats] Done — ${jobs.length} PDFs generated for '${columnKey}' in ${elapsed}s`);
     } catch (err) {
-        console.error(`[InvoiceFormats] Batch PDF render failed for '${columnKey}':`, err.message);
+        console.error(`[InvoiceFormats] PDFKit sample render failed for '${columnKey}':`, err.message);
     }
 }
 
@@ -172,7 +147,6 @@ export async function getFormatSamplePdfsBase64(invoiceTypeInput) {
         receive: "receive",
         "payment receive": "receive",
         journal: "journal",
-        contra: "contra",
         expense: "expense",
     };
     const dirKey = map[String(invoiceTypeInput).trim().toLowerCase()];
@@ -180,7 +154,6 @@ export async function getFormatSamplePdfsBase64(invoiceTypeInput) {
         throw new Error("Invalid type for format samples");
     }
 
-    // Lazy load: ensure the PDFs for THIS SPECIFIC TYPE exist before returning URLs
     await ensureTypeFormatSamples(dirKey);
 
     const formats = getAvailableFormatsForType(dirKey);
