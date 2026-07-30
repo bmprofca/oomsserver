@@ -30,10 +30,10 @@ One row per `(branch_id, username, date)`.
 |--------|--------|
 | `attendance_id` | Public id |
 | `branch_id` / `username` / `date` | Day key (date from `ATTENDANCE_TIMEZONE`) |
-| `in_time` / `out_time` | Written by API as `YYYY-MM-DD HH:mm:ss` — **not** MySQL `NOW()` |
-| `status` | Punch in sets `present` |
+| `in_time` / `out_time` | MySQL **TIME** (`HH:mm:ss`) via `getAttendanceNowTimeString` — not DATETIME |
+| `status` | enum: `absent`, `present`, `leave`, `half day` (default `absent`; unused `idle` removed) |
 | `in_method` / `out_method` | Default `manual` |
-| `is_approved` | Stays `0` in phase 1 |
+| `is_approved` | Manage mark always sets `1`; personal punch stays `0` until approved |
 | `create_by` / `modify_by` | Audit = acting username |
 
 ### `` `break` ``
@@ -44,7 +44,7 @@ Multiple rows per staff/day. Link via **`branch_id` + `username` + `date`** (not
 |--------|--------|
 | `break_id` | Public id |
 | `username` | Staff who took the break |
-| `start_time` / `end_time` | Open break = `end_time IS NULL`. Same Node timezone write as punches |
+| `start_time` / `end_time` | MySQL **TIME**. Open break = `end_time IS NULL` |
 | `create_by` / `modify_by` | Audit only |
 
 ---
@@ -80,7 +80,14 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
 
 | Method | Path | Action |
 |--------|------|--------|
-| GET | `/today-status` | Today state + attendance + `open_break` + `breaks[]` |
+| GET | `/day-list` | Day-wise staff list (`?date=&search=&page=&limit=`, default limit 100) |
+| POST | `/manage/mark` | Mark Absent/Present/Half Day/Leave — always `is_approved=1` + optional TIME in/out for present |
+| POST | `/manage/punch-in` | Legacy manage punch in |
+| POST | `/manage/punch-out` | Legacy manage punch out |
+| POST | `/manage/break/start` | Start break for staff |
+| POST | `/manage/break/end` | End open break for staff |
+| POST | `/manage/approve` | `{ username, date?, is_approved: 0\|1 }` |
+| GET | `/today-status` | Today state + attendance + `open_break` + `breaks[]` (staff punch modal) |
 | POST | `/punch-in` | Body optional `{ method }` (default `manual`) |
 | POST | `/punch-out` | Body optional `{ method }` |
 | POST | `/break/start` | Start break |
@@ -101,6 +108,28 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
 }
 ```
 
-- `breaks`: all rows for that staff/branch/date, ordered by `start_time ASC`
-- `open_break`: first/open row with `end_time IS NULL` (or `null`)
-- Mutations return the same shape after commit
+### Day list payload (`GET /day-list`)
+
+Staff source: `branch_mapping` where `type='staff'`, `is_deleted='0'`, `status='1'`, `is_accepted='1'`, joined `profile` + active `users`.
+
+- No attendance row for `date` → `state: "not_marked"` (counts in `summary.absent`; treated as absent)
+- Explicit `status = 'absent'` → `state: "absent"`
+- Else state from punch/break / leave / half day: `punched_in` | `on_break` | `punched_out` | `present` | `leave` | `half_day`
+- Includes `summary` (full filtered set), `is_approved`, `pagination` `{ page, limit, total, totalPages, is_last_page }`
+- Default `limit=100` (max 100)
+- Staff payload includes `mobile` + `country_code` for local display
+
+### Manage mark (`POST /manage/mark`)
+
+Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time?, out_time? }`
+
+- Upserts attendance for that staff/day
+- Always sets `is_approved = 1` and `approved_by`
+- `present` requires `in_time` (TIME); `out_time` optional
+- Other statuses clear `in_time` / `out_time`
+
+### Manage APIs (`/attendance/manage/*`)
+
+Auth: `auth` + `validateBranch` (not personal staff-only). Target must be active staff on the branch.
+
+Auth for `/day-list`: `auth` + `validateBranch` only (admins can manage the list). Personal punch routes still use staff-only middleware.
