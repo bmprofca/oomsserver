@@ -1340,17 +1340,47 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             await conn.query("UPDATE tasks SET service_id = ? WHERE task_id = ? AND branch_id = ?", [service_id, task_id, branch_id]);
         }
 
-        if (ca && ca.has_ca && ca.ca_id !== task_data.ca_id && AllowCaChange) {
-            await conn.query("UPDATE tasks SET ca_id = ? WHERE task_id = ? AND branch_id = ?", [ca.ca_id, task_id, branch_id]);
+        // Keep has_ca / ca_id in sync (profile + lists gate CA on has_ca = '1')
+        if (ca && AllowCaChange) {
+            if (ca.has_ca && ca.ca_id) {
+                const nextCaId = String(ca.ca_id).trim();
+                const prevCaId = task_data.ca_id != null ? String(task_data.ca_id).trim() : "";
+                const prevHasCa = String(task_data.has_ca) === "1";
+                if (nextCaId && (!prevHasCa || nextCaId !== prevCaId)) {
+                    await conn.query(
+                        "UPDATE tasks SET has_ca = '1', ca_id = ? WHERE task_id = ? AND branch_id = ?",
+                        [nextCaId, task_id, branch_id]
+                    );
+                }
+            } else if (!ca.has_ca) {
+                if (String(task_data.has_ca) === "1" || task_data.ca_id) {
+                    await conn.query(
+                        "UPDATE tasks SET has_ca = '0', ca_id = NULL WHERE task_id = ? AND branch_id = ?",
+                        [task_id, branch_id]
+                    );
+                }
+            }
         }
-        if (ca && !ca.has_ca && AllowCaChange) {
-            await conn.query("UPDATE tasks SET ca_id = NULL WHERE task_id = ? AND branch_id = ?", [task_id, branch_id]);
-        }
-        if (agent && agent.has_agent && agent.agent_id !== task_data.agent_id && AllowAgentChange) {
-            await conn.query("UPDATE tasks SET agent_id = ? WHERE task_id = ? AND branch_id = ?", [agent.agent_id, task_id, branch_id]);
-        }
-        if (agent && !agent.has_agent && AllowAgentChange) {
-            await conn.query("UPDATE tasks SET agent_id = NULL WHERE task_id = ? AND branch_id = ?", [task_id, branch_id]);
+        // Keep has_agent / agent_id in sync
+        if (agent && AllowAgentChange) {
+            if (agent.has_agent && agent.agent_id) {
+                const nextAgentId = String(agent.agent_id).trim();
+                const prevAgentId = task_data.agent_id != null ? String(task_data.agent_id).trim() : "";
+                const prevHasAgent = String(task_data.has_agent) === "1";
+                if (nextAgentId && (!prevHasAgent || nextAgentId !== prevAgentId)) {
+                    await conn.query(
+                        "UPDATE tasks SET has_agent = '1', agent_id = ? WHERE task_id = ? AND branch_id = ?",
+                        [nextAgentId, task_id, branch_id]
+                    );
+                }
+            } else if (!agent.has_agent) {
+                if (String(task_data.has_agent) === "1" || task_data.agent_id) {
+                    await conn.query(
+                        "UPDATE tasks SET has_agent = '0', agent_id = NULL WHERE task_id = ? AND branch_id = ?",
+                        [task_id, branch_id]
+                    );
+                }
+            }
         }
 
         const normalizeDate = (value) => {

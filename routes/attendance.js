@@ -184,7 +184,160 @@ function formatAttendanceRow(row) {
         in_method: row.in_method,
         out_method: row.out_method,
         is_approved: row.is_approved,
+        expected_hours: row.expected_hours != null ? Number(row.expected_hours) : null,
+        worked_minutes: row.worked_minutes != null ? Number(row.worked_minutes) : null,
+        extra_minutes: Number(row.extra_minutes) || 0,
+        less_minutes: Number(row.less_minutes) || 0,
+        overtime_enabled: Number(row.overtime_enabled) === 1,
+        fine_enabled: Number(row.fine_enabled) === 1,
+        daily_wage: row.daily_wage != null ? Number(row.daily_wage) : null,
+        overtime_amount: Number(row.overtime_amount) || 0,
+        fine_amount: Number(row.fine_amount) || 0,
+        net_day_amount: row.net_day_amount != null ? Number(row.net_day_amount) : null,
     };
+}
+
+function timeStringToMinutes(value) {
+    const normalized = normalizeTimeValue(value);
+    if (!normalized) return null;
+    const [h, m, s] = normalized.split(":").map(Number);
+    return h * 60 + m + Math.floor((s || 0) / 60);
+}
+
+function daysInMonthFromDate(dateStr) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || ""))) return null;
+    const [y, m] = String(dateStr).split("-").map(Number);
+    if (!y || !m) return null;
+    return new Date(y, m, 0).getDate();
+}
+
+function parseBoolFlag(value) {
+    return value === true || value === "true" || value === 1 || value === "1";
+}
+
+/**
+ * Day wage + optional OT / fine from worked vs expected minutes.
+ * daily = monthly / daysInMonth; perMinute = daily / expectedMinutes.
+ * expectedHours (legacy) still accepted and converted to minutes.
+ */
+function computePresentWageBreakdown({
+    inTime,
+    outTime,
+    date,
+    monthlyAmount,
+    expectedMinutes: expectedMinutesInput,
+    expectedHours,
+    overtimeEnabled = false,
+    fineEnabled = false,
+    statusMultiplier = 1,
+}) {
+    const empty = {
+        expected_hours: null,
+        worked_minutes: null,
+        extra_minutes: 0,
+        less_minutes: 0,
+        overtime_enabled: 0,
+        fine_enabled: 0,
+        daily_wage: null,
+        overtime_amount: 0,
+        fine_amount: 0,
+        net_day_amount: null,
+    };
+
+    const amount = Number(monthlyAmount);
+    let expectedMinutes = Number(expectedMinutesInput);
+    if (!Number.isFinite(expectedMinutes) || expectedMinutes <= 0) {
+        const eh = Number(expectedHours);
+        expectedMinutes = Number.isFinite(eh) && eh > 0 ? Math.round(eh * 60) : NaN;
+    }
+    const days = daysInMonthFromDate(date);
+    const inMins = timeStringToMinutes(inTime);
+    const outMins = timeStringToMinutes(outTime);
+
+    if (
+        !Number.isFinite(amount) ||
+        amount <= 0 ||
+        !days ||
+        inMins == null ||
+        outMins == null ||
+        outMins < inMins
+    ) {
+        return empty;
+    }
+
+    const dailyWage = (amount / days) * statusMultiplier;
+    const workedMinutes = outMins - inMins;
+
+    if (!Number.isFinite(expectedMinutes) || expectedMinutes <= 0) {
+        return {
+            ...empty,
+            worked_minutes: workedMinutes,
+            daily_wage: Number(dailyWage.toFixed(4)),
+            net_day_amount: Number(dailyWage.toFixed(4)),
+        };
+    }
+
+    const extraMinutes = Math.max(0, workedMinutes - expectedMinutes);
+    const lessMinutes = Math.max(0, expectedMinutes - workedMinutes);
+    const perMinute = dailyWage / expectedMinutes;
+    const applyOt = Boolean(overtimeEnabled) && extraMinutes > 0;
+    const applyFine = Boolean(fineEnabled) && lessMinutes > 0;
+    const overtimeAmount = applyOt ? extraMinutes * perMinute : 0;
+    const fineAmount = applyFine ? lessMinutes * perMinute : 0;
+    const net = dailyWage + overtimeAmount - fineAmount;
+
+    return {
+        expected_hours: expectedMinutes / 60,
+        worked_minutes: workedMinutes,
+        extra_minutes: extraMinutes,
+        less_minutes: lessMinutes,
+        overtime_enabled: applyOt ? 1 : 0,
+        fine_enabled: applyFine ? 1 : 0,
+        daily_wage: Number(dailyWage.toFixed(4)),
+        overtime_amount: Number(overtimeAmount.toFixed(4)),
+        fine_amount: Number(fineAmount.toFixed(4)),
+        net_day_amount: Number(net.toFixed(4)),
+    };
+}
+
+function clearWageColumns() {
+    return {
+        expected_hours: null,
+        worked_minutes: null,
+        extra_minutes: 0,
+        less_minutes: 0,
+        overtime_enabled: 0,
+        fine_enabled: 0,
+        daily_wage: null,
+        overtime_amount: 0,
+        fine_amount: 0,
+        net_day_amount: null,
+    };
+}
+
+async function getActiveSalaryForDate(conn, { branch_id, username, date }) {
+    try {
+        const [rows] = await conn.query(
+            `SELECT salary_id, salary_type, amount, monthly_working_minutes,
+                    working_hours_start, working_hours_end, expected_minutes,
+                    grace_period_minutes, overtime_enabled, fine_enabled
+             FROM staff_salaries
+             WHERE branch_id = ?
+               AND username = ?
+               AND is_active = '1'
+               AND is_deleted = '0'
+               AND effective_from <= ?
+               AND (effective_to IS NULL OR effective_to >= ?)
+             ORDER BY effective_from DESC
+             LIMIT 1`,
+            [branch_id, username, date, date]
+        );
+        return rows[0] || null;
+    } catch (error) {
+        const code = error?.code || error?.errno;
+        if (code === "ER_NO_SUCH_TABLE" || code === 1146) return null;
+        throw error;
+    }
 }
 
 function formatBreakRow(row) {
@@ -658,6 +811,7 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
         const openBreakByUser = new Map();
         const breakCountByUser = new Map();
         const breaksByUser = new Map();
+        const activeSalaryByUser = new Map();
 
         if (usernames.length > 0) {
             const placeholders = usernames.map(() => "?").join(",");
@@ -690,6 +844,72 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
                 breakCountByUser.set(key, (breakCountByUser.get(key) || 0) + 1);
                 if (!row.end_time && !openBreakByUser.has(key)) {
                     openBreakByUser.set(key, row);
+                }
+            }
+
+            try {
+                const [salaryRows] = await pool.query(
+                    `SELECT
+                        username,
+                        salary_id,
+                        salary_type,
+                        amount,
+                        monthly_working_minutes,
+                        working_hours_start,
+                        working_hours_end,
+                        expected_minutes,
+                        grace_period_minutes,
+                        overtime_enabled,
+                        fine_enabled
+                     FROM staff_salaries
+                     WHERE branch_id = ?
+                       AND username IN (${placeholders})
+                       AND is_active = '1'
+                       AND is_deleted = '0'
+                       AND effective_from <= ?
+                       AND (effective_to IS NULL OR effective_to >= ?)
+                     ORDER BY effective_from DESC`,
+                    [branch_id, ...usernames, date, date]
+                );
+                for (const row of salaryRows) {
+                    const key = String(row.username);
+                    if (activeSalaryByUser.has(key)) continue;
+                    const monthlyMins =
+                        row.monthly_working_minutes != null
+                            ? Number(row.monthly_working_minutes)
+                            : null;
+                    const expectedMins =
+                        row.expected_minutes != null ? Number(row.expected_minutes) : null;
+                    activeSalaryByUser.set(key, {
+                        salary_id: row.salary_id,
+                        salary_type: row.salary_type || "fixed",
+                        amount: row.amount != null ? Number(row.amount) : null,
+                        monthly_working_minutes: monthlyMins,
+                        monthly_working_hours:
+                            monthlyMins != null ? monthlyMins / 60 : null,
+                        working_hours_start: row.working_hours_start || null,
+                        working_hours_end: row.working_hours_end || null,
+                        expected_minutes: expectedMins,
+                        expected_hours:
+                            expectedMins != null ? expectedMins / 60 : null,
+                        grace_period_minutes:
+                            row.grace_period_minutes != null
+                                ? Number(row.grace_period_minutes)
+                                : null,
+                        overtime_enabled:
+                            row.overtime_enabled === "1" ||
+                            row.overtime_enabled === 1 ||
+                            row.overtime_enabled === true,
+                        fine_enabled:
+                            row.fine_enabled === "1" ||
+                            row.fine_enabled === 1 ||
+                            row.fine_enabled === true,
+                    });
+                }
+            } catch (salaryError) {
+                const code = salaryError?.code || salaryError?.errno;
+                if (code !== "ER_NO_SUCH_TABLE" && code !== 1146) {
+                    throw salaryError;
                 }
             }
         }
@@ -739,6 +959,7 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
                 open_break: formatBreakRow(openBreak),
                 break_count: breakCountByUser.get(key) || 0,
                 breaks: breaksByUser.get(key) || [],
+                active_salary: activeSalaryByUser.get(key) || null,
             };
         });
 
@@ -1234,8 +1455,8 @@ router.post("/manage/approve", auth, validateBranch, async (req, res) => {
 
 /**
  * Bulk approve: set is_approved = 1 only when punch in AND punch out exist for the date.
- * Skips missing records, incomplete punches, open breaks, and non-staff usernames.
- * Body: { usernames: string[], date?: "YYYY-MM-DD" }
+ * Optional apply_overtime / apply_fine: compute and store OT/fine when salary has expected_hours.
+ * Body: { usernames: string[], date?: "YYYY-MM-DD", apply_overtime?: boolean, apply_fine?: boolean }
  */
 router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
     const connection = await pool.getConnection();
@@ -1249,8 +1470,8 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
         const rawList = Array.isArray(req.body?.usernames)
             ? req.body.usernames
             : Array.isArray(req.body?.username)
-              ? req.body.username
-              : [];
+                ? req.body.username
+                : [];
         const usernames = [
             ...new Set(
                 rawList
@@ -1267,6 +1488,8 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
 
         const date = normalizeManageDate(req.body?.date);
         const now = getAttendanceNowString();
+        const applyOvertime = parseBoolFlag(req.body?.apply_overtime);
+        const applyFine = parseBoolFlag(req.body?.apply_fine);
 
         let done = 0;
         let not_done = 0;
@@ -1308,14 +1531,64 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
                 continue;
             }
 
+            const salary = await getActiveSalaryForDate(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            });
+            const salaryOtAllowed =
+                salary?.overtime_enabled === "1" ||
+                salary?.overtime_enabled === 1 ||
+                salary?.overtime_enabled === true;
+            const salaryFineAllowed =
+                salary?.fine_enabled === "1" ||
+                salary?.fine_enabled === 1 ||
+                salary?.fine_enabled === true;
+            const wage = computePresentWageBreakdown({
+                inTime: existing.in_time,
+                outTime: existing.out_time,
+                date,
+                monthlyAmount: salary?.amount,
+                expectedMinutes: salary?.expected_minutes,
+                expectedHours: salary?.expected_hours,
+                overtimeEnabled: applyOvertime && salaryOtAllowed,
+                fineEnabled: applyFine && salaryFineAllowed,
+                statusMultiplier: 1,
+            });
+
             await connection.query(
                 `UPDATE attendance
                  SET is_approved = 1,
                      approved_by = ?,
                      modify_by = ?,
-                     modify_date = ?
+                     modify_date = ?,
+                     expected_hours = ?,
+                     worked_minutes = ?,
+                     extra_minutes = ?,
+                     less_minutes = ?,
+                     overtime_enabled = ?,
+                     fine_enabled = ?,
+                     daily_wage = ?,
+                     overtime_amount = ?,
+                     fine_amount = ?,
+                     net_day_amount = ?
                  WHERE id = ?`,
-                [actor, actor, now, existing.id]
+                [
+                    actor,
+                    actor,
+                    now,
+                    wage.expected_hours,
+                    wage.worked_minutes,
+                    wage.extra_minutes,
+                    wage.less_minutes,
+                    wage.overtime_enabled,
+                    wage.fine_enabled,
+                    wage.daily_wage,
+                    wage.overtime_amount,
+                    wage.fine_amount,
+                    wage.net_day_amount,
+                    existing.id,
+                ]
             );
             done += 1;
             done_usernames.push(targetUsername);
@@ -1332,6 +1605,8 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
                 not_done,
                 done_usernames,
                 skipped_usernames,
+                apply_overtime: applyOvertime,
+                apply_fine: applyFine,
             },
         });
     } catch (error) {
@@ -1349,7 +1624,7 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
 /**
  * Manage-page mark: Absent | Present | Half Day | Leave.
  * Always sets is_approved = 1. Times are MySQL TIME only.
- * Present may include in_time / out_time; other statuses clear times.
+ * Present may include in_time / out_time + optional overtime_enabled / fine_enabled.
  */
 router.post("/manage/mark", auth, validateBranch, async (req, res) => {
     const connection = await pool.getConnection();
@@ -1381,6 +1656,7 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
         const now = getAttendanceNowString();
         let inTime = null;
         let outTime = null;
+        let wage = clearWageColumns();
 
         if (markStatus === "present") {
             inTime = normalizeTimeValue(req.body?.in_time);
@@ -1403,6 +1679,66 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
                     message: "Out time must be after in time",
                 });
             }
+
+            const salary = await getActiveSalaryForDate(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            });
+            const salaryOtAllowed =
+                salary?.overtime_enabled === "1" ||
+                salary?.overtime_enabled === 1 ||
+                salary?.overtime_enabled === true;
+            const salaryFineAllowed =
+                salary?.fine_enabled === "1" ||
+                salary?.fine_enabled === 1 ||
+                salary?.fine_enabled === true;
+            wage = computePresentWageBreakdown({
+                inTime,
+                outTime,
+                date,
+                monthlyAmount: salary?.amount,
+                expectedMinutes: salary?.expected_minutes,
+                expectedHours: salary?.expected_hours,
+                overtimeEnabled:
+                    parseBoolFlag(req.body?.overtime_enabled) && salaryOtAllowed,
+                fineEnabled:
+                    parseBoolFlag(req.body?.fine_enabled) && salaryFineAllowed,
+                statusMultiplier: 1,
+            });
+        } else if (markStatus === "half day") {
+            const salary = await getActiveSalaryForDate(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            });
+            const amount = Number(salary?.amount);
+            const days = daysInMonthFromDate(date);
+            if (Number.isFinite(amount) && amount > 0 && days) {
+                const daily = amount / days / 2;
+                wage = {
+                    ...clearWageColumns(),
+                    daily_wage: Number(daily.toFixed(4)),
+                    net_day_amount: Number(daily.toFixed(4)),
+                };
+            }
+        } else if (markStatus === "leave") {
+            // Leave: full calendar-day wage (same base as present, no OT/fine)
+            const salary = await getActiveSalaryForDate(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            });
+            const amount = Number(salary?.amount);
+            const days = daysInMonthFromDate(date);
+            if (Number.isFinite(amount) && amount > 0 && days) {
+                const daily = amount / days;
+                wage = {
+                    ...clearWageColumns(),
+                    daily_wage: Number(daily.toFixed(4)),
+                    net_day_amount: Number(daily.toFixed(4)),
+                };
+            }
         }
 
         await connection.beginTransaction();
@@ -1424,9 +1760,37 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
                      is_approved = 1,
                      approved_by = ?,
                      modify_by = ?,
-                     modify_date = ?
+                     modify_date = ?,
+                     expected_hours = ?,
+                     worked_minutes = ?,
+                     extra_minutes = ?,
+                     less_minutes = ?,
+                     overtime_enabled = ?,
+                     fine_enabled = ?,
+                     daily_wage = ?,
+                     overtime_amount = ?,
+                     fine_amount = ?,
+                     net_day_amount = ?
                  WHERE id = ?`,
-                [markStatus, inTime, outTime, actor, actor, now, existing.id]
+                [
+                    markStatus,
+                    inTime,
+                    outTime,
+                    actor,
+                    actor,
+                    now,
+                    wage.expected_hours,
+                    wage.worked_minutes,
+                    wage.extra_minutes,
+                    wage.less_minutes,
+                    wage.overtime_enabled,
+                    wage.fine_enabled,
+                    wage.daily_wage,
+                    wage.overtime_amount,
+                    wage.fine_amount,
+                    wage.net_day_amount,
+                    existing.id,
+                ]
             );
         } else {
             const attendance_id = await UNIQUE_RANDOM_STRING("attendance", "attendance_id", {
@@ -1435,8 +1799,11 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
             });
             await connection.query(
                 `INSERT INTO attendance
-                 (branch_id, attendance_id, username, date, in_time, out_time, status, in_method, out_method, is_approved, approved_by, create_by, modify_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 'manual', 1, ?, ?, ?)`,
+                 (branch_id, attendance_id, username, date, in_time, out_time, status, in_method, out_method,
+                  is_approved, approved_by, create_by, modify_by,
+                  expected_hours, worked_minutes, extra_minutes, less_minutes,
+                  overtime_enabled, fine_enabled, daily_wage, overtime_amount, fine_amount, net_day_amount)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 'manual', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     attendance_id,
@@ -1448,6 +1815,16 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
                     actor,
                     actor,
                     actor,
+                    wage.expected_hours,
+                    wage.worked_minutes,
+                    wage.extra_minutes,
+                    wage.less_minutes,
+                    wage.overtime_enabled,
+                    wage.fine_enabled,
+                    wage.daily_wage,
+                    wage.overtime_amount,
+                    wage.fine_amount,
+                    wage.net_day_amount,
                 ]
             );
         }
@@ -1461,7 +1838,10 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Attendance marked successfully",
-            data,
+            data: {
+                ...(data || {}),
+                wage,
+            },
         });
     } catch (error) {
         await connection.rollback();

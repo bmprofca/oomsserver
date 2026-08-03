@@ -7,14 +7,14 @@
 
 ## Scope (phase 1)
 
-| In | Out |
-|----|-----|
-| Manual punch in / out | Manage attendance page |
-| Break start / end | Staff profile Attendance tab |
-| Today’s breaks list on status payload | GPS / IP / face / biometric methods |
-| Explicit `Asia/Kolkata` timestamps from Node | Admin approve / verify |
-| | Subscription feature gate |
-| | Salary calc wiring |
+| In                                           | Out                                 |
+| -------------------------------------------- | ----------------------------------- |
+| Manual punch in / out                        | Manage attendance page              |
+| Break start / end                            | Staff profile Attendance tab        |
+| Today’s breaks list on status payload        | GPS / IP / face / biometric methods |
+| Explicit `Asia/Kolkata` timestamps from Node | Admin approve / verify              |
+|                                              | Subscription feature gate           |
+|                                              | Salary calc wiring                  |
 
 Historical removal notes: [`attendance-removed.md`](./attendance-removed.md) (salary stayed on `/salary`).
 
@@ -26,26 +26,29 @@ Historical removal notes: [`attendance-removed.md`](./attendance-removed.md) (sa
 
 One row per `(branch_id, username, date)`.
 
-| Column | Notes |
-|--------|--------|
-| `attendance_id` | Public id |
-| `branch_id` / `username` / `date` | Day key (date from `ATTENDANCE_TIMEZONE`) |
-| `in_time` / `out_time` | MySQL **TIME** (`HH:mm:ss`) via `getAttendanceNowTimeString` — not DATETIME |
-| `status` | enum: `absent`, `present`, `leave`, `half day` (default `absent`; unused `idle` removed) |
-| `in_method` / `out_method` | Default `manual` |
-| `is_approved` | Manage mark always sets `1`; personal punch stays `0` until approved |
-| `create_by` / `modify_by` | Audit = acting username |
+| Column                                                                 | Notes                                                                                    |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `attendance_id`                                                        | Public id                                                                                |
+| `branch_id` / `username` / `date`                                      | Day key (date from `ATTENDANCE_TIMEZONE`)                                                |
+| `in_time` / `out_time`                                                 | MySQL **TIME** (`HH:mm:ss`) via `getAttendanceNowTimeString` — not DATETIME              |
+| `status`                                                               | enum: `absent`, `present`, `leave`, `half day` (default `absent`; unused `idle` removed) |
+| `in_method` / `out_method`                                             | Default `manual`                                                                         |
+| `is_approved`                                                          | Manage mark always sets `1`; personal punch stays `0` until approved                     |
+| `expected_hours` / `worked_minutes` / `extra_minutes` / `less_minutes` | Snapshot vs punch duration for OT/fine                                                   |
+| `overtime_enabled` / `fine_enabled`                                    | Whether OT/fine amounts were applied for the day                                         |
+| `daily_wage` / `overtime_amount` / `fine_amount` / `net_day_amount`    | Calendar-day rates (`monthly ÷ daysInMonth`; OT/fine = minutes/60 × daily/expected)      |
+| `create_by` / `modify_by`                                              | Audit = acting username                                                                  |
 
 ### `` `break` ``
 
 Multiple rows per staff/day. Link via **`branch_id` + `username` + `date`** (not `create_by`). Always backtick table name.
 
-| Column | Notes |
-|--------|--------|
-| `break_id` | Public id |
-| `username` | Staff who took the break |
+| Column                    | Notes                                           |
+| ------------------------- | ----------------------------------------------- |
+| `break_id`                | Public id                                       |
+| `username`                | Staff who took the break                        |
 | `start_time` / `end_time` | MySQL **TIME**. Open break = `end_time IS NULL` |
-| `create_by` / `modify_by` | Audit only |
+| `create_by` / `modify_by` | Audit only                                      |
 
 ---
 
@@ -79,21 +82,21 @@ Auth: `auth` + `validateBranch` + **staff-only** (`branch_mapping.type !== 'admi
 
 Branch **admins/owners** receive `403` — attendance is for staff mappings only.
 
-| Method | Path | Action |
-|--------|------|--------|
-| GET | `/day-list` | Day-wise staff list (`?date=&search=&page=&limit=`, default limit 100) |
-| POST | `/manage/mark` | Mark Absent/Present/Half Day/Leave — always `is_approved=1` + optional TIME in/out for present |
-| POST | `/manage/punch-in` | Legacy manage punch in |
-| POST | `/manage/punch-out` | Legacy manage punch out |
-| POST | `/manage/break/start` | Start break for staff |
-| POST | `/manage/break/end` | End open break for staff |
-| POST | `/manage/approve` | `{ username, date?, is_approved: 0\|1 }` |
-| POST | `/manage/bulk-approve` | `{ usernames: string[], date? }` — approve only rows with punch in + punch out; skip others |
-| GET | `/today-status` | Today state + attendance + `open_break` + `breaks[]` (staff punch modal) |
-| POST | `/punch-in` | Body optional `{ method }` (default `manual`) |
-| POST | `/punch-out` | Body optional `{ method }` |
-| POST | `/break/start` | Start break |
-| POST | `/break/end` | End open break |
+| Method | Path                   | Action                                                                                         |
+| ------ | ---------------------- | ---------------------------------------------------------------------------------------------- |
+| GET    | `/day-list`            | Day-wise staff list (`?date=&search=&page=&limit=`, default limit 100)                         |
+| POST   | `/manage/mark`         | Mark Absent/Present/Half Day/Leave — always `is_approved=1` + optional TIME in/out for present |
+| POST   | `/manage/punch-in`     | Legacy manage punch in                                                                         |
+| POST   | `/manage/punch-out`    | Legacy manage punch out                                                                        |
+| POST   | `/manage/break/start`  | Start break for staff                                                                          |
+| POST   | `/manage/break/end`    | End open break for staff                                                                       |
+| POST   | `/manage/approve`      | `{ username, date?, is_approved: 0\|1 }`                                                       |
+| POST   | `/manage/bulk-approve` | `{ usernames: string[], date? }` — approve only rows with punch in + punch out; skip others    |
+| GET    | `/today-status`        | Today state + attendance + `open_break` + `breaks[]` (staff punch modal)                       |
+| POST   | `/punch-in`            | Body optional `{ method }` (default `manual`)                                                  |
+| POST   | `/punch-out`           | Body optional `{ method }`                                                                     |
+| POST   | `/break/start`         | Start break                                                                                    |
+| POST   | `/break/end`           | End open break                                                                                 |
 
 ### Status / action payload (`data`)
 
@@ -124,23 +127,26 @@ Staff source: `branch_mapping` where `type='staff'`, `is_deleted='0'`, `status='
 - Includes `summary` (full filtered set), `is_approved`, `breaks[]`, `pagination` `{ page, limit, total, totalPages, is_last_page }`
 - Default `limit=100` (max 100)
 - Staff payload includes `mobile` + `country_code` for local display and raw `image` for client-side media-proxy resolution
+- Each staff row may include `active_salary` (`null` if none): `{ salary_id, salary_type, amount, monthly_working_minutes, working_hours_start, working_hours_end, expected_minutes, grace_period_minutes, overtime_enabled, fine_enabled }` (plus derived hours for display) from `staff_salaries` active for that `date` — used by mark modal to prefill punch times and show day wage
 
 ### Manage mark (`POST /manage/mark`)
 
-Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time?, out_time? }`
+Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time?, out_time?, overtime_enabled?, fine_enabled? }`
 
 - Upserts attendance for that staff/day
 - Always sets `is_approved = 1` and `approved_by`
 - `present` requires both `in_time` and `out_time` (TIME only)
-- Other statuses clear `in_time` / `out_time`
+- When active salary has `expected_minutes` **and** salary `overtime_enabled` / `fine_enabled`: compare worked vs expected; store OT/fine amounts only when those salary flags allow it (request apply flags are ANDed with salary settings)
+- Other statuses clear `in_time` / `out_time` and OT/fine fields; **half day** stores half wage; **leave** stores full day wage when salary exists; absent clears wage amounts
 
 ### Bulk approve (`POST /manage/bulk-approve`)
 
-Body: `{ usernames: string[], date?: "YYYY-MM-DD" }`
+Body: `{ usernames: string[], date?: "YYYY-MM-DD", apply_overtime?: boolean, apply_fine?: boolean }`
 
 - Sets `is_approved = 1` (+ `approved_by`) only when the attendance row has **both** `in_time` and `out_time` and no open break
+- If `apply_overtime` / `apply_fine` and staff has active salary with `expected_minutes`, computes and stores OT/fine columns when applicable
 - Skips missing staff, incomplete punches, open breaks
-- Response: `{ message, data: { date, done, not_done, done_usernames, skipped_usernames } }`
+- Response: `{ message, data: { date, done, not_done, done_usernames, skipped_usernames, apply_overtime, apply_fine } }`
 - Success message includes done / not_done counts
 
 ### Manage APIs (`/attendance/manage/*`)

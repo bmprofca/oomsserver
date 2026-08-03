@@ -986,6 +986,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 SELECT 1 FROM discount_entries de
                 WHERE de.branch_id = ee.branch_id AND de.transaction_id = ee.transaction_id
             )
+            AND NOT EXISTS (
+                SELECT 1 FROM payslip_entries pe
+                WHERE pe.branch_id = ee.branch_id AND pe.transaction_id = ee.transaction_id
+                  AND pe.is_deleted = '0'
+            )
             AND (ee.expense_date >= ? AND ee.expense_date <= ?)
             ${itemFilterClause}
             ${typeFilterClause}

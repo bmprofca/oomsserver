@@ -18,6 +18,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`utils.md`](./utils.md) | Shared utility routes like `/utils/states-and-districts` |
 | [`wp_system.md`](./wp_system.md) | OOMS System WhatsApp channel: JSON templates, mappings, OneChatting send + header image URLs |
 | [`attendance.md`](./attendance.md) | Phase-1 punch/break APIs, `username` on `break`, IST timestamps (not MySQL `NOW()`), `breaks[]` |
+| [`salary.md`](./salary.md) | `staff_salaries` (merged), fixed/flexible, one active, set-salary / history |
 | [`attendance-removed.md`](./attendance-removed.md) | Legacy notes from attendance removal / pre-rebuild (salary kept on `/salary`) |
 | [`invoice.md`](./invoice.md) | `POST /invoice/generate`, allowed types, PDFKit, list `downloadable`, no Puppeteer |
 
@@ -37,4 +38,5 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | — | `CLIENT/context/layout.md` (shell width; client-only) |
 | — | `CLIENT/context/settings-branch.md` (Branch Settings UI + GST Config tab) |
 | `attendance.md` | `CLIENT/context/attendance.md` |
+| `salary.md` | `CLIENT/context/salary.md` |
 | `invoice.md` | `CLIENT/context/invoice.md`, `CLIENT/context/ledger-tab.md` |
