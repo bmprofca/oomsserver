@@ -36,6 +36,25 @@ async function insertRow(tableName, data) {
 }
 
 function parseDateOnly(value) {
+    if (value == null || value === '') {
+        const invalid = new Date(NaN);
+        return invalid;
+    }
+    // YYYY-MM-DD (and datetime prefixes) — parse as local calendar date (avoid UTC shift)
+    if (typeof value === 'string') {
+        const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) {
+            const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            d.setHours(0, 0, 0, 0);
+            return d;
+        }
+    }
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        // mysql2 DATE often arrives as UTC midnight of that calendar day
+        const d = new Date(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+        d.setHours(0, 0, 0, 0);
+        return d;
+    }
     const d = new Date(value);
     d.setHours(0, 0, 0, 0);
     return d;
@@ -143,8 +162,8 @@ async function validateSalaryAssignment({
         );
         // Active rows are deactivated on insert; warn only if multiple already exist
         if (activeRows.length > 1) {
-            return {
-                valid: false,
+        return {
+            valid: false,
                 message: 'Multiple active salaries found for this staff. Fix existing records before assigning a new one.',
             };
         }
@@ -240,52 +259,48 @@ async function getStaffProfile(username, branch_id) {
          WHERE p.username = ? AND bm.branch_id = ? AND bm.is_deleted = '0'`,
         [username, branch_id]
     );
-
+    
     return profile[0] || null;
 }
 
-// Helper function to calculate attendance status with grace period and respect settings
+// Helper: within grace → 0 billable; beyond grace → full variance (not variance − grace)
 function calculateAttendanceStatus(punchIn, punchOut, expectedHours = 8, gracePeriodMinutes = 10) {
     if (!punchIn) return { status: 'absent', extraMinutes: 0, lessMinutes: 0, totalMinutes: 0, gracePeriodApplied: 0 };
     if (!punchOut) return { status: 'pending', extraMinutes: 0, lessMinutes: 0, totalMinutes: 0, gracePeriodApplied: 0 };
-
+    
     const punchInTime = new Date(punchIn);
     const punchOutTime = new Date(punchOut);
     const totalMinutes = Math.round((punchOutTime - punchInTime) / (1000 * 60));
-
+    
     const expectedMinutes = expectedHours * 60;
     const diffMinutes = totalMinutes - expectedMinutes;
-
+    const grace = Math.max(0, Number(gracePeriodMinutes) || 0);
+    
     let status = 'pending';
     let extraMinutes = 0;
     let lessMinutes = 0;
     let gracePeriodApplied = 0;
-
-    // Apply grace period
-    if (Math.abs(diffMinutes) <= gracePeriodMinutes) {
+    
+    if (Math.abs(diffMinutes) <= grace) {
         status = 'present';
         gracePeriodApplied = Math.abs(diffMinutes);
-    } else if (diffMinutes > gracePeriodMinutes) {
-        // Overtime after grace period
+    } else if (diffMinutes > grace) {
         status = 'bonus';
-        extraMinutes = diffMinutes - gracePeriodMinutes;
-        gracePeriodApplied = gracePeriodMinutes;
+        extraMinutes = diffMinutes; // full extra after exceeding grace
+        gracePeriodApplied = grace;
     } else {
-        // Less time after grace period
         const lessTime = Math.abs(diffMinutes);
-        const lessTimeAfterGrace = lessTime - gracePeriodMinutes;
-
-        if (lessTimeAfterGrace <= 240) { // 4 hours
+        if (lessTime <= 240) {
             status = 'half_day';
-            lessMinutes = lessTimeAfterGrace;
-            gracePeriodApplied = gracePeriodMinutes;
+            lessMinutes = lessTime;
+            gracePeriodApplied = grace;
         } else {
             status = 'fine';
-            lessMinutes = lessTimeAfterGrace;
-            gracePeriodApplied = gracePeriodMinutes;
+            lessMinutes = lessTime;
+            gracePeriodApplied = grace;
         }
     }
-
+    
     return { status, extraMinutes, lessMinutes, totalMinutes, gracePeriodApplied };
 }
 
@@ -320,9 +335,9 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
     try {
         const admin_username = req.headers["username"];
         const branch_id = req.branch_id;
-        const {
-            username,
-            monthly_salary,
+        const { 
+            username, 
+            monthly_salary, 
             amount,
             salary_type = 'fixed',
             monthly_working_hours = null,
@@ -426,20 +441,20 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
             );
             if (Number(activeCount[0]?.cnt || 0) > 1) {
                 await connection.rollback();
-                return res.status(400).json({
-                    success: false,
+            return res.status(400).json({
+                success: false,
                     message: 'Only one salary can be active at a time. Multiple active records found — resolve them first.'
                 });
             }
 
             await connection.query(
                 `UPDATE staff_salaries
-                 SET is_active = '0',
+                 SET is_active = '0', 
                      effective_to = DATE_SUB(?, INTERVAL 1 DAY),
                      modify_by = ?,
                      modify_date = NOW()
-                 WHERE username = ? AND branch_id = ?
-                   AND is_active = '1' AND is_deleted = '0'`,
+                 WHERE username = ? AND branch_id = ? 
+                 AND is_active = '1' AND is_deleted = '0'`,
                 [effective_from, admin_username, username, branch_id]
             );
         }
@@ -448,7 +463,7 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
             prefix: "SAL",
             length: ID_LENGTH,
         });
-
+        
         await connection.query(
             `INSERT INTO staff_salaries (
                 salary_id, map_id, username, branch_id,
@@ -556,7 +571,7 @@ router.post('/admin/set-salary', auth, validateBranch, async (req, res) => {
 /**
  * ADMIN: Update an existing salary assignment (active or scheduled)
  * Body: assignment_id, salary_type, monthly_salary/amount, monthly_working_hours,
- *       effective_from (scheduled only / or today+), attendance settings
+ *       effective_from (may be past — regenerate payslips after changes), attendance settings
  */
 router.post('/admin/update-salary', auth, validateBranch, async (req, res) => {
     const connection = await pool.getConnection();
@@ -647,14 +662,8 @@ router.post('/admin/update-salary', auth, validateBranch, async (req, res) => {
             }
             const currentYmd = formatLocalYmd(currentEffective);
             const nextYmd = formatLocalYmd(nextDate);
-            // Allow keeping the existing effective date even if it is in the past (active rows).
-            // New dates must be today or future.
-            if (nextYmd !== currentYmd && nextDate < today) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Cannot set salary for past dates. Effective from must be today or a future date',
-                });
-            }
+            // Edit may keep or change effective_from, including past dates
+            // (staff can regenerate payslips after amount/settings changes).
             if (nextYmd !== currentYmd) {
                 const [dup] = await connection.query(
                     `SELECT salary_id FROM staff_salaries
@@ -877,7 +886,7 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
             const isFuture = effectiveDate > today;
             const isActiveInDb = s.is_active === '1' || s.is_active === 1;
             const isCurrentlyActive = effectiveDate <= today && !isExpired && isActiveInDb;
-
+            
             const monthlySalary = parseFloat(s.monthly_salary);
             const perDaySalary = monthlySalary / 30;
             const salaryType = s.salary_type || 'fixed';
@@ -904,7 +913,7 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
             const fineEnabled = isFlexible
                 ? false
                 : (s.fine_enabled === '1' || s.fine_enabled === 1 || s.fine_enabled === true);
-
+            
             const salaryData = {
                 id: s.id,
                 assignment_id: s.assignment_id,
@@ -918,7 +927,7 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
                 effective_from: s.effective_from,
                 effective_to: s.effective_to,
                 status: isCurrentlyActive ? 'active' : (isFuture ? 'scheduled' : 'expired'),
-
+                
                 working_hours: {
                     start: s.working_hours_start || '09:00:00',
                     end: s.working_hours_end || '18:00:00',
@@ -928,15 +937,15 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
                     monthly_working_hours: monthlyWorkingHours,
                     monthly_working_minutes: monthlyWorkingMinutes,
                 },
-
+                
                 overtime_settings: {
                     enabled: overtimeEnabled,
                 },
-
+                
                 fine_settings: {
                     enabled: fineEnabled,
                 },
-
+                
                 break_settings: {
                     allowed_break_minutes: parseInt(s.allowed_break_minutes, 10) || 30,
                 },
@@ -948,11 +957,11 @@ router.get('/admin/salary-history', auth, validateBranch, async (req, res) => {
                         : (perDaySalary / hoursForRate)).toFixed(2),
                     per_minute: perMinuteSalary.toFixed(4)
                 },
-
+                
                 staff_name: s.staff_name,
                 designation: s.designation
             };
-
+            
             if (isCurrentlyActive) {
                 activeSalary = salaryData;
             } else if (isFuture && !isExpired) {
@@ -1321,7 +1330,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
         const loggedInUser = req.headers["username"];
         const branch_id = req.branch_id;
         const staff_username = req.params.username;
-
+        
         const { month, year } = req.query;
         const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
         const targetYear = year ? parseInt(year) : new Date().getFullYear();
@@ -1342,7 +1351,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
 
         const isAdmin = await checkIfAdmin(loggedInUser, branch_id);
         const isSelf = loggedInUser === staff_username;
-
+        
         if (!isAdmin && !isSelf) {
             return res.status(403).json({
                 success: false,
@@ -1362,7 +1371,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
         const daysInMonth = new Date(targetYear, targetMonth, 0).getDate();
 
         const profile = await getStaffProfile(staff_username, branch_id);
-
+        
         if (!profile) {
             return res.status(404).json({
                 success: false,
@@ -1376,9 +1385,9 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
             `SELECT amount AS monthly_salary, salary_type, monthly_working_minutes,
                     effective_from, salary_id, salary_id AS assignment_id
              FROM staff_salaries
-             WHERE username = ? AND branch_id = ?
-               AND is_active = '1' AND is_deleted = '0'
-               AND effective_from <= ?
+             WHERE username = ? AND branch_id = ? 
+             AND is_active = '1' AND is_deleted = '0'
+             AND effective_from <= ?
              ORDER BY effective_from DESC LIMIT 1`,
             [staff_username, branch_id, endDate]
         );
@@ -1455,37 +1464,37 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
         const currentDay = today.getDate();
         const currentMonth = today.getMonth() + 1;
         const currentYear = today.getFullYear();
-
+        
         const isCurrentMonth = (targetYear === currentYear && targetMonth === currentMonth);
         const lastDayToCalculate = isCurrentMonth ? currentDay : daysInMonth;
 
         // Initialize counters
         let present = 0, absent = 0, halfDay = 0, paidLeave = 0, fine = 0, bonus = 0, pending = 0, weeklyOffDays = 0;
         let totalExtraMinutes = 0, totalLessMinutes = 0, totalCalculatedAmount = 0;
-
+        
         // NEW: Break & adjustment totals
         let totalBreakMinutes = 0, totalExcessBreakMinutes = 0, totalBreakPenalty = 0;
         let totalTravelAllowance = 0, totalOtherDeductions = 0, totalNetAdjustment = 0, totalFinalAmount = 0;
-
+        
         let tillDatePresent = 0, tillDateAbsent = 0, tillDateHalfDay = 0, tillDatePaidLeave = 0, tillDateFine = 0, tillDateBonus = 0, tillDatePending = 0, tillDateWeeklyOffDays = 0;
         let tillDateTotalExtraMinutes = 0, tillDateTotalLessMinutes = 0, tillDateTotalCalculatedAmount = 0;
-
+        
         const dayBreakdown = [];
 
         for (let day = 1; day <= daysInMonth; day++) {
             const dateStr = `${targetYear}-${targetMonth.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
             const dateObj = new Date(dateStr);
             const dayOfWeek = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-
+            
             const isWeeklyOff = weeklyOffDaySet.has(dayOfWeek);
             const isFutureDate = (targetYear > currentYear) || (targetYear === currentYear && targetMonth > currentMonth) || (targetYear === currentYear && targetMonth === currentMonth && day > currentDay);
             const isTillDate = day <= lastDayToCalculate && !isFutureDate;
-
+            
             const attendanceRecord = attendanceMap[day];
-
+            
             let status = '', calculatedDayAmount = 0, extraMinutes = 0, lessMinutes = 0, remarks = '', isVerified = false, punchIn = null, punchOut = null;
             let breakMinutes = 0, excessBreak = 0, breakPenalty = 0, travelAllowance = 0, otherDeduction = 0, netAdjustment = 0, finalAmount = 0;
-
+            
             if (isWeeklyOff) {
                 status = 'weekly_off';
                 calculatedDayAmount = 0;
@@ -1500,7 +1509,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                 isVerified = attendanceRecord.is_verified === '1';
                 punchIn = attendanceRecord.punch_in_time;
                 punchOut = attendanceRecord.punch_out_time;
-
+                
                 // NEW: Get break & adjustment values
                 breakMinutes = parseInt(attendanceRecord.total_break_minutes) || 0;
                 excessBreak = parseInt(attendanceRecord.excess_break_minutes) || 0;
@@ -1509,7 +1518,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                 otherDeduction = parseFloat(attendanceRecord.other_deduction_amount) || 0;
                 netAdjustment = parseFloat(attendanceRecord.net_adjustment_amount) || 0;
                 finalAmount = parseFloat(attendanceRecord.final_calculated_amount) || 0;
-
+                
                 // Update break & adjustment totals
                 totalBreakMinutes += breakMinutes;
                 totalExcessBreakMinutes += excessBreak;
@@ -1518,7 +1527,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                 totalOtherDeductions += otherDeduction;
                 totalNetAdjustment += netAdjustment;
                 totalFinalAmount += finalAmount;
-
+                
                 if (attendanceRecord.calculated_amount && attendanceRecord.calculated_amount > 0) {
                     calculatedDayAmount = parseFloat(attendanceRecord.calculated_amount);
                 } else {
@@ -1560,11 +1569,11 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                             if (isTillDate) tillDateAbsent++;
                     }
                 }
-
+                
                 totalCalculatedAmount += calculatedDayAmount;
                 totalExtraMinutes += extraMinutes;
                 totalLessMinutes += lessMinutes;
-
+                
                 if (isTillDate) {
                     tillDateTotalCalculatedAmount += calculatedDayAmount;
                     tillDateTotalExtraMinutes += extraMinutes;
@@ -1581,7 +1590,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                 absent++;
                 if (isTillDate) tillDateAbsent++;
             }
-
+            
             dayBreakdown.push({
                 day: day,
                 date: dateStr,
@@ -1619,20 +1628,20 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
         const totalWorkedDays = present + bonus + fine + halfDay + paidLeave;
         const totalWorkingDays = daysInMonth - weeklyOffDays;
         const totalEarned = totalCalculatedAmount;
-
+        
         const bonusAmount = totalExtraMinutes * perMinuteSalary;
         const fineAmount = totalLessMinutes * perMinuteSalary;
         const halfDayDeduction = (halfDay * perDaySalary * 0.5);
-
+        
         const tillDateTotalWorkedDays = tillDatePresent + tillDateBonus + tillDateFine + tillDateHalfDay + tillDatePaidLeave;
         const tillDateTotalWorkingDays = lastDayToCalculate - tillDateWeeklyOffDays;
         const tillDateTotalEarned = tillDateTotalCalculatedAmount;
-
+        
         const tillDateBonusAmount = tillDateTotalExtraMinutes * perMinuteSalary;
         const tillDateFineAmount = tillDateTotalLessMinutes * perMinuteSalary;
         const tillDateHalfDayDeduction = (tillDateHalfDay * perDaySalary * 0.5);
         const tillDateExpectedSalary = perDaySalary * tillDateTotalWorkingDays;
-
+        
         const formatMinutes = (minutes) => {
             const hours = Math.floor(minutes / 60);
             const mins = minutes % 60;
@@ -1643,10 +1652,10 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
         const totalMarkedDaysWithPending = totalMarkedDays + pending;
         const tillDateTotalMarkedDays = tillDatePresent + tillDateHalfDay + tillDateBonus + tillDateFine + tillDatePaidLeave;
         const tillDateTotalMarkedDaysWithPending = tillDateTotalMarkedDays + tillDatePending;
-
+        
         let salaryStatus = 'ready';
         let salaryMessage = 'Salary calculation completed';
-
+        
         if (pending > 0) {
             salaryStatus = 'pending_verification';
             salaryMessage = `Salary calculation pending: ${pending} day(s) require verification`;
@@ -1654,10 +1663,10 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
             salaryStatus = 'in_progress';
             salaryMessage = 'Current month salary calculation (subject to change until month end)';
         }
-
+        
         let tillDateSalaryStatus = 'calculated';
         let tillDateSalaryMessage = `Salary calculated for ${tillDateTotalWorkedDays} working days out of ${tillDateTotalWorkingDays} days till ${new Date(targetYear, targetMonth - 1, lastDayToCalculate).toLocaleDateString()}`;
-
+        
         if (tillDatePending > 0) {
             tillDateSalaryStatus = 'pending_verification';
             tillDateSalaryMessage = `Salary calculation pending: ${tillDatePending} day(s) require verification`;
@@ -1675,7 +1684,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                 is_active
              FROM staff_salaries
              WHERE username = ? AND branch_id = ? AND is_deleted = '0'
-               AND effective_from <= ?
+             AND effective_from <= ?
              ORDER BY effective_from DESC`,
             [staff_username, branch_id, endDate]
         );
@@ -1721,7 +1730,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                     salary_applied_from: salaryData.length > 0 ? salaryData[0].effective_from : null,
                     salary_history: salaryHistory
                 },
-
+                
                 // ============ NEW: BREAK & ADJUSTMENT SUMMARY ============
                 break_adjustment_summary: {
                     break_summary: {
@@ -1738,7 +1747,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                         total_final_amount: totalFinalAmount.toFixed(2)
                     }
                 },
-
+                
                 // FULL MONTH SUMMARY (existing)
                 monthly_summary: {
                     attendance_summary: {
@@ -1796,7 +1805,7 @@ router.get('/admin/salary-calculation/:username', auth, validateBranch, async (r
                         }
                     }
                 },
-
+                
                 // TILL DATE SUMMARY (existing)
                 till_date_summary: {
                     calculated_upto: {
@@ -2090,7 +2099,7 @@ router.get('/admin/adjustments', auth, validateBranch, async (req, res) => {
             net_adjustment: adjustments.filter(a => a.adjustment_type === 'allowance')
                 .reduce((sum, a) => sum + parseFloat(a.amount), 0) -
                 adjustments.filter(a => a.adjustment_type === 'deduction')
-                    .reduce((sum, a) => sum + parseFloat(a.amount), 0)
+                .reduce((sum, a) => sum + parseFloat(a.amount), 0)
         };
 
         const profile = await getStaffProfile(username, branch_id);
@@ -2617,7 +2626,7 @@ router.get("/payslip/list", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Payslip list error:", error);
         return res.status(500).json({
-            success: false,
+                success: false,
             message: "Failed to list payslips",
             error: error.message,
         });
@@ -2709,7 +2718,7 @@ router.post("/payslip/preview", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Payslip preview error:", error);
         return res.status(500).json({
-            success: false,
+                success: false,
             message: "Failed to preview payslip",
             error: error.message,
         });
@@ -3254,7 +3263,7 @@ router.get("/bonus-fine/list", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Bonus/fine list error:", error);
         return res.status(500).json({
-            success: false,
+                success: false,
             message: "Failed to list bonus/fine entries",
             error: error.message,
         });
@@ -3331,7 +3340,7 @@ router.post("/bonus-fine/create", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Bonus/fine create error:", error);
         return res.status(500).json({
-            success: false,
+                success: false,
             message: "Failed to create bonus/fine entry",
             error: error.message,
         });
@@ -3424,7 +3433,7 @@ router.post("/bonus-fine/update", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Bonus/fine update error:", error);
         return res.status(500).json({
-            success: false,
+                success: false,
             message: "Failed to update bonus/fine entry",
             error: error.message,
         });

@@ -81,4 +81,18 @@ export const TEMPLATELIST = [
             { key: "{{balance}}", label: "Current Balance" },
         ],
     },
+    {
+        name: "document sharing",
+        description: "Document sharing template",
+        available_variables: [
+            { key: "{{name}}", label: "Client name" },
+            { key: "{{mobile}}", label: "Client mobile number" },
+            { key: "{{email}}", label: "Client email" },
+            { key: "{{firm_name}}", label: "Firm name" },
+            { key: "{{document_name}}", label: "Document name" },
+            { key: "{{document_link}}", label: "Document share link" },
+            { key: "{{shared_by}}", label: "Shared by user's name" },
+            { key: "{{remark}}", label: "Document remark" },
+        ],
+    },
 ];

@@ -46,6 +46,8 @@ function normalizeNotificationType(typeRaw) {
         received: "received",
         "payment receive": "payment receive",
         "payment receipt": "payment_receipt",
+        "payment reminder": "payment reminder",
+        payment_reminder: "payment reminder",
         sale: "sale",
         "sale invoice": "sale_invoice",
         "sale reminder": "sale_reminder",
@@ -55,6 +57,9 @@ function normalizeNotificationType(typeRaw) {
         birthday: "birthday wish",
         "birthday reminder": "birthday wish",
         "birthday wish": "birthday wish",
+        "document sharing": "document sharing",
+        document_sharing: "document sharing",
+        "document share": "document sharing",
     };
 
     return aliases[compact] || compact;
@@ -80,6 +85,20 @@ function notificationTypeCandidates(notificationType) {
             "birthday_reminder",
             "birthday-wish",
             "birthday-reminder",
+        ].forEach((item) => candidates.add(item));
+    }
+
+    if (
+        primary === "document sharing" ||
+        primary === "document_sharing" ||
+        primary === "document share"
+    ) {
+        [
+            "document sharing",
+            "document_sharing",
+            "document-sharing",
+            "document share",
+            "document_share",
         ].forEach((item) => candidates.add(item));
     }
 

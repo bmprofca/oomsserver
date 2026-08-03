@@ -4,7 +4,7 @@ import { GET_BALANCE, USER_SNIPPED_DATA } from "./function.js";
 import { sendWhatsappWebMessage } from "./whatsappWeb.js";
 import { getTemplateBySystemName } from "../services/whatsappWebTemplateMappingService.js";
 import { sendOomsSystemTemplateMessage } from "../services/wpSystemWhatsappSendService.js";
-import { resolveComponentMedia } from "./onechattingTemplateMedia.js";
+import { resolveComponentMedia, walkMediaLinks } from "./onechattingTemplateMedia.js";
 
 const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
     .trim()
@@ -18,6 +18,7 @@ const PAYMENT_RECEIVE_TEMPLATE_NAME = "payment receive";
 const PAYMENT_TEMPLATE_NAME = "payment";
 const PAYMENT_REMINDER_TEMPLATE_NAME = "payment reminder";
 const BIRTHDAY_WISH_TEMPLATE_NAME = "birthday wish";
+const DOCUMENT_SHARING_TEMPLATE_NAME = "document sharing";
 const WHATSAPP_CHANNEL_ONECHATTING = "onechatting";
 const WHATSAPP_CHANNEL_OOMS_WEB = "ooms web";
 const WHATSAPP_CHANNEL_OOMS_SYSTEM = "ooms system";
@@ -419,6 +420,84 @@ async function buildPaymentVariables({
     };
 }
 
+/**
+ * Override HEADER media link(s) on a send-time component (e.g. ledger PDF URL).
+ * Prefer document header when documentLink is provided.
+ */
+function applyHeaderMediaOverride(component, media = {}) {
+    if (component == null) return component;
+    const next = JSON.parse(JSON.stringify(component));
+    const documentLink =
+        media.documentLink != null ? String(media.documentLink).trim() : "";
+    const documentFilename =
+        media.documentFilename != null
+            ? String(media.documentFilename).trim()
+            : "";
+    const imageLink =
+        media.imageLink != null ? String(media.imageLink).trim() : "";
+    const videoLink =
+        media.videoLink != null ? String(media.videoLink).trim() : "";
+
+    if (!documentLink && !imageLink && !videoLink) return next;
+
+    let touched = false;
+    walkMediaLinks(next, ({ mediaType, setLink }) => {
+        if (mediaType === "document" && documentLink) {
+            setLink(documentLink);
+            touched = true;
+        } else if (mediaType === "image" && imageLink) {
+            setLink(imageLink);
+            touched = true;
+        } else if (mediaType === "video" && videoLink) {
+            setLink(videoLink);
+            touched = true;
+        }
+    });
+
+    // Also set document.filename when present (WhatsApp shows the name).
+    if (documentLink && documentFilename) {
+        const list = Array.isArray(next) ? next : [next];
+        for (const part of list) {
+            if (!part || String(part.type || "").toLowerCase() !== "header") continue;
+            const parameters = Array.isArray(part.parameters) ? part.parameters : [];
+            for (const param of parameters) {
+                if (!param || String(param.type || "").toLowerCase() !== "document") {
+                    continue;
+                }
+                if (!param.document || typeof param.document !== "object") {
+                    param.document = { link: documentLink };
+                }
+                param.document.link = documentLink;
+                param.document.filename = documentFilename;
+                touched = true;
+            }
+        }
+    }
+
+    // If mapping had no media header but we have a document to attach, inject one.
+    if (!touched && documentLink) {
+        const headerPart = {
+            type: "header",
+            parameters: [
+                {
+                    type: "document",
+                    document: {
+                        link: documentLink,
+                        ...(documentFilename ? { filename: documentFilename } : {}),
+                    },
+                },
+            ],
+        };
+        if (Array.isArray(next)) {
+            next.unshift(headerPart);
+        } else {
+            return [headerPart, next];
+        }
+    }
+
+    return next;
+}
+
 async function sendOnechattingTemplateMessage({ token, number, template_id, component }) {
     try {
         await axios.post(
@@ -450,27 +529,43 @@ async function sendOnechattingByChannel({
     senderUsername,
     recipientNumber,
     variables,
+    headerMedia = null,
 }) {
     const mapping = await loadActiveTemplateMapping(branch_id, systemTemplateName);
-    if (!mapping?.onechatting_template_name) return;
+    if (!mapping?.onechatting_template_name) {
+        throw new Error(`OneChatting template mapping missing for '${systemTemplateName}'`);
+    }
 
     const storedComponent = parseStoredComponent(mapping.component);
-    if (!storedComponent) return;
+    if (!storedComponent) {
+        throw new Error(`OneChatting template component missing for '${systemTemplateName}'`);
+    }
 
     const branchDeveloperToken = await getBranchDeveloperToken(branch_id);
-    if (!branchDeveloperToken) return;
+    if (!branchDeveloperToken) {
+        throw new Error("OneChatting developer token is not configured");
+    }
 
     const template_id = await resolveOnechattingTemplateId(
         branchDeveloperToken,
         mapping.onechatting_template_name
     );
-    if (!template_id) return;
+    if (!template_id) {
+        throw new Error(
+            `OneChatting template '${mapping.onechatting_template_name}' was not found`
+        );
+    }
 
     const senderToken = await getUserOnechattingToken(senderUsername, branch_id);
-    if (!senderToken) return;
+    if (!senderToken) {
+        throw new Error("Your OneChatting user token is not enabled");
+    }
 
     const withVariables = replaceVariablesInValue(storedComponent, variables);
-    const component = await resolveComponentMedia(withVariables);
+    let component = await resolveComponentMedia(withVariables);
+    if (headerMedia) {
+        component = applyHeaderMediaOverride(component, headerMedia);
+    }
 
     await sendOnechattingTemplateMessage({
         token: senderToken,
@@ -508,6 +603,7 @@ async function sendWhatsappByChannel({
     senderUsername,
     recipientNumber,
     variables,
+    headerMedia = null,
 }) {
     const channel = await getBranchWhatsappChannel(branch_id);
     if (channel === WHATSAPP_CHANNEL_ONECHATTING) {
@@ -517,6 +613,7 @@ async function sendWhatsappByChannel({
             senderUsername,
             recipientNumber,
             variables,
+            headerMedia,
         });
         return;
     }
@@ -853,6 +950,105 @@ async function sendBirthdayWishWhatsapp({
     });
 }
 
+async function sendDocumentSharingWhatsapp({
+    branch_id,
+    username,
+    sent_by,
+    document_name,
+    document_link,
+    remark = "",
+    firm_name = "",
+    variables: extraVariables = {},
+}) {
+    if (!branch_id || !username) {
+        throw new Error("branch_id and username are required");
+    }
+    if (!document_link) {
+        throw new Error("document_link is required");
+    }
+
+    const clientData = await USER_SNIPPED_DATA(username);
+    const recipientNumber = formatWhatsappNumber(
+        clientData?.country_code,
+        clientData?.mobile
+    );
+    if (!recipientNumber) {
+        throw new Error("Client does not have a valid mobile number");
+    }
+
+    const channel = await getBranchWhatsappChannel(branch_id);
+    if (!channel || channel === "disabled") {
+        throw new Error("WhatsApp channel is disabled");
+    }
+    if (channel === WHATSAPP_CHANNEL_ONECHATTING) {
+        const mapping = await loadActiveTemplateMapping(
+            branch_id,
+            DOCUMENT_SHARING_TEMPLATE_NAME
+        );
+        if (!mapping?.onechatting_template_name || !parseStoredComponent(mapping.component)) {
+            throw new Error("Document sharing WhatsApp template is not configured");
+        }
+        if (!(await getBranchDeveloperToken(branch_id))) {
+            throw new Error("OneChatting developer token is not configured");
+        }
+        if (!(await getUserOnechattingToken(sent_by, branch_id))) {
+            throw new Error("Your OneChatting user token is not enabled");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
+        const template = await getTemplateBySystemName({
+            branch_id,
+            systemTemplateName: DOCUMENT_SHARING_TEMPLATE_NAME,
+        });
+        if (!template || template.status !== "active" || !template.content) {
+            throw new Error("Document sharing WhatsApp Web template is not configured");
+        }
+    } else if (channel === WHATSAPP_CHANNEL_OOMS_SYSTEM) {
+        const [rows] = await pool.query(
+            `SELECT map_id
+             FROM wp_system_template_mapping
+             WHERE branch_id = ? AND status = 1 AND LOWER(TRIM(type)) = ?
+             LIMIT 1`,
+            [branch_id, DOCUMENT_SHARING_TEMPLATE_NAME]
+        );
+        if (!rows[0]?.map_id) {
+            throw new Error("Document sharing OOMS WhatsApp template is not configured");
+        }
+    } else {
+        throw new Error("Unsupported WhatsApp channel");
+    }
+
+    const senderData = sent_by ? await USER_SNIPPED_DATA(sent_by) : null;
+    const variables = {
+        "{{name}}": clientData?.name != null ? String(clientData.name) : String(username),
+        "{{username}}": String(username),
+        "{{mobile}}": clientData?.mobile != null ? String(clientData.mobile) : "",
+        "{{email}}": clientData?.email != null ? String(clientData.email) : "",
+        "{{firm_name}}": firm_name != null ? String(firm_name) : "",
+        "{{document_name}}": document_name != null ? String(document_name) : "Document",
+        "{{document_link}}": String(document_link),
+        "{{shared_by}}":
+            senderData?.name != null ? String(senderData.name) : String(sent_by || ""),
+        "{{remark}}": remark != null ? String(remark) : "",
+        "{{current_date}}": formatDateOnly(new Date()),
+        ...pickBracedTemplateVariables(extraVariables),
+    };
+
+    await sendWhatsappByChannel({
+        branch_id,
+        systemTemplateName: DOCUMENT_SHARING_TEMPLATE_NAME,
+        senderUsername: sent_by,
+        recipientNumber,
+        variables,
+        headerMedia: {
+            documentLink: String(document_link),
+            documentFilename:
+                document_name != null && String(document_name).trim()
+                    ? String(document_name).trim()
+                    : "document.pdf",
+        },
+    });
+}
+
 function notifyPaymentReceiveWhatsapp(params) {
     void sendPaymentReceiveWhatsapp(params).catch((err) => {
         console.error("Payment receive WhatsApp failed:", err?.response?.data || err?.message || err);
@@ -876,6 +1072,7 @@ export {
     sendPaymentWhatsapp,
     sendPaymentReminderWhatsapp,
     sendBirthdayWishWhatsapp,
+    sendDocumentSharingWhatsapp,
     replaceVariablesInValue,
     TASK_CREATE_TEMPLATE_NAME,
     TASK_COMPLETE_TEMPLATE_NAME,
@@ -883,4 +1080,5 @@ export {
     PAYMENT_TEMPLATE_NAME,
     PAYMENT_REMINDER_TEMPLATE_NAME,
     BIRTHDAY_WISH_TEMPLATE_NAME,
+    DOCUMENT_SHARING_TEMPLATE_NAME,
 };

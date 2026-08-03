@@ -9,12 +9,12 @@
 
 | In                                           | Out                                 |
 | -------------------------------------------- | ----------------------------------- |
-| Manual punch in / out                        | Manage attendance page              |
-| Break start / end                            | Staff profile Attendance tab        |
-| Today’s breaks list on status payload        | GPS / IP / face / biometric methods |
-| Explicit `Asia/Kolkata` timestamps from Node | Admin approve / verify              |
-|                                              | Subscription feature gate           |
-|                                              | Salary calc wiring                  |
+| Manual punch in / out                        | GPS / IP / face / biometric methods |
+| Break start / end                            | Subscription feature gate           |
+| Today’s breaks list on status payload        |                                     |
+| Explicit `Asia/Kolkata` timestamps from Node |                                     |
+| Manage day list + mark modal                 |                                     |
+| Staff profile monthly attendance calendar    |                                     |
 
 Historical removal notes: [`attendance-removed.md`](./attendance-removed.md) (salary stayed on `/salary`).
 
@@ -84,14 +84,15 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
 
 | Method | Path                   | Action                                                                                         |
 | ------ | ---------------------- | ---------------------------------------------------------------------------------------------- |
-| GET    | `/day-list`            | Day-wise staff list (`?date=&search=&page=&limit=`, default limit 100)                         |
+| GET    | `/day-list`            | Staff×day list (`?from_date=&to_date=` or `?date=`, `search`, `page`, `limit`; default today; max 186 days). Range adds one row per staff per day; response includes `from_date`, `to_date`, `is_range`, `break_total_minutes` |
+| GET    | `/staff-month`         | One staff month calendar (`?username=&year=&month=`) — profile Attendance tab                  |
 | POST   | `/manage/mark`         | Mark Absent/Present/Half Day/Leave — always `is_approved=1` + optional TIME in/out for present |
 | POST   | `/manage/punch-in`     | Legacy manage punch in                                                                         |
 | POST   | `/manage/punch-out`    | Legacy manage punch out                                                                        |
 | POST   | `/manage/break/start`  | Start break for staff                                                                          |
 | POST   | `/manage/break/end`    | End open break for staff                                                                       |
 | POST   | `/manage/approve`      | `{ username, date?, is_approved: 0\|1 }`                                                       |
-| POST   | `/manage/bulk-approve` | `{ usernames: string[], date? }` — approve only rows with punch in + punch out; skip others    |
+| POST   | `/manage/bulk-approve` | `{ items:[{username,date}] }` or `{ usernames, date }` or `{ select_all:true, from_date, to_date, search? }` — approve only rows with punch in + punch out; skip others |
 | GET    | `/today-status`        | Today state + attendance + `open_break` + `breaks[]` (staff punch modal)                       |
 | POST   | `/punch-in`            | Body optional `{ method }` (default `manual`)                                                  |
 | POST   | `/punch-out`           | Body optional `{ method }`                                                                     |
@@ -121,10 +122,13 @@ Branch **admins/owners** receive `403` — attendance is for staff mappings only
 
 Staff source: `branch_mapping` where `type='staff'`, `is_deleted='0'`, `status='1'`, `is_accepted='1'`, joined `profile` + active `users`.
 
-- No attendance row for `date` → `state: "not_marked"` (counts in `summary.absent`; treated as absent)
+- Query: `from_date` / `to_date` (or legacy `date`); default today; max **186** days
+- Returns one row per staff × day (ordered by date, then staff name)
+- Response meta: `from_date`, `to_date`, `is_range`, plus `date` (= from_date for compatibility)
+- No attendance row for day → `state: "not_marked"` (counts in `summary.absent`; treated as absent)
 - Explicit `status = 'absent'` → `state: "absent"`
 - Else state from punch/break / leave / half day: `punched_in` | `on_break` | `punched_out` | `present` | `leave` | `half_day`
-- Includes `summary` (full filtered set), `is_approved`, `breaks[]`, `pagination` `{ page, limit, total, totalPages, is_last_page }`
+- Includes `summary` (full filtered set), `is_approved`, `breaks[]`, `break_count`, `break_total_minutes` (closed breaks only), `pagination` `{ page, limit, total, totalPages, is_last_page }`
 - Default `limit=100` (max 100)
 - Staff payload includes `mobile` + `country_code` for local display and raw `image` for client-side media-proxy resolution
 - Each staff row may include `active_salary` (`null` if none): `{ salary_id, salary_type, amount, monthly_working_minutes, working_hours_start, working_hours_end, expected_minutes, grace_period_minutes, overtime_enabled, fine_enabled }` (plus derived hours for display) from `staff_salaries` active for that `date` — used by mark modal to prefill punch times and show day wage
@@ -137,16 +141,21 @@ Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time
 - Always sets `is_approved = 1` and `approved_by`
 - `present` requires both `in_time` and `out_time` (TIME only)
 - When active salary has `expected_minutes` **and** salary `overtime_enabled` / `fine_enabled`: compare worked vs expected; store OT/fine amounts only when those salary flags allow it (request apply flags are ANDed with salary settings)
+- **Grace** (`grace_period_minutes`): if extra/less minutes are **≤ grace**, billable OT/fine minutes are **0**. If they **exceed** grace, the **full** extra/less minutes count (not variance − grace). Example: expected 8h, grace 15m → work 8h15 = no OT; work 8h16 = 16m OT
 - Other statuses clear `in_time` / `out_time` and OT/fine fields; **half day** stores half wage; **leave** stores full day wage when salary exists; absent clears wage amounts
 
 ### Bulk approve (`POST /manage/bulk-approve`)
 
-Body: `{ usernames: string[], date?: "YYYY-MM-DD", apply_overtime?: boolean, apply_fine?: boolean }`
+Body (any one shape):
+
+- `{ usernames: string[], date?: "YYYY-MM-DD", apply_overtime?, apply_fine? }`
+- `{ items: [{ username, date }], apply_overtime?, apply_fine? }`
+- `{ select_all: true, from_date?, to_date?, date?, search?, apply_overtime?, apply_fine? }` — server resolves full staff×day set matching day-list filters (no client ID fan-out)
 
 - Sets `is_approved = 1` (+ `approved_by`) only when the attendance row has **both** `in_time` and `out_time` and no open break
 - If `apply_overtime` / `apply_fine` and staff has active salary with `expected_minutes`, computes and stores OT/fine columns when applicable
 - Skips missing staff, incomplete punches, open breaks
-- Response: `{ message, data: { date, done, not_done, done_usernames, skipped_usernames, apply_overtime, apply_fine } }`
+- Response: `{ message, data: { from_date, to_date, select_all, done, not_done, done_items, skipped_items, … } }`
 - Success message includes done / not_done counts
 
 ### Manage APIs (`/attendance/manage/*`)

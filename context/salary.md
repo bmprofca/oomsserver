@@ -20,6 +20,8 @@ Identity (`salary_id`, `map_id`, `username`, `branch_id`), `salary_type`, `amoun
 - Duration fields: prefer `*_minutes` in request body; legacy `*_hours` are still accepted and converted on write.
 - Multiple rows per staff allowed; **only one** `is_active = '1'` per staff + branch.
 - All fields editable; soft-delete via `is_deleted`.
+- **Create** (`/admin/set-salary`): `effective_from` must be today or a future date.
+- **Update** (`/admin/update-salary`): may edit amount/settings and keep or change `effective_from` even if it is in the past (regenerate payslips afterward if needed). Expired rows (`effective_to` before today) stay non-editable.
 
 ## Payslip / monthly ledger post
 

@@ -216,9 +216,22 @@ function parseBoolFlag(value) {
 }
 
 /**
+ * Grace threshold: variance within grace → 0 billable minutes.
+ * Variance beyond grace → full variance counts (not variance − grace).
+ * e.g. expected 8h, grace 15m: 8h15 → 0 OT; 8h16 → 16m OT.
+ */
+function applyGraceThreshold(varianceMinutes, gracePeriodMinutes) {
+    const raw = Math.max(0, Number(varianceMinutes) || 0);
+    const grace = Math.max(0, Number(gracePeriodMinutes) || 0);
+    if (raw <= grace) return 0;
+    return raw;
+}
+
+/**
  * Day wage + optional OT / fine from worked vs expected minutes.
  * daily = monthly / daysInMonth; perMinute = daily / expectedMinutes.
  * expectedHours (legacy) still accepted and converted to minutes.
+ * Grace: OT/fine only when extra/less exceeds grace_period_minutes; then full minutes count.
  */
 function computePresentWageBreakdown({
     inTime,
@@ -227,6 +240,7 @@ function computePresentWageBreakdown({
     monthlyAmount,
     expectedMinutes: expectedMinutesInput,
     expectedHours,
+    gracePeriodMinutes = 0,
     overtimeEnabled = false,
     fineEnabled = false,
     statusMultiplier = 1,
@@ -277,8 +291,10 @@ function computePresentWageBreakdown({
         };
     }
 
-    const extraMinutes = Math.max(0, workedMinutes - expectedMinutes);
-    const lessMinutes = Math.max(0, expectedMinutes - workedMinutes);
+    const rawExtra = Math.max(0, workedMinutes - expectedMinutes);
+    const rawLess = Math.max(0, expectedMinutes - workedMinutes);
+    const extraMinutes = applyGraceThreshold(rawExtra, gracePeriodMinutes);
+    const lessMinutes = applyGraceThreshold(rawLess, gracePeriodMinutes);
     const perMinute = dailyWage / expectedMinutes;
     const applyOt = Boolean(overtimeEnabled) && extraMinutes > 0;
     const applyFine = Boolean(fineEnabled) && lessMinutes > 0;
@@ -351,6 +367,81 @@ function formatBreakRow(row) {
         end_time: normalizeTimeValue(row.end_time),
         create_by: row.create_by,
     };
+}
+
+/** Closed breaks only — open breaks excluded from total duration. */
+function computeBreakTotalMinutes(breakRows) {
+    let total = 0;
+    if (!Array.isArray(breakRows)) return 0;
+    for (const row of breakRows) {
+        const start = timeStringToMinutes(row.start_time);
+        const end = timeStringToMinutes(row.end_time);
+        if (start == null || end == null || end < start) continue;
+        total += end - start;
+    }
+    return total;
+}
+
+function isValidYmd(value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+}
+
+function shiftYmd(dateStr, days) {
+    const [y, m, d] = String(dateStr).split("-").map(Number);
+    if (!y || !m || !d) return getAttendanceDateString();
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    const yy = dt.getUTCFullYear();
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getUTCDate()).padStart(2, "0");
+    return `${yy}-${mm}-${dd}`;
+}
+
+function enumerateYmdRange(fromDate, toDate) {
+    const dates = [];
+    if (!isValidYmd(fromDate) || !isValidYmd(toDate)) return dates;
+    let cur = fromDate <= toDate ? fromDate : toDate;
+    const end = fromDate <= toDate ? toDate : fromDate;
+    let guard = 0;
+    while (cur <= end && guard < 400) {
+        dates.push(cur);
+        cur = shiftYmd(cur, 1);
+        guard += 1;
+    }
+    return dates;
+}
+
+function resolveDayListDateRange(query) {
+    const today = getAttendanceDateString();
+    let from =
+        String(query?.from_date || query?.start_date || "").trim() ||
+        String(query?.date || "").trim();
+    let to =
+        String(query?.to_date || query?.end_date || "").trim() ||
+        String(query?.date || "").trim();
+
+    if (!isValidYmd(from)) from = today;
+    if (!isValidYmd(to)) to = from;
+    if (from > to) {
+        const swap = from;
+        from = to;
+        to = swap;
+    }
+    if (from > today) from = today;
+    if (to > today) to = today;
+    if (from > to) from = to;
+
+    const dates = enumerateYmdRange(from, to);
+    const MAX_DAYS = 186;
+    if (dates.length > MAX_DAYS) {
+        return {
+            error: `Date range cannot exceed ${MAX_DAYS} days`,
+            from_date: from,
+            to_date: to,
+            dates: [],
+        };
+    }
+    return { from_date: from, to_date: to, dates, error: null };
 }
 
 async function getTodayAttendance(conn, { branch_id, username, date }) {
@@ -767,10 +858,12 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
         const page = Math.max(1, Number(req.query.page) || 1);
         const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 100));
 
-        let date = String(req.query.date || "").trim();
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            date = getAttendanceDateString();
+        const range = resolveDayListDateRange(req.query);
+        if (range.error) {
+            return res.status(400).json({ success: false, message: range.error });
         }
+        const { from_date, to_date, dates } = range;
+        const isRange = from_date !== to_date;
 
         let staffSql = `
             SELECT
@@ -807,43 +900,47 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
         const [staffRows] = await pool.query(staffSql, staffParams);
         const usernames = staffRows.map((row) => row.username);
 
-        const attendanceByUser = new Map();
-        const openBreakByUser = new Map();
-        const breakCountByUser = new Map();
-        const breaksByUser = new Map();
-        const activeSalaryByUser = new Map();
+        const attendanceByKey = new Map();
+        const openBreakByKey = new Map();
+        const breakCountByKey = new Map();
+        const breaksByKey = new Map();
+        const salaryRowsByUser = new Map();
 
-        if (usernames.length > 0) {
+        if (usernames.length > 0 && dates.length > 0) {
             const placeholders = usernames.map(() => "?").join(",");
 
             const [attendanceRows] = await pool.query(
                 `SELECT *
                  FROM attendance
                  WHERE branch_id = ?
-                   AND date = ?
+                   AND date >= ?
+                   AND date <= ?
                    AND username IN (${placeholders})`,
-                [branch_id, date, ...usernames]
+                [branch_id, from_date, to_date, ...usernames]
             );
             for (const row of attendanceRows) {
-                attendanceByUser.set(String(row.username), row);
+                const ymd = toYmdValue(row.date) || String(row.date).slice(0, 10);
+                attendanceByKey.set(`${row.username}::${ymd}`, row);
             }
 
             const [breakRows] = await pool.query(
-                `SELECT username, break_id, start_time, end_time
+                `SELECT username, break_id, start_time, end_time, date
                  FROM \`break\`
                  WHERE branch_id = ?
-                   AND date = ?
+                   AND date >= ?
+                   AND date <= ?
                    AND username IN (${placeholders})`,
-                [branch_id, date, ...usernames]
+                [branch_id, from_date, to_date, ...usernames]
             );
             for (const row of breakRows) {
-                const key = String(row.username);
-                const nextBreaks = breaksByUser.get(key) || [];
+                const ymd = toYmdValue(row.date) || String(row.date).slice(0, 10);
+                const key = `${row.username}::${ymd}`;
+                const nextBreaks = breaksByKey.get(key) || [];
                 nextBreaks.push(formatBreakRow(row));
-                breaksByUser.set(key, nextBreaks);
-                breakCountByUser.set(key, (breakCountByUser.get(key) || 0) + 1);
-                if (!row.end_time && !openBreakByUser.has(key)) {
-                    openBreakByUser.set(key, row);
+                breaksByKey.set(key, nextBreaks);
+                breakCountByKey.set(key, (breakCountByKey.get(key) || 0) + 1);
+                if (!row.end_time && !openBreakByKey.has(key)) {
+                    openBreakByKey.set(key, row);
                 }
             }
 
@@ -860,51 +957,23 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
                         expected_minutes,
                         grace_period_minutes,
                         overtime_enabled,
-                        fine_enabled
+                        fine_enabled,
+                        effective_from,
+                        effective_to
                      FROM staff_salaries
                      WHERE branch_id = ?
                        AND username IN (${placeholders})
-                       AND is_active = '1'
                        AND is_deleted = '0'
                        AND effective_from <= ?
                        AND (effective_to IS NULL OR effective_to >= ?)
                      ORDER BY effective_from DESC`,
-                    [branch_id, ...usernames, date, date]
+                    [branch_id, ...usernames, to_date, from_date]
                 );
                 for (const row of salaryRows) {
                     const key = String(row.username);
-                    if (activeSalaryByUser.has(key)) continue;
-                    const monthlyMins =
-                        row.monthly_working_minutes != null
-                            ? Number(row.monthly_working_minutes)
-                            : null;
-                    const expectedMins =
-                        row.expected_minutes != null ? Number(row.expected_minutes) : null;
-                    activeSalaryByUser.set(key, {
-                        salary_id: row.salary_id,
-                        salary_type: row.salary_type || "fixed",
-                        amount: row.amount != null ? Number(row.amount) : null,
-                        monthly_working_minutes: monthlyMins,
-                        monthly_working_hours:
-                            monthlyMins != null ? monthlyMins / 60 : null,
-                        working_hours_start: row.working_hours_start || null,
-                        working_hours_end: row.working_hours_end || null,
-                        expected_minutes: expectedMins,
-                        expected_hours:
-                            expectedMins != null ? expectedMins / 60 : null,
-                        grace_period_minutes:
-                            row.grace_period_minutes != null
-                                ? Number(row.grace_period_minutes)
-                                : null,
-                        overtime_enabled:
-                            row.overtime_enabled === "1" ||
-                            row.overtime_enabled === 1 ||
-                            row.overtime_enabled === true,
-                        fine_enabled:
-                            row.fine_enabled === "1" ||
-                            row.fine_enabled === 1 ||
-                            row.fine_enabled === true,
-                    });
+                    const list = salaryRowsByUser.get(key) || [];
+                    list.push(row);
+                    salaryRowsByUser.set(key, list);
                 }
             } catch (salaryError) {
                 const code = salaryError?.code || salaryError?.errno;
@@ -914,8 +983,20 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
             }
         }
 
+        const pickSalaryForDate = (username, ymd) => {
+            const list = salaryRowsByUser.get(String(username)) || [];
+            for (const s of list) {
+                const from = toYmdValue(s.effective_from);
+                const to = s.effective_to != null ? toYmdValue(s.effective_to) : null;
+                if (from && from <= ymd && (to == null || to >= ymd)) {
+                    return mapActiveSalaryRow(s);
+                }
+            }
+            return null;
+        };
+
         const summary = {
-            total: staffRows.length,
+            total: 0,
             present: 0,
             absent: 0,
             punched_in: 0,
@@ -926,54 +1007,66 @@ router.get("/day-list", auth, validateBranch, async (req, res) => {
             approved: 0,
         };
 
-        const allStaff = staffRows.map((row) => {
-            const key = String(row.username);
-            const attendance = attendanceByUser.get(key) || null;
-            const openBreak = openBreakByUser.get(key) || null;
-            const state = buildListState(attendance, openBreak);
-            const approved = Number(attendance?.is_approved) === 1;
+        const allRows = [];
+        for (const ymd of dates) {
+            for (const row of staffRows) {
+                const key = `${row.username}::${ymd}`;
+                const attendance = attendanceByKey.get(key) || null;
+                const openBreak = openBreakByKey.get(key) || null;
+                const dayBreaks = breaksByKey.get(key) || [];
+                const state = buildListState(attendance, openBreak);
+                const approved = Number(attendance?.is_approved) === 1;
+                const breakTotalMinutes = computeBreakTotalMinutes(dayBreaks);
 
-            if (state === "absent" || state === "not_marked") summary.absent += 1;
-            else if (state === "leave") summary.leave += 1;
-            else if (state === "half_day") summary.half_day += 1;
-            else {
-                summary.present += 1;
-                if (state === "punched_in" || state === "present") summary.punched_in += 1;
-                else if (state === "on_break") summary.on_break += 1;
-                else if (state === "punched_out") summary.punched_out += 1;
+                if (state === "absent" || state === "not_marked") summary.absent += 1;
+                else if (state === "leave") summary.leave += 1;
+                else if (state === "half_day") summary.half_day += 1;
+                else {
+                    summary.present += 1;
+                    if (state === "punched_in" || state === "present") summary.punched_in += 1;
+                    else if (state === "on_break") summary.on_break += 1;
+                    else if (state === "punched_out") summary.punched_out += 1;
+                }
+                if (approved) summary.approved += 1;
+
+                allRows.push({
+                    map_id: row.map_id,
+                    username: row.username,
+                    name: row.name || row.username,
+                    designation: row.designation || "",
+                    mobile: row.mobile || "",
+                    country_code: row.country_code || "",
+                    email: row.email || "",
+                    image: row.image || "",
+                    date: ymd,
+                    state,
+                    is_approved: approved,
+                    attendance: formatAttendanceRow(attendance),
+                    open_break: formatBreakRow(openBreak),
+                    break_count: breakCountByKey.get(key) || 0,
+                    break_total_minutes: breakTotalMinutes,
+                    breaks: dayBreaks,
+                    active_salary: pickSalaryForDate(row.username, ymd),
+                });
             }
-            if (approved) summary.approved += 1;
+        }
 
-            return {
-                map_id: row.map_id,
-                username: row.username,
-                name: row.name || row.username,
-                designation: row.designation || "",
-                mobile: row.mobile || "",
-                country_code: row.country_code || "",
-                email: row.email || "",
-                image: row.image || "",
-                state,
-                is_approved: approved,
-                attendance: formatAttendanceRow(attendance),
-                open_break: formatBreakRow(openBreak),
-                break_count: breakCountByUser.get(key) || 0,
-                breaks: breaksByUser.get(key) || [],
-                active_salary: activeSalaryByUser.get(key) || null,
-            };
-        });
+        summary.total = allRows.length;
 
-        const total = allStaff.length;
+        const total = allRows.length;
         const totalPages = Math.max(1, Math.ceil(total / limit) || 1);
         const safePage = Math.min(page, totalPages);
         const offset = (safePage - 1) * limit;
-        const staff = allStaff.slice(offset, offset + limit);
+        const staff = allRows.slice(offset, offset + limit);
 
         return res.status(200).json({
             success: true,
             message: "Attendance day list fetched successfully",
             data: {
-                date,
+                date: from_date,
+                from_date,
+                to_date,
+                is_range: isRange,
                 timezone: ATTENDANCE_TIMEZONE,
                 summary,
                 staff,
@@ -1012,6 +1105,267 @@ async function assertTargetStaffUser(branch_id, username) {
     );
     return Boolean(rows[0]);
 }
+
+function mapActiveSalaryRow(row) {
+    if (!row) return null;
+    const monthlyMins =
+        row.monthly_working_minutes != null ? Number(row.monthly_working_minutes) : null;
+    const expectedMins = row.expected_minutes != null ? Number(row.expected_minutes) : null;
+    return {
+        salary_id: row.salary_id,
+        salary_type: row.salary_type || "fixed",
+        amount: row.amount != null ? Number(row.amount) : null,
+        monthly_working_minutes: monthlyMins,
+        monthly_working_hours: monthlyMins != null ? monthlyMins / 60 : null,
+        working_hours_start: row.working_hours_start || null,
+        working_hours_end: row.working_hours_end || null,
+        expected_minutes: expectedMins,
+        expected_hours: expectedMins != null ? expectedMins / 60 : null,
+        grace_period_minutes:
+            row.grace_period_minutes != null ? Number(row.grace_period_minutes) : null,
+        overtime_enabled:
+            row.overtime_enabled === "1" ||
+            row.overtime_enabled === 1 ||
+            row.overtime_enabled === true,
+        fine_enabled:
+            row.fine_enabled === "1" ||
+            row.fine_enabled === 1 ||
+            row.fine_enabled === true,
+        effective_from: row.effective_from || null,
+        effective_to: row.effective_to || null,
+    };
+}
+
+function toYmdValue(value) {
+    if (value == null) return null;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        const y = value.getUTCFullYear();
+        const m = String(value.getUTCMonth() + 1).padStart(2, "0");
+        const d = String(value.getUTCDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
+    }
+    const s = String(value);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    return null;
+}
+
+/**
+ * Monthly attendance for one staff (profile calendar).
+ * Query: username, year, month
+ */
+router.get("/staff-month", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = String(req.query.username || "").trim();
+        const year = Number(req.query.year);
+        const month = Number(req.query.month);
+
+        if (!username) {
+            return res.status(400).json({ success: false, message: "username is required" });
+        }
+        if (!Number.isFinite(year) || year < 2000 || year > 2100) {
+            return res.status(400).json({ success: false, message: "Invalid year" });
+        }
+        if (!Number.isFinite(month) || month < 1 || month > 12) {
+            return res.status(400).json({ success: false, message: "Invalid month" });
+        }
+
+        const okStaff = await assertTargetStaffUser(branch_id, username);
+        if (!okStaff) {
+            return res.status(404).json({
+                success: false,
+                message: "Staff not found on this branch",
+            });
+        }
+
+        const [staffRows] = await pool.query(
+            `SELECT
+                bm.map_id,
+                bm.username,
+                bm.designation,
+                p.name,
+                p.mobile,
+                p.country_code,
+                p.email,
+                p.image
+             FROM branch_mapping bm
+             INNER JOIN profile p ON bm.username = p.username
+             WHERE bm.branch_id = ?
+               AND bm.username = ?
+               AND bm.type = 'staff'
+               AND bm.is_deleted = '0'
+             LIMIT 1`,
+            [branch_id, username]
+        );
+        const staffRow = staffRows[0];
+        if (!staffRow) {
+            return res.status(404).json({ success: false, message: "Staff profile not found" });
+        }
+
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
+        const endDate = `${year}-${String(month).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
+
+        const [attendanceRows] = await pool.query(
+            `SELECT *
+             FROM attendance
+             WHERE branch_id = ?
+               AND username = ?
+               AND date >= ?
+               AND date <= ?
+             ORDER BY date ASC`,
+            [branch_id, username, startDate, endDate]
+        );
+
+        const [breakRows] = await pool.query(
+            `SELECT username, break_id, start_time, end_time, date
+             FROM \`break\`
+             WHERE branch_id = ?
+               AND username = ?
+               AND date >= ?
+               AND date <= ?
+             ORDER BY date ASC, start_time ASC`,
+            [branch_id, username, startDate, endDate]
+        );
+
+        let salaryRows = [];
+        try {
+            const [rows] = await pool.query(
+                `SELECT
+                    salary_id,
+                    salary_type,
+                    amount,
+                    monthly_working_minutes,
+                    working_hours_start,
+                    working_hours_end,
+                    expected_minutes,
+                    grace_period_minutes,
+                    overtime_enabled,
+                    fine_enabled,
+                    effective_from,
+                    effective_to
+                 FROM staff_salaries
+                 WHERE branch_id = ?
+                   AND username = ?
+                   AND is_deleted = '0'
+                   AND effective_from <= ?
+                   AND (effective_to IS NULL OR effective_to >= ?)
+                 ORDER BY effective_from DESC`,
+                [branch_id, username, endDate, startDate]
+            );
+            salaryRows = rows;
+        } catch (salaryError) {
+            const code = salaryError?.code || salaryError?.errno;
+            if (code !== "ER_NO_SUCH_TABLE" && code !== 1146) throw salaryError;
+        }
+
+        const attendanceByDate = new Map();
+        for (const row of attendanceRows) {
+            const ymd = toYmdValue(row.date);
+            if (ymd) attendanceByDate.set(ymd, row);
+        }
+
+        const breaksByDate = new Map();
+        for (const row of breakRows) {
+            const ymd = toYmdValue(row.date);
+            if (!ymd) continue;
+            const list = breaksByDate.get(ymd) || [];
+            list.push(formatBreakRow(row));
+            breaksByDate.set(ymd, list);
+        }
+
+        const pickSalaryForDate = (ymd) => {
+            for (const s of salaryRows) {
+                const from = toYmdValue(s.effective_from);
+                const to = s.effective_to != null ? toYmdValue(s.effective_to) : null;
+                if (from && from <= ymd && (to == null || to >= ymd)) {
+                    return mapActiveSalaryRow(s);
+                }
+            }
+            return null;
+        };
+
+        const summary = {
+            present: 0,
+            absent: 0,
+            leave: 0,
+            half_day: 0,
+            not_marked: 0,
+            approved: 0,
+            marked: 0,
+        };
+
+        const days = [];
+        for (let day = 1; day <= daysInMonth; day += 1) {
+            const ymd = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            const attendance = attendanceByDate.get(ymd) || null;
+            const dayBreaks = breaksByDate.get(ymd) || [];
+            const openBreak = dayBreaks.find((b) => !b.end_time) || null;
+            const state = attendance
+                ? buildListState(attendance, openBreak)
+                : "not_marked";
+            const approved = Number(attendance?.is_approved) === 1;
+
+            if (state === "not_marked") summary.not_marked += 1;
+            else if (state === "absent") {
+                summary.absent += 1;
+                summary.marked += 1;
+            } else if (state === "leave") {
+                summary.leave += 1;
+                summary.marked += 1;
+            } else if (state === "half_day") {
+                summary.half_day += 1;
+                summary.marked += 1;
+            } else {
+                summary.present += 1;
+                summary.marked += 1;
+            }
+            if (approved) summary.approved += 1;
+
+            days.push({
+                date: ymd,
+                state,
+                is_approved: approved,
+                attendance: formatAttendanceRow(attendance),
+                breaks: dayBreaks,
+                break_count: dayBreaks.length,
+                open_break: openBreak,
+                active_salary: pickSalaryForDate(ymd),
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Staff month attendance fetched successfully",
+            data: {
+                year,
+                month,
+                start_date: startDate,
+                end_date: endDate,
+                timezone: ATTENDANCE_TIMEZONE,
+                staff: {
+                    map_id: staffRow.map_id,
+                    username: staffRow.username,
+                    name: staffRow.name || staffRow.username,
+                    designation: staffRow.designation || "",
+                    mobile: staffRow.mobile || "",
+                    country_code: staffRow.country_code || "",
+                    email: staffRow.email || "",
+                    image: staffRow.image || "",
+                },
+                summary,
+                days,
+            },
+        });
+    } catch (error) {
+        console.error("GET ATTENDANCE STAFF MONTH ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch staff month attendance",
+            error: error.message,
+        });
+    }
+});
 
 function normalizeManageDate(value) {
     const date = String(value || "").trim();
@@ -1456,7 +1810,10 @@ router.post("/manage/approve", auth, validateBranch, async (req, res) => {
 /**
  * Bulk approve: set is_approved = 1 only when punch in AND punch out exist for the date.
  * Optional apply_overtime / apply_fine: compute and store OT/fine when salary has expected_hours.
- * Body: { usernames: string[], date?: "YYYY-MM-DD", apply_overtime?: boolean, apply_fine?: boolean }
+ * Body:
+ *   { usernames: string[], date?: "YYYY-MM-DD", apply_overtime?, apply_fine? }
+ *   { items: [{ username, date }], apply_overtime?, apply_fine? }
+ *   { select_all: true, from_date?, to_date?, date?, search?, apply_overtime?, apply_fine? }
  */
 router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
     const connection = await pool.getConnection();
@@ -1467,42 +1824,107 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "Username is required" });
         }
 
-        const rawList = Array.isArray(req.body?.usernames)
-            ? req.body.usernames
-            : Array.isArray(req.body?.username)
-                ? req.body.username
-                : [];
-        const usernames = [
-            ...new Set(
-                rawList
-                    .map((u) => String(u || "").trim())
-                    .filter(Boolean)
-            ),
-        ];
-        if (usernames.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "At least one username is required",
-            });
-        }
-
-        const date = normalizeManageDate(req.body?.date);
-        const now = getAttendanceNowString();
         const applyOvertime = parseBoolFlag(req.body?.apply_overtime);
         const applyFine = parseBoolFlag(req.body?.apply_fine);
+        const selectAll = parseBoolFlag(req.body?.select_all);
+        const now = getAttendanceNowString();
+
+        /** @type {{ username: string, date: string }[]} */
+        let targets = [];
+
+        if (selectAll) {
+            const range = resolveDayListDateRange({
+                from_date: req.body?.from_date || req.body?.start_date,
+                to_date: req.body?.to_date || req.body?.end_date,
+                date: req.body?.date,
+            });
+            if (range.error) {
+                return res.status(400).json({ success: false, message: range.error });
+            }
+            const search = String(req.body?.search || "").trim();
+            let staffSql = `
+                SELECT bm.username
+                FROM branch_mapping bm
+                INNER JOIN profile p ON bm.username = p.username
+                INNER JOIN users u ON bm.username = u.username
+                WHERE bm.branch_id = ?
+                  AND bm.type = 'staff'
+                  AND bm.is_deleted = '0'
+                  AND bm.status = '1'
+                  AND bm.is_accepted = '1'
+                  AND u.status = '1'
+            `;
+            const staffParams = [branch_id];
+            if (search) {
+                staffSql += ` AND (p.name LIKE ? OR bm.username LIKE ? OR bm.designation LIKE ? OR p.mobile LIKE ?)`;
+                const pattern = `%${search}%`;
+                staffParams.push(pattern, pattern, pattern, pattern);
+            }
+            const [staffRows] = await connection.query(staffSql, staffParams);
+            for (const ymd of range.dates) {
+                for (const row of staffRows) {
+                    targets.push({ username: String(row.username), date: ymd });
+                }
+            }
+        } else {
+            const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+            if (rawItems.length > 0) {
+                const seen = new Set();
+                for (const item of rawItems) {
+                    const username = String(item?.username || "").trim();
+                    const date = isValidYmd(item?.date)
+                        ? String(item.date).trim()
+                        : normalizeManageDate(item?.date || req.body?.date);
+                    if (!username || !date) continue;
+                    const key = `${username}::${date}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    targets.push({ username, date });
+                }
+            } else {
+                const rawList = Array.isArray(req.body?.usernames)
+                    ? req.body.usernames
+                    : Array.isArray(req.body?.username)
+                        ? req.body.username
+                        : [];
+                const date = normalizeManageDate(req.body?.date);
+                const seen = new Set();
+                for (const u of rawList) {
+                    const username = String(u || "").trim();
+                    if (!username) continue;
+                    const key = `${username}::${date}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    targets.push({ username, date });
+                }
+            }
+        }
+
+        if (targets.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "At least one staff/day is required",
+            });
+        }
 
         let done = 0;
         let not_done = 0;
         const done_usernames = [];
         const skipped_usernames = [];
+        const done_items = [];
+        const skipped_items = [];
 
         await connection.beginTransaction();
 
-        for (const targetUsername of usernames) {
+        for (const target of targets) {
+            const targetUsername = target.username;
+            const date = target.date;
+
             const okStaff = await assertTargetStaffUser(branch_id, targetUsername);
             if (!okStaff) {
                 not_done += 1;
                 skipped_usernames.push(targetUsername);
+                skipped_items.push({ username: targetUsername, date });
                 continue;
             }
 
@@ -1516,6 +1938,7 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
             if (!existing || !hasPunchIn || !hasPunchOut) {
                 not_done += 1;
                 skipped_usernames.push(targetUsername);
+                skipped_items.push({ username: targetUsername, date });
                 continue;
             }
 
@@ -1528,6 +1951,7 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
             if (openBreak) {
                 not_done += 1;
                 skipped_usernames.push(targetUsername);
+                skipped_items.push({ username: targetUsername, date });
                 continue;
             }
 
@@ -1551,6 +1975,7 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
                 monthlyAmount: salary?.amount,
                 expectedMinutes: salary?.expected_minutes,
                 expectedHours: salary?.expected_hours,
+                gracePeriodMinutes: salary?.grace_period_minutes,
                 overtimeEnabled: applyOvertime && salaryOtAllowed,
                 fineEnabled: applyFine && salaryFineAllowed,
                 statusMultiplier: 1,
@@ -1592,19 +2017,31 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
             );
             done += 1;
             done_usernames.push(targetUsername);
+            done_items.push({ username: targetUsername, date });
         }
 
         await connection.commit();
+
+        const rangeMeta = resolveDayListDateRange({
+            from_date: req.body?.from_date || req.body?.start_date,
+            to_date: req.body?.to_date || req.body?.end_date,
+            date: req.body?.date,
+        });
 
         return res.status(200).json({
             success: true,
             message: `Approved ${done} staff. Skipped ${not_done} staff.`,
             data: {
-                date,
+                date: rangeMeta.from_date,
+                from_date: rangeMeta.from_date,
+                to_date: rangeMeta.to_date,
+                select_all: selectAll,
                 done,
                 not_done,
                 done_usernames,
                 skipped_usernames,
+                done_items,
+                skipped_items,
                 apply_overtime: applyOvertime,
                 apply_fine: applyFine,
             },
@@ -1653,6 +2090,17 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
         }
 
         const date = normalizeManageDate(req.body?.date);
+        const todayYmd = getAttendanceDateString();
+        if (
+            date > todayYmd &&
+            (markStatus === "present" || markStatus === "half day")
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Present and Half Day cannot be marked for future dates. Use Absent or Leave.",
+            });
+        }
         const now = getAttendanceNowString();
         let inTime = null;
         let outTime = null;
@@ -1700,6 +2148,7 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
                 monthlyAmount: salary?.amount,
                 expectedMinutes: salary?.expected_minutes,
                 expectedHours: salary?.expected_hours,
+                gracePeriodMinutes: salary?.grace_period_minutes,
                 overtimeEnabled:
                     parseBoolFlag(req.body?.overtime_enabled) && salaryOtAllowed,
                 fineEnabled:

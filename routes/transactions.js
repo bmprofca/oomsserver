@@ -12,8 +12,22 @@ import {
 import {
     notifyPaymentReceiveWhatsapp,
     notifyPaymentWhatsapp,
+    sendDocumentSharingWhatsapp,
+    DOCUMENT_SHARING_TEMPLATE_NAME,
 } from "../helpers/whatsappNotification.js";
 import { isSupportedGenerateType } from "../helpers/invoiceFormatMapping.js";
+import {
+    collectLedgerStatement,
+    generateLedgerPdfBuffer,
+} from "../helpers/ledgerReport.js";
+import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
+import {
+    getActivePaymentTemplate,
+    getActiveSmtpConfig,
+    renderTemplate,
+    sendEmail,
+} from "./payment_reminder.js";
+import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
 
@@ -2091,21 +2105,23 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
             to_date,
             party_type,
             party_id,
-            format = 'pdf'
+            format = "pdf",
         } = req.query || {};
 
-        // Validate required fields
         const requiredFields = [
-            { key: 'from_date', label: 'from_date' },
-            { key: 'to_date', label: 'to_date' },
-            { key: 'party_type', label: 'party_type' },
-            { key: 'party_id', label: 'party_id' }
+            { key: "from_date", label: "from_date" },
+            { key: "to_date", label: "to_date" },
+            { key: "party_type", label: "party_type" },
+            { key: "party_id", label: "party_id" },
         ];
 
         for (const field of requiredFields) {
             const value = req.query?.[field.key];
             if (!value || String(value).trim() === "") {
-                return res.status(400).json({ success: false, message: `${field.label} is required` });
+                return res.status(400).json({
+                    success: false,
+                    message: `${field.label} is required`,
+                });
             }
         }
 
@@ -2114,179 +2130,290 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
         const partyType = String(party_type).trim();
         const partyId = String(party_id).trim();
 
-        // Get party details for header
-        let partyDetails = {
-            name: partyId,
-            type: partyType === 'client' ? 'Client' : 'Bank',
-            id: partyId
-        };
+        const ledger = await collectLedgerStatement({
+            branch_id,
+            partyType,
+            partyId,
+            fromDate,
+            toDate,
+            getOppositePartySnippet,
+        });
 
-        if (partyType === "client") {
-            const [rows] = await pool.query(
-                `SELECT p.name, p.email, p.mobile, c.username
-                 FROM clients c
-                 LEFT JOIN profile p ON p.username = c.username AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username)
-                 WHERE c.username = ? AND c.branch_id = ? AND c.is_deleted = '0' LIMIT 1`,
-                [partyId, branch_id]
-            );
-            if (rows[0]) {
-                partyDetails = {
-                    name: rows[0].name || rows[0].username,
-                    email: rows[0].email,
-                    mobile: rows[0].mobile,
-                    type: "Client",
-                    id: rows[0].username
-                };
-            }
-        } else if (partyType === "bank") {
-            const [rows] = await pool.query(
-                "SELECT bank_id, account_no, holder, ifsc, bank, branch, type FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
-                [branch_id, partyId]
-            );
-            if (rows[0]) {
-                partyDetails = {
-                    name: rows[0].holder || rows[0].bank,
-                    account_no: rows[0].account_no,
-                    ifsc: rows[0].ifsc,
-                    bank: rows[0].bank,
-                    type: "Bank",
-                    id: rows[0].bank_id
-                };
-            }
-        }
+        const {
+            partyDetails,
+            openingDebit,
+            openingCredit,
+            openingBalance,
+            statementData,
+            summary,
+        } = ledger;
 
-        // Get opening balance - MATCHING /transaction/list LOGIC
-        const [[openingRow]] = await pool.query(
-            `SELECT
-                SUM(CASE
-                    WHEN \`party1_type\` = ? AND \`party1_id\` = ? AND \`party2_id\` IS NULL AND amount > 0 THEN ABS(amount)
-                    WHEN \`party2_type\` = ? AND \`party2_id\` = ? THEN ABS(amount)
-                    ELSE 0
-                END) AS debit,
-                SUM(CASE
-                    WHEN \`party1_type\` = ? AND \`party1_id\` = ? AND (\`party2_id\` IS NULL AND amount < 0 OR \`party2_id\` IS NOT NULL) THEN ABS(amount)
-                    ELSE 0
-                END) AS credit
-            FROM \`transactions\` WHERE \`branch_id\` = ? AND (\`party1_type\` = ? AND \`party1_id\` = ? OR \`party2_type\` = ? AND \`party2_id\` = ?) AND \`transaction_date\` < ?`,
-            [partyType, partyId, partyType, partyId, partyType, partyId, partyType, partyId, branch_id, partyType, partyId, partyType, partyId, fromDate]
-        );
-
-        const balanceBefore = (Number(openingRow?.debit ?? 0) || 0) - (Number(openingRow?.credit ?? 0) || 0);
-        const openingDebit = balanceBefore >= 0 ? balanceBefore : 0;
-        const openingCredit = balanceBefore < 0 ? Math.abs(balanceBefore) : 0;
-
-        // Get transactions - MATCHING /transaction/list LOGIC
-        const [transactions] = await pool.query(
-            `SELECT transaction_id, transaction_date, transaction_type, amount, 
-                    invoice_no, party1_type, party1_id, party2_type, party2_id, remark 
-             FROM \`transactions\` 
-             WHERE branch_id = ? 
-               AND (party1_type = ? AND party1_id = ? OR party2_type = ? AND party2_id = ?) 
-               AND transaction_date >= ? 
-               AND transaction_date <= ?
-             ORDER BY transaction_date ASC, id ASC`,
-            [branch_id, partyType, partyId, partyType, partyId, fromDate, toDate]
-        );
-
-        // Get opposite party snippets - MATCHING /transaction/list LOGIC
-        const oppositeKeys = new Set();
-        for (const row of transactions) {
-            const isParty2 = (row.party2_type === partyType && String(row.party2_id) === partyId);
-            const oppType = isParty2 ? row.party1_type : row.party2_type;
-            const oppId = isParty2 ? row.party1_id : row.party2_id;
-            if (oppType && oppId) oppositeKeys.add(`${oppType}|${oppId}`);
-        }
-
-        const oppositeCache = new Map();
-        await Promise.all([...oppositeKeys].map(async (key) => {
-            const [oppType, oppId] = key.split("|");
-            const snippet = await getOppositePartySnippet(branch_id, oppType, oppId);
-            oppositeCache.set(key, snippet);
-        }));
-
-        // Process transactions - MATCHING /transaction/list LOGIC
-        let runningBalance = balanceBefore;
-        const statementData = [];
-
-        for (const row of transactions) {
-            const amount = Math.abs(Number(row.amount) || 0);
-            const isParty1 = (row.party1_type === partyType && String(row.party1_id) === partyId);
-            const isParty2 = (row.party2_type === partyType && String(row.party2_id) === partyId);
-
-            let rowDebit = 0, rowCredit = 0;
-            if (row.party2_id == null) {
-                const amt = Number(row.amount) || 0;
-                if (amt > 0) rowDebit = amt;
-                else rowCredit = Math.abs(amt);
-            } else if (isParty1) {
-                rowCredit = amount;
-            } else if (isParty2) {
-                rowDebit = amount;
-            }
-
-            runningBalance = runningBalance + (rowDebit - rowCredit);
-
-            // Get opposite party details
-            const oppType = isParty2 ? row.party1_type : row.party2_type;
-            const oppId = isParty2 ? row.party1_id : row.party2_id;
-            const hasOppositeParty = oppType && oppId;
-            const oppKey = hasOppositeParty ? `${oppType}|${oppId}` : null;
-            const oppositeSnippet = oppKey ? (oppositeCache.get(oppKey) || {}) : {};
-            const details = oppositeSnippet.bank || oppositeSnippet.client || {};
-
-            let particular = "";
-            if (hasOppositeParty) {
-                if (oppType === "client") {
-                    particular = details.name || details.username || "";
-                } else if (oppType === "bank") {
-                    particular = details.holder || details.bank || "";
-                }
-            }
-
-            if (!particular && row.remark) {
-                particular = row.remark;
-            }
-
-            if (!particular) {
-                particular = "-";
-            }
-
-            statementData.push({
-                date: row.transaction_date,
-                particular: particular,
-                invoice_no: row.invoice_no || "-",
-                debit: rowDebit,
-                credit: rowCredit,
-                balance: runningBalance
-            });
-        }
-
-        // Generate filename
         const filename = `ledger_${partyType}_${partyId}_${fromDate}_to_${toDate}`;
 
-        // Generate file based on format
-        switch (format.toLowerCase()) {
-            case 'excel':
-                await generateExcel(res, statementData, partyDetails, fromDate, toDate, openingDebit, openingCredit, balanceBefore, filename);
+        switch (String(format).toLowerCase()) {
+            case "excel":
+                await generateExcel(
+                    res,
+                    statementData,
+                    partyDetails,
+                    fromDate,
+                    toDate,
+                    openingDebit,
+                    openingCredit,
+                    openingBalance,
+                    filename
+                );
                 break;
-            case 'csv':
-                await generateCSV(res, statementData, partyDetails, fromDate, toDate, openingDebit, openingCredit, balanceBefore, filename);
+            case "csv":
+                await generateCSV(
+                    res,
+                    statementData,
+                    partyDetails,
+                    fromDate,
+                    toDate,
+                    openingDebit,
+                    openingCredit,
+                    openingBalance,
+                    filename
+                );
                 break;
-            case 'pdf':
-            default:
-                await generatePDF(res, statementData, partyDetails, fromDate, toDate, openingDebit, openingCredit, balanceBefore, filename);
-                break;
+            case "pdf":
+            default: {
+                const pdfBuffer = await generateLedgerPdfBuffer({
+                    partyDetails,
+                    branchDetails: ledger.branchDetails,
+                    fromDate,
+                    toDate,
+                    openingDebit,
+                    openingCredit,
+                    openingBalance,
+                    statementData,
+                    summary,
+                });
+                res.setHeader("Content-Type", "application/pdf");
+                res.setHeader(
+                    "Content-Disposition",
+                    `attachment; filename=${filename}.pdf`
+                );
+                res.setHeader("Cache-Control", "no-cache");
+                return res.send(pdfBuffer);
+            }
         }
-
     } catch (error) {
         console.error("Ledger download error:", error);
         if (!res.headersSent) {
             return res.status(500).json({
                 success: false,
                 message: "Failed to generate ledger statement",
-                error: error.message
+                error: error.message,
             });
         }
+    }
+});
+
+/**
+ * Generate ledger PDF → upload to OneSaaS → share via selected channels
+ * using "document sharing" notification templates.
+ * Body: { party_type, party_id, from_date, to_date, channels: ['whatsapp'|'email'|'sms'] }
+ */
+router.post("/ledger/share", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const sent_by =
+            req.headers.username || req.headers.Username || req.user?.username;
+        const partyType = String(req.body?.party_type || "").trim();
+        const partyId = String(req.body?.party_id || "").trim();
+        const fromDate = String(req.body?.from_date || "").trim();
+        const toDate = String(req.body?.to_date || "").trim();
+        const allowedChannels = new Set(["whatsapp", "email", "sms"]);
+        const requestedChannels = Array.isArray(req.body?.channels)
+            ? [
+                  ...new Set(
+                      req.body.channels.map((item) =>
+                          String(item).trim().toLowerCase()
+                      )
+                  ),
+              ]
+            : [];
+        const channels = requestedChannels.filter((c) => allowedChannels.has(c));
+
+        if (!partyType || !partyId || !fromDate || !toDate) {
+            return res.status(400).json({
+                success: false,
+                message: "party_type, party_id, from_date and to_date are required",
+            });
+        }
+        if (channels.length === 0 || channels.length !== requestedChannels.length) {
+            return res.status(400).json({
+                success: false,
+                message: "channels must include whatsapp, email, and/or sms",
+            });
+        }
+        if (!sent_by) {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required",
+            });
+        }
+        if (partyType !== "client") {
+            return res.status(400).json({
+                success: false,
+                message: "Only client ledger sharing is supported currently",
+            });
+        }
+
+        const ledger = await collectLedgerStatement({
+            branch_id,
+            partyType,
+            partyId,
+            fromDate,
+            toDate,
+            getOppositePartySnippet,
+        });
+
+        const pdfBuffer = await generateLedgerPdfBuffer({
+            partyDetails: ledger.partyDetails,
+            branchDetails: ledger.branchDetails,
+            fromDate,
+            toDate,
+            openingDebit: ledger.openingDebit,
+            openingCredit: ledger.openingCredit,
+            openingBalance: ledger.openingBalance,
+            statementData: ledger.statementData,
+            summary: ledger.summary,
+        });
+
+        const documentName = `Ledger_${ledger.partyDetails?.name || partyId}_${fromDate}_to_${toDate}.pdf`
+            .replace(/[^\w.\-]+/g, "_");
+        const uploaded = await uploadBufferToOneSaas({
+            buffer: pdfBuffer,
+            filename: documentName,
+            mimeType: "application/pdf",
+        });
+        const documentUrl = uploaded.url;
+
+        const client = await USER_SNIPPED_DATA(partyId);
+        const sharedBy = await USER_SNIPPED_DATA(sent_by);
+        const variables = {
+            name: client?.name || partyId,
+            mobile: client?.mobile || "",
+            email: client?.email || "",
+            firm_name: ledger.partyDetails?.name || "",
+            document_name: documentName,
+            document_link: documentUrl,
+            shared_by: sharedBy?.name || sent_by,
+            remark: `Ledger ${fromDate} to ${toDate}`,
+            "{{name}}": client?.name || partyId,
+            "{{mobile}}": client?.mobile || "",
+            "{{email}}": client?.email || "",
+            "{{firm_name}}": ledger.partyDetails?.name || "",
+            "{{document_name}}": documentName,
+            "{{document_link}}": documentUrl,
+            "{{shared_by}}": sharedBy?.name || sent_by,
+            "{{remark}}": `Ledger ${fromDate} to ${toDate}`,
+        };
+
+        const channelResults = {};
+        for (const channel of channels) {
+            try {
+                if (channel === "email") {
+                    if (!client?.email) {
+                        throw new Error("Client does not have an email address");
+                    }
+                    let template;
+                    try {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document_sharing"
+                        );
+                    } catch {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document sharing"
+                        );
+                    }
+                    const smtpConfig = await getActiveSmtpConfig(branch_id);
+                    const sendResult = await sendEmail(
+                        smtpConfig,
+                        client.email,
+                        renderTemplate(template.subject, variables),
+                        renderTemplate(template.html_body, variables),
+                        template.text_body
+                            ? renderTemplate(template.text_body, variables)
+                            : null
+                    );
+                    channelResults.email = {
+                        status: "sent",
+                        message_id: sendResult.messageId || null,
+                    };
+                } else if (channel === "sms") {
+                    if (!client?.mobile) {
+                        throw new Error("Client does not have a mobile number");
+                    }
+                    const sendResult = await sendSingleSmsNotification({
+                        branch_id,
+                        mobile: client.mobile,
+                        templateName: DOCUMENT_SHARING_TEMPLATE_NAME,
+                        variables,
+                    });
+                    channelResults.sms = {
+                        status: "sent",
+                        message_id: sendResult.request_id || null,
+                    };
+                } else if (channel === "whatsapp") {
+                    await sendDocumentSharingWhatsapp({
+                        branch_id,
+                        username: partyId,
+                        sent_by,
+                        document_name: documentName,
+                        document_link: documentUrl,
+                        remark: `Ledger ${fromDate} to ${toDate}`,
+                    });
+                    channelResults.whatsapp = { status: "sent" };
+                }
+            } catch (channelError) {
+                console.error(`Ledger share ${channel} failed:`, channelError);
+                channelResults[channel] = {
+                    status: "failed",
+                    reason:
+                        channelError?.response?.data?.message ||
+                        channelError?.message ||
+                        `Failed to send via ${channel}`,
+                };
+            }
+        }
+
+        const sentChannels = Object.values(channelResults).filter(
+            (r) => r.status === "sent"
+        ).length;
+        const status =
+            sentChannels === channels.length
+                ? "sent"
+                : sentChannels > 0
+                  ? "partial"
+                  : "failed";
+
+        return res.status(status === "failed" ? 400 : 200).json({
+            success: status !== "failed",
+            message:
+                status === "sent"
+                    ? "Ledger shared successfully"
+                    : status === "partial"
+                      ? "Ledger shared on some channels"
+                      : "Failed to share ledger",
+            data: {
+                status,
+                document_url: documentUrl,
+                document_name: documentName,
+                channels: channelResults,
+            },
+        });
+    } catch (error) {
+        console.error("Ledger share error:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to share ledger",
+        });
     }
 });
 
