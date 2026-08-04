@@ -83,6 +83,38 @@ Those are portal-scoped. The **main branch CLIENT app** should keep calling **`P
 
 ---
 
+## Share API
+
+```
+POST /invoice/share
+```
+
+- Auth: `auth` + `validateBranch`
+- Generates PDF, uploads, then sends via document-sharing templates (`channels`).
+- Body: `invoice_id`, `type` (same generate types), `channels`
+
+Recipient resolution (high level):
+
+| `type` | Shareable party |
+|--------|-----------------|
+| `sale` | `party2_type === client` |
+| `purchase` | `party1_type` in `client` / `ca` |
+| `receive` / `payment` | `party2_type === client` (fallback also checks client on either party) |
+
+If no client/CA username can be resolved → `400` with a clear message (CLIENT should toast before calling when party is known unsupported).
+
+---
+
+## Sale / purchase edit (registers)
+
+- `PUT /sale/edit` — updates invoice / entries / items; keeps `invoice_no`; **rejects task sales** (`is_task = '1'`).
+- `PUT /purchase/edit` — `executeEditPurchase` in `helpers/purchaseCreate.js`.
+- Sale list may expose `task_id` (from `tasks.invoice_id` + `sale_items.remark` `task:…` fallback) for CLIENT “Edit (Task)” navigation.
+
+See CLIENT [`finance-registers.md`](../../CLIENT/context/finance-registers.md).
+
+---
+
 ## Sale list tax note
 
 On `GET /sale/list`, tax stats / per-row GST must **not** sum `grand_total` as tax. Derive tax from totals (e.g. total − (subtotal − discount) − additional_charge). See `routes/sale.js`.
@@ -93,9 +125,11 @@ On `GET /sale/list`, tax stats / per-row GST must **not** sum `grand_total` as t
 
 | Path | Role |
 |------|------|
-| `routes/invoice.js` | `/generate`, formats, prefixes |
+| `routes/invoice.js` | `/generate`, `/share`, formats, prefixes |
 | `services/invoiceGenerateService.js` | Build + optional save PDF |
 | `helpers/invoiceFormatMapping.js` | Allowed types + formats |
 | `helpers/pdfGenerator.js` | PDFKit buffer |
 | `helpers/invoiceDataBuilder.js` | Payload for PDF |
 | `routes/transactions.js` | List `downloadable` flag |
+| `routes/sale.js` | Sale list + `PUT /sale/edit` |
+| `routes/purchase.js` / `helpers/purchaseCreate.js` | Purchase list + edit |
