@@ -580,6 +580,7 @@ async function sendWhatsappWebByChannel({
     systemTemplateName,
     recipientNumber,
     variables,
+    headerMedia = null,
 }) {
     const template = await getTemplateBySystemName({
         branch_id,
@@ -587,7 +588,30 @@ async function sendWhatsappWebByChannel({
     });
     if (!template || template.status !== "active" || !template.content) return;
 
-    const content = replaceVariablesInValue(template.content, variables);
+    let content = replaceVariablesInValue(template.content, variables);
+
+    // Ledger / document share: swap in the uploaded file at send time
+    // (same idea as OneChatting HEADER document override).
+    const documentLink =
+        headerMedia?.documentLink != null
+            ? String(headerMedia.documentLink).trim()
+            : "";
+    const documentFilename =
+        headerMedia?.documentFilename != null
+            ? String(headerMedia.documentFilename).trim()
+            : "";
+    if (
+        documentLink &&
+        content &&
+        typeof content === "object" &&
+        (template.template_type === "document" || content.url != null)
+    ) {
+        content = {
+            ...content,
+            url: documentLink,
+            ...(documentFilename ? { filename: documentFilename } : {}),
+        };
+    }
 
     await sendWhatsappWebMessage({
         branch_id,
@@ -624,6 +648,7 @@ async function sendWhatsappByChannel({
             systemTemplateName,
             recipientNumber,
             variables,
+            headerMedia,
         });
         return;
     }

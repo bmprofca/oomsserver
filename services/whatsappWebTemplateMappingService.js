@@ -5,6 +5,7 @@ import { TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
 const VARIABLE_REGEX = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
 
 const TEMPLATE_TYPES = ["text", "image", "video", "document", "audio"];
+const DOCUMENT_SHARING_TEMPLATE_NAME = "document sharing";
 
 const CONTENT_FIELDS = {
     text: { required: ["message"], optional: [] },
@@ -187,6 +188,13 @@ async function setStaticTemplate({ branch_id, username, payload }) {
     const systemTemplateName = resolveSystemTemplateName(payload);
     const template_type = payload.template_type ?? "text";
     const status = payload.status ?? "active";
+
+    if (
+        systemTemplateName === DOCUMENT_SHARING_TEMPLATE_NAME &&
+        template_type !== "document"
+    ) {
+        throw new Error("Document sharing template only supports document type");
+    }
 
     if (!["active", "inactive"].includes(status)) {
         throw new Error("status must be 'active' or 'inactive'");

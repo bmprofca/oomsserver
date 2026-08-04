@@ -505,6 +505,319 @@ router.post("/create", auth, validateBranch, async (req, res) => {
     }
 });
 
+/**
+ * Edit an existing sale invoice (keeps invoice_no / ids; replaces line items).
+ * Body: invoice_id | sale_id | transaction_id + same fields as /create
+ */
+router.put("/edit", auth, validateBranch, async (req, res) => {
+    try {
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const branch_id = req.branch_id;
+        const {
+            invoice_id: bodyInvoiceId,
+            sale_id: bodySaleId,
+            transaction_id: bodyTransactionId,
+            party_id,
+            party_type,
+            firm_id,
+            transaction_date,
+            remark,
+            discount_type,
+            discount_perc_rate,
+            discount_value,
+            additional_charge,
+            round_off,
+            items,
+        } = req.body || {};
+
+        const invoiceIdIn = bodyInvoiceId != null ? String(bodyInvoiceId).trim() : "";
+        const saleIdIn = bodySaleId != null ? String(bodySaleId).trim() : "";
+        const txnIdIn = bodyTransactionId != null ? String(bodyTransactionId).trim() : "";
+
+        if (!invoiceIdIn && !saleIdIn && !txnIdIn) {
+            return res.status(400).json({
+                success: false,
+                message: "invoice_id, sale_id, or transaction_id is required",
+            });
+        }
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
+        }
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
+        }
+        if (!transaction_date || String(transaction_date).trim() === "") {
+            return res.status(400).json({ success: false, message: "transaction_date is required" });
+        }
+
+        let normalizedItems;
+        try {
+            normalizedItems = await validateAndNormalizeSaleItems(branch_id, items);
+        } catch (validationErr) {
+            return res.status(validationErr.statusCode || 400).json({
+                success: false,
+                message: validationErr.message,
+            });
+        }
+
+        let partyTypeVal;
+        let partyIdVal;
+        try {
+            ({ partyTypeVal, partyIdVal } = await validateSaleParty(pool, branch_id, party_type, party_id));
+        } catch (validationErr) {
+            return res.status(validationErr.statusCode || 400).json({
+                success: false,
+                message: validationErr.message,
+            });
+        }
+
+        const txnDate = String(transaction_date).trim();
+        const remarkVal = remark != null ? String(remark).trim() : null;
+        const firmId =
+            firm_id != null && String(firm_id).trim() !== "" && partyTypeVal === "client"
+                ? String(firm_id).trim()
+                : null;
+
+        const lookupParams = [];
+        const lookupClauses = ["CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)"];
+        lookupParams.push(branch_id);
+        if (invoiceIdIn) {
+            lookupClauses.push("se.invoice_id = ?");
+            lookupParams.push(invoiceIdIn);
+        } else if (saleIdIn) {
+            lookupClauses.push("se.sale_id = ?");
+            lookupParams.push(saleIdIn);
+        } else {
+            lookupClauses.push("invoice.transaction_id = ?");
+            lookupParams.push(txnIdIn);
+        }
+
+        const [existingRows] = await pool.query(
+            `SELECT se.sale_id, se.invoice_id, se.party_id, se.party_type, se.firm_id, se.is_task,
+                    invoice.invoice_no, invoice.transaction_id
+             FROM sale_entries se
+             INNER JOIN invoice ON invoice.invoice_id = se.invoice_id
+             WHERE ${lookupClauses.join(" AND ")}
+             LIMIT 1`,
+            lookupParams
+        );
+        const existing = existingRows[0];
+        if (!existing) {
+            return res.status(404).json({ success: false, message: "Sale not found" });
+        }
+
+        const isTaskSale =
+            existing.is_task === 1 ||
+            existing.is_task === true ||
+            String(existing.is_task ?? "").trim() === "1";
+        if (isTaskSale) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "This sale was created from a task and cannot be edited here. Open the related task profile to make changes.",
+            });
+        }
+
+        const sale_entry_id = existing.sale_id;
+        const invoice_id = existing.invoice_id;
+        const transaction_id = existing.transaction_id;
+        const invoice_no = existing.invoice_no;
+
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const asOfDate = toDateOnly(txnDate);
+        const sampleGst = resolveGst({ fees: 100, asOfDate, settings: gstSettings });
+        const taxRateNum = sampleGst.tax_rate;
+
+        const saleItemsToInsert = [];
+        let amountTotal = 0;
+        let itemsTaxTotal = 0;
+
+        for (let index = 0; index < normalizedItems.length; index++) {
+            const current = normalizedItems[index];
+            const lineGst = resolveGst({
+                fees: current.feesNum,
+                asOfDate,
+                settings: gstSettings,
+            });
+            const taxValue = lineGst.tax_value;
+            const itemTotal = lineGst.total;
+
+            amountTotal += current.feesNum;
+            itemsTaxTotal += taxValue;
+
+            saleItemsToInsert.push({
+                service_id: current.service_id,
+                fees: Number(current.feesNum.toFixed(2)),
+                tax_perc: taxRateNum,
+                tax_value: taxValue,
+                total: itemTotal,
+                remark: current.itemRemark,
+            });
+        }
+
+        amountTotal = Number(amountTotal.toFixed(2));
+        let pricing;
+        try {
+            pricing = normalizeDiscountAndTotals({
+                subtotal: amountTotal,
+                taxRateNum,
+                discount_type,
+                discount_perc_rate,
+                discount_value,
+                additional_charge,
+                round_off,
+            });
+        } catch (validationErr) {
+            return res.status(400).json({ success: false, message: validationErr.message });
+        }
+
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            await connection.query(
+                `UPDATE invoice
+                 SET modify_by = ?,
+                     subtotal = ?,
+                     discount_type = ?,
+                     discount_perc_rate = ?,
+                     discount_value = ?,
+                     additional_charge = ?,
+                     total = ?,
+                     round_off = ?,
+                     grand_total = ?
+                 WHERE invoice_id = ? AND branch_id = ?`,
+                [
+                    username || null,
+                    amountTotal,
+                    pricing.discountType,
+                    pricing.discountPercRate,
+                    pricing.discountValue,
+                    pricing.additionalCharge,
+                    pricing.totalBeforeRound,
+                    pricing.roundOffValue,
+                    pricing.grandTotal,
+                    invoice_id,
+                    branch_id,
+                ]
+            );
+
+            await connection.query(
+                `UPDATE sale_entries
+                 SET party_id = ?,
+                     party_type = ?,
+                     firm_id = ?,
+                     sale_date = ?,
+                     modify_by = ?,
+                     total = ?
+                 WHERE sale_id = ? AND CAST(branch_id AS CHAR) = CAST(? AS CHAR)`,
+                [
+                    partyIdVal,
+                    partyTypeVal,
+                    firmId,
+                    txnDate,
+                    username || null,
+                    pricing.grandTotal,
+                    sale_entry_id,
+                    branch_id,
+                ]
+            );
+
+            if (transaction_id) {
+                await connection.query(
+                    `UPDATE transactions
+                     SET modify_by = ?,
+                         transaction_date = ?,
+                         amount = ?,
+                         party2_type = ?,
+                         party2_id = ?,
+                         remark = ?
+                     WHERE transaction_id = ? AND branch_id = ? AND transaction_type = 'sale'`,
+                    [
+                        username || null,
+                        txnDate,
+                        pricing.grandTotal,
+                        partyTypeVal,
+                        partyIdVal,
+                        remarkVal,
+                        transaction_id,
+                        branch_id,
+                    ]
+                );
+            }
+
+            await connection.query(
+                `DELETE FROM sale_items WHERE sale_id = ? AND CAST(branch_id AS CHAR) = CAST(? AS CHAR)`,
+                [sale_entry_id, branch_id]
+            );
+
+            for (let index = 0; index < saleItemsToInsert.length; index++) {
+                const row = saleItemsToInsert[index];
+                const item_id = await UNIQUE_RANDOM_STRING("sale_items", "item_id", {
+                    length: ID_LENGTH,
+                    conn: connection,
+                });
+                await connection.query(
+                    `INSERT INTO sale_items (branch_id, item_id, sale_id, invoice_id, service_id, fees, total, remark)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        branch_id,
+                        item_id,
+                        sale_entry_id,
+                        invoice_id,
+                        row.service_id,
+                        row.fees,
+                        row.total,
+                        row.remark,
+                    ]
+                );
+            }
+
+            await connection.commit();
+
+            return res.status(200).json({
+                success: true,
+                message: "Sale updated successfully",
+                data: {
+                    invoice_id,
+                    transaction_id,
+                    invoice_no,
+                    sale_id: sale_entry_id,
+                    party_id: partyIdVal,
+                    party_type: partyTypeVal,
+                    firm_id: firmId,
+                    transaction_date: txnDate,
+                    subtotal: amountTotal,
+                    discount_type: pricing.discountType,
+                    discount_perc_rate: pricing.discountPercRate,
+                    discount_value: pricing.discountValue,
+                    tax_rate: taxRateNum,
+                    gst_value: pricing.taxValue,
+                    additional_charge: pricing.additionalCharge,
+                    total: pricing.totalBeforeRound,
+                    round_off: pricing.roundOffValue,
+                    grand_total: pricing.grandTotal,
+                    remark: remarkVal,
+                    items_tax_total: Number(itemsTaxTotal.toFixed(2)),
+                    items: saleItemsToInsert,
+                },
+            });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error("Edit sale fatal error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update sale",
+            error: error.message,
+        });
+    }
+});
+
 router.get("/list", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -751,6 +1064,45 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             }
         }
 
+        // Resolve task_id for task-billed sales (tasks.invoice_id + sale_items remark fallback)
+        const taskInvoiceIds = [...new Set(
+            rows
+                .filter((r) => r.is_task === "1" || r.is_task === 1)
+                .map((r) => (r.invoice_id != null ? String(r.invoice_id).trim() : ""))
+                .filter((id) => id !== "")
+        )];
+        const taskIdByInvoiceId = new Map();
+        if (taskInvoiceIds.length > 0) {
+            const ph = taskInvoiceIds.map(() => "?").join(", ");
+            const [taskRows] = await pool.query(
+                `SELECT task_id, invoice_id
+                 FROM tasks
+                 WHERE CAST(branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND invoice_id IN (${ph})`,
+                [branch_id, ...taskInvoiceIds]
+            );
+            for (let i = 0; i < taskRows.length; i++) {
+                const tr = taskRows[i];
+                const inv = tr?.invoice_id != null ? String(tr.invoice_id).trim() : "";
+                const tid = tr?.task_id != null ? String(tr.task_id).trim() : "";
+                if (inv && tid && !taskIdByInvoiceId.has(inv)) {
+                    taskIdByInvoiceId.set(inv, tid);
+                }
+            }
+        }
+
+        const parseTaskIdFromItems = (items) => {
+            if (!Array.isArray(items)) return null;
+            for (let i = 0; i < items.length; i++) {
+                const remark = items[i]?.remark != null ? String(items[i].remark).trim() : "";
+                if (/^task:/i.test(remark)) {
+                    const tid = remark.replace(/^task:/i, "").trim();
+                    if (tid) return tid;
+                }
+            }
+            return null;
+        };
+
         const [[{ total: totalRows }]] = await pool.query(
             `SELECT COUNT(*) AS total
              FROM sale_entries se
@@ -814,6 +1166,13 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     ? Number(((gstValue / taxableSubtotal) * 100).toFixed(2))
                     : 0;
 
+            const lineItems = itemsBySaleId.get(row.sale_id) || [];
+            const invoiceIdStr = row.invoice_id != null ? String(row.invoice_id).trim() : "";
+            const isTask = row.is_task === "1" || row.is_task === 1;
+            const task_id = isTask
+                ? (taskIdByInvoiceId.get(invoiceIdStr) || parseTaskIdFromItems(lineItems) || null)
+                : null;
+
             data.push({
                 transaction_id: row.transaction_id,
                 transaction_date: row.transaction_date ?? row.sale_entry_date,
@@ -828,8 +1187,9 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 sale_party,
                 firm_id: firmId,
                 firm,
-                is_task: row.is_task === "1" || row.is_task === 1,
-                items: itemsBySaleId.get(row.sale_id) || [],
+                is_task: isTask,
+                task_id,
+                items: lineItems,
                 calculation: {
                     subtotal: row.subtotal,
                     discount_type: row.discount_type,

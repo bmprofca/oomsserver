@@ -77,7 +77,10 @@ Portrait A4, PDFKit, `bufferPages: true`.
 ## Document sharing / WhatsApp
 
 - Template name: **`document sharing`** (`SERVER/utils/WhatsAppTemplates.js`; aliases in `routes/utils.js`)
-- `applyHeaderMediaOverride` in `helpers/whatsappNotification.js` — send uses the **uploaded ledger PDF URL** as HEADER document, not static mapped media
+- Appears in OneChatting **and** WhatsApp Web Static Templates map lists (same `TEMPLATELIST`)
+- OneChatting: `applyHeaderMediaOverride` — HEADER document link/filename from upload
+- WhatsApp Web: `sendWhatsappWebByChannel` overrides `content.url` / `content.filename` from `headerMedia` at send time
+- Web mapping UX (`WhatsAppWebTemplates.jsx`): unset **document sharing** defaults to type Document with `{{document_link}}` / `{{document_name}}`
 
 ---
 

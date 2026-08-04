@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { TODAY_DATE } from "../helpers/function.js";
+import { TODAY_DATE, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { getFormatSamplePdfsBase64 } from "../helpers/invoiceFormatSamplePdfs.js";
 import {
     ALLOWED_GENERATE_TYPES,
@@ -11,6 +11,18 @@ import {
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
 import { isValidFormatForType, INVOICE_GENERATE_TYPES } from "../helpers/invoiceFormatMapping.js";
+import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
+import {
+    sendDocumentSharingWhatsapp,
+    DOCUMENT_SHARING_TEMPLATE_NAME,
+} from "../helpers/whatsappNotification.js";
+import {
+    getActivePaymentTemplate,
+    getActiveSmtpConfig,
+    renderTemplate,
+    sendEmail,
+} from "./payment_reminder.js";
+import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
 
@@ -287,6 +299,254 @@ const generateHandler = async (req, res) => {
 };
 
 router.post("/generate", auth, validateBranch, generateHandler);
+
+/**
+ * Generate invoice PDF → upload → share via document sharing templates.
+ * Body: { invoice_id, type, channels: ['whatsapp'|'email'|'sms'] }
+ */
+router.post("/share", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const sent_by =
+            req.headers.username || req.headers.Username || req.user?.username;
+        const invoiceId = String(req.body?.invoice_id || "").trim();
+        const bodyType = req.body?.type;
+        const allowedChannels = new Set(["whatsapp", "email", "sms"]);
+        const requestedChannels = Array.isArray(req.body?.channels)
+            ? [
+                  ...new Set(
+                      req.body.channels.map((item) =>
+                          String(item).trim().toLowerCase()
+                      )
+                  ),
+              ]
+            : [];
+        const channels = requestedChannels.filter((c) => allowedChannels.has(c));
+
+        if (!invoiceId) {
+            return res.status(400).json({
+                success: false,
+                message: "invoice_id is required",
+            });
+        }
+        if (bodyType == null || String(bodyType).trim() === "") {
+            return res.status(400).json({
+                success: false,
+                message: "type is required (e.g. sale)",
+            });
+        }
+        if (!ALLOWED_GENERATE_TYPES.has(normInvoiceType(bodyType))) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid type. Allowed: ${[...ALLOWED_GENERATE_TYPES].sort().join(", ")}`,
+            });
+        }
+        if (channels.length === 0 || channels.length !== requestedChannels.length) {
+            return res.status(400).json({
+                success: false,
+                message: "channels must include whatsapp, email, and/or sms",
+            });
+        }
+        if (!sent_by) {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required",
+            });
+        }
+
+        const built = await buildInvoicePdfBuffer(
+            branch_id,
+            String(sent_by).trim(),
+            invoiceId,
+            bodyType
+        );
+        if (built.error) {
+            return res.status(built.error.status).json({
+                success: false,
+                message: built.error.message,
+            });
+        }
+
+        const [txRows] = await pool.query(
+            `SELECT party1_type, party1_id, party2_type, party2_id, invoice_no
+             FROM transactions
+             WHERE transaction_id = ? AND branch_id = ?
+             LIMIT 1`,
+            [invoiceId, branch_id]
+        );
+        const tx = txRows[0];
+        if (!tx) {
+            return res.status(404).json({
+                success: false,
+                message: "Invoice transaction not found",
+            });
+        }
+
+        const invoiceType = normInvoiceType(bodyType);
+        let clientUsername = null;
+        if (invoiceType === "sale" && String(tx.party2_type || "").trim() === "client") {
+            clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
+        } else if (
+            invoiceType === "purchase" &&
+            ["client", "ca"].includes(String(tx.party1_type || "").trim().toLowerCase())
+        ) {
+            clientUsername = tx.party1_id != null ? String(tx.party1_id).trim() : null;
+        } else if (
+            (invoiceType === "receive" || invoiceType === "payment") &&
+            String(tx.party2_type || "").trim() === "client"
+        ) {
+            clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
+        } else if (String(tx.party1_type || "").trim() === "client") {
+            clientUsername = tx.party1_id != null ? String(tx.party1_id).trim() : null;
+        } else if (String(tx.party2_type || "").trim() === "client") {
+            clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
+        }
+
+        if (!clientUsername) {
+            return res.status(400).json({
+                success: false,
+                message: "Share is only available when the invoice party is a client or CA",
+            });
+        }
+
+        const documentName = String(built.filename || `invoice-${invoiceId}.pdf`).replace(
+            /[^\w.\-]+/g,
+            "_"
+        );
+        const uploaded = await uploadBufferToOneSaas({
+            buffer: built.buffer,
+            filename: documentName,
+            mimeType: "application/pdf",
+        });
+        const documentUrl = uploaded.url;
+
+        const client = await USER_SNIPPED_DATA(clientUsername);
+        const sharedBy = await USER_SNIPPED_DATA(sent_by);
+        const invoiceLabel = tx.invoice_no || invoiceId;
+        const remark = `${invoiceType} invoice ${invoiceLabel}`;
+        const variables = {
+            name: client?.name || clientUsername,
+            mobile: client?.mobile || "",
+            email: client?.email || "",
+            firm_name: client?.name || "",
+            document_name: documentName,
+            document_link: documentUrl,
+            shared_by: sharedBy?.name || sent_by,
+            remark,
+            "{{name}}": client?.name || clientUsername,
+            "{{mobile}}": client?.mobile || "",
+            "{{email}}": client?.email || "",
+            "{{firm_name}}": client?.name || "",
+            "{{document_name}}": documentName,
+            "{{document_link}}": documentUrl,
+            "{{shared_by}}": sharedBy?.name || sent_by,
+            "{{remark}}": remark,
+        };
+
+        const channelResults = {};
+        for (const channel of channels) {
+            try {
+                if (channel === "email") {
+                    if (!client?.email) {
+                        throw new Error("Client does not have an email address");
+                    }
+                    let template;
+                    try {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document_sharing"
+                        );
+                    } catch {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document sharing"
+                        );
+                    }
+                    const smtpConfig = await getActiveSmtpConfig(branch_id);
+                    const sendResult = await sendEmail(
+                        smtpConfig,
+                        client.email,
+                        renderTemplate(template.subject, variables),
+                        renderTemplate(template.html_body, variables),
+                        template.text_body
+                            ? renderTemplate(template.text_body, variables)
+                            : null
+                    );
+                    channelResults.email = {
+                        status: "sent",
+                        message_id: sendResult.messageId || null,
+                    };
+                } else if (channel === "sms") {
+                    if (!client?.mobile) {
+                        throw new Error("Client does not have a mobile number");
+                    }
+                    const sendResult = await sendSingleSmsNotification({
+                        branch_id,
+                        mobile: client.mobile,
+                        templateName: DOCUMENT_SHARING_TEMPLATE_NAME,
+                        variables,
+                    });
+                    channelResults.sms = {
+                        status: "sent",
+                        message_id: sendResult.request_id || null,
+                    };
+                } else if (channel === "whatsapp") {
+                    await sendDocumentSharingWhatsapp({
+                        branch_id,
+                        username: clientUsername,
+                        sent_by,
+                        document_name: documentName,
+                        document_link: documentUrl,
+                        remark,
+                    });
+                    channelResults.whatsapp = { status: "sent" };
+                }
+            } catch (channelError) {
+                console.error(`Invoice share ${channel} failed:`, channelError);
+                channelResults[channel] = {
+                    status: "failed",
+                    reason:
+                        channelError?.response?.data?.message ||
+                        channelError?.message ||
+                        `Failed to send via ${channel}`,
+                };
+            }
+        }
+
+        const sentChannels = Object.values(channelResults).filter(
+            (r) => r.status === "sent"
+        ).length;
+        const status =
+            sentChannels === channels.length
+                ? "sent"
+                : sentChannels > 0
+                  ? "partial"
+                  : "failed";
+
+        return res.status(status === "failed" ? 400 : 200).json({
+            success: status !== "failed",
+            message:
+                status === "sent"
+                    ? "Invoice shared successfully"
+                    : status === "partial"
+                      ? "Invoice shared on some channels"
+                      : "Failed to share invoice",
+            data: {
+                status,
+                channels: channelResults,
+                document_url: documentUrl,
+                document_name: documentName,
+            },
+        });
+    } catch (error) {
+        console.error("Invoice share error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to share invoice",
+            error: error.message,
+        });
+    }
+});
 
 router.get("/prefix/list", auth, validateBranch, async (req, res) => {
     try {

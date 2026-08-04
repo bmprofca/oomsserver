@@ -247,3 +247,237 @@ export async function executeCreatePurchase({
         }
     }
 }
+
+/**
+ * Edit an existing purchase (keeps invoice_no / ids; replaces line items).
+ */
+export async function executeEditPurchase({
+    connection: externalConn = null,
+    branch_id,
+    modify_by,
+    invoice_id: bodyInvoiceId,
+    purchase_id: bodyPurchaseId,
+    transaction_id: bodyTransactionId,
+    party_id,
+    party_type,
+    transaction_date,
+    remark,
+    items,
+}) {
+    const party1_id = String(party_id ?? "").trim();
+    const party1_type = String(party_type ?? "").trim();
+    const txnDate = String(transaction_date ?? "").trim();
+    const remarkVal = remark != null ? String(remark).trim() : null;
+    const username = String(modify_by ?? "").trim();
+    const invoiceIdIn = bodyInvoiceId != null ? String(bodyInvoiceId).trim() : "";
+    const purchaseIdIn = bodyPurchaseId != null ? String(bodyPurchaseId).trim() : "";
+    const txnIdIn = bodyTransactionId != null ? String(bodyTransactionId).trim() : "";
+
+    if (!branch_id) {
+        const err = new Error("branch_id is required");
+        err.status = 400;
+        throw err;
+    }
+    if (!invoiceIdIn && !purchaseIdIn && !txnIdIn) {
+        const err = new Error("invoice_id, purchase_id, or transaction_id is required");
+        err.status = 400;
+        throw err;
+    }
+    if (!party1_id) {
+        const err = new Error("party_id is required");
+        err.status = 400;
+        throw err;
+    }
+    if (!party1_type) {
+        const err = new Error("party_type is required");
+        err.status = 400;
+        throw err;
+    }
+    if (!txnDate) {
+        const err = new Error("transaction_date is required");
+        err.status = 400;
+        throw err;
+    }
+
+    const ownsConnection = !externalConn;
+    const connection = externalConn || (await pool.getConnection());
+
+    try {
+        const normalizedItems = await validateAndNormalizePurchaseItems(
+            branch_id,
+            items,
+            connection
+        );
+
+        const lookupParams = [];
+        const lookupClauses = ["CAST(pe.branch_id AS CHAR) = CAST(? AS CHAR)"];
+        lookupParams.push(branch_id);
+        if (invoiceIdIn) {
+            lookupClauses.push("pe.invoice_id = ?");
+            lookupParams.push(invoiceIdIn);
+        } else if (purchaseIdIn) {
+            lookupClauses.push("pe.purchase_id = ?");
+            lookupParams.push(purchaseIdIn);
+        } else {
+            lookupClauses.push("invoice.transaction_id = ?");
+            lookupParams.push(txnIdIn);
+        }
+
+        const [existingRows] = await connection.query(
+            `SELECT pe.purchase_id, pe.invoice_id, invoice.invoice_no, invoice.transaction_id
+             FROM purchase_entries pe
+             INNER JOIN invoice ON invoice.invoice_id = pe.invoice_id
+             WHERE ${lookupClauses.join(" AND ")}
+             LIMIT 1`,
+            lookupParams
+        );
+        const existing = existingRows[0];
+        if (!existing) {
+            const err = new Error("Purchase not found");
+            err.status = 404;
+            throw err;
+        }
+
+        const purchase_entry_id = existing.purchase_id;
+        const invoice_id = existing.invoice_id;
+        const transaction_id = existing.transaction_id;
+        const invoice_no = existing.invoice_no;
+
+        const purchaseItemsToInsert = [];
+        let subtotal = 0;
+        for (let index = 0; index < normalizedItems.length; index++) {
+            const current = normalizedItems[index];
+            subtotal += current.feesNum;
+            purchaseItemsToInsert.push({
+                service_id: current.service_id,
+                amount: Number(current.feesNum.toFixed(2)),
+                remark: current.itemRemark,
+            });
+        }
+        subtotal = Number(subtotal.toFixed(2));
+        const total = subtotal;
+
+        if (ownsConnection) {
+            await connection.beginTransaction();
+        }
+
+        await connection.query(
+            `UPDATE invoice
+             SET modify_by = ?,
+                 subtotal = ?,
+                 discount_type = ?,
+                 discount_perc_rate = ?,
+                 discount_value = ?,
+                 additional_charge = ?,
+                 total = ?,
+                 round_off = ?,
+                 grand_total = ?
+             WHERE invoice_id = ? AND branch_id = ?`,
+            [
+                username || null,
+                subtotal,
+                "not applicable",
+                0,
+                0,
+                0,
+                total,
+                0,
+                total,
+                invoice_id,
+                branch_id,
+            ]
+        );
+
+        await connection.query(
+            `UPDATE purchase_entries
+             SET party_id = ?,
+                 party_type = ?,
+                 purchase_date = ?,
+                 modify_by = ?,
+                 amount = ?
+             WHERE purchase_id = ? AND CAST(branch_id AS CHAR) = CAST(? AS CHAR)`,
+            [
+                party1_id,
+                party1_type,
+                txnDate,
+                username || null,
+                total,
+                purchase_entry_id,
+                branch_id,
+            ]
+        );
+
+        if (transaction_id) {
+            await connection.query(
+                `UPDATE transactions
+                 SET modify_by = ?,
+                     transaction_date = ?,
+                     amount = ?,
+                     party1_type = ?,
+                     party1_id = ?,
+                     remark = ?
+                 WHERE transaction_id = ? AND branch_id = ? AND transaction_type = 'purchase'`,
+                [
+                    username || null,
+                    txnDate,
+                    total,
+                    party1_type,
+                    party1_id,
+                    remarkVal,
+                    transaction_id,
+                    branch_id,
+                ]
+            );
+        }
+
+        await connection.query(
+            `DELETE FROM purchase_items WHERE purchase_id = ? AND CAST(branch_id AS CHAR) = CAST(? AS CHAR)`,
+            [purchase_entry_id, branch_id]
+        );
+
+        for (let index = 0; index < purchaseItemsToInsert.length; index++) {
+            const row = purchaseItemsToInsert[index];
+            const item_id = await UNIQUE_RANDOM_STRING("purchase_items", "item_id", {
+                length: ID_LENGTH,
+                conn: connection,
+            });
+            await connection.query(
+                `INSERT INTO purchase_items (branch_id, item_id, purchase_id, invoice_id, service_id, amount, remark)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [branch_id, item_id, purchase_entry_id, invoice_id, row.service_id, row.amount, row.remark]
+            );
+        }
+
+        if (ownsConnection) {
+            await connection.commit();
+        }
+
+        return {
+            invoice_id,
+            purchase_id: purchase_entry_id,
+            transaction_id,
+            invoice_no,
+            party_id: party1_id,
+            party_type: party1_type,
+            transaction_date: txnDate,
+            subtotal,
+            total,
+            grand_total: total,
+            remark: remarkVal,
+            items: purchaseItemsToInsert,
+        };
+    } catch (err) {
+        if (ownsConnection) {
+            try {
+                await connection.rollback();
+            } catch (_) {
+                /* ignore */
+            }
+        }
+        throw err;
+    } finally {
+        if (ownsConnection) {
+            connection.release();
+        }
+    }
+}
