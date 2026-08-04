@@ -21,6 +21,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`salary.md`](./salary.md) | `staff_salaries` (merged), fixed/flexible, one active, set-salary / history |
 | [`attendance-removed.md`](./attendance-removed.md) | Legacy notes from attendance removal / pre-rebuild (salary kept on `/salary`) |
 | [`invoice.md`](./invoice.md) | `POST /invoice/generate`, allowed types, PDFKit, list `downloadable`, no Puppeteer |
+| [`ledger-report.md`](./ledger-report.md) | Ledger PDF (`ledgerReport.js`), download/share endpoints, document sharing HEADER override |
 
 ## Pair with client
 
@@ -29,6 +30,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | `subscription.md` | `CLIENT/context/subscription.md` |
 | `group-firms.md` | `CLIENT/context/group-firms.md`, `CLIENT/context/payment-reminder.md` |
 | `client-balance.md` | `CLIENT/context/client-profile.md`, `CLIENT/context/ledger-tab.md`, debtors UI |
+| `ledger-report.md` | `CLIENT/context/ledger-tab.md`, `CLIENT/context/TransactionTable.md` |
 | `payment-reminder.md` | `CLIENT/context/payment-reminder.md` |
 | `birthday-reminder.md` | `CLIENT/context/birthday-reminder.md` |
 | `task-list.md` | `CLIENT/context/task-list-display.md` |
