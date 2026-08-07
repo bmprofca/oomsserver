@@ -13,7 +13,6 @@ import {
     notifyPaymentReceiveWhatsapp,
     notifyPaymentWhatsapp,
     sendDocumentSharingWhatsapp,
-    DOCUMENT_SHARING_TEMPLATE_NAME,
 } from "../helpers/whatsappNotification.js";
 import { isSupportedGenerateType } from "../helpers/invoiceFormatMapping.js";
 import {
@@ -27,7 +26,6 @@ import {
     renderTemplate,
     sendEmail,
 } from "./payment_reminder.js";
-import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
 
@@ -910,6 +908,39 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     }
                 });
                 particular.sale_items = sale_items;
+
+                // Prefer linked firm (client sale) for ledger Particulars when present
+                try {
+                    const [firmLinkRows] = await pool.query(
+                        `SELECT se.firm_id, f.firm_name, f.firm_type, f.gst_no, f.pan_no
+                         FROM sale_entries se
+                         LEFT JOIN firms f
+                           ON f.firm_id = se.firm_id
+                          AND CAST(f.branch_id AS CHAR) = CAST(se.branch_id AS CHAR)
+                          AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                         WHERE CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)
+                           AND se.invoice_id = ?
+                         LIMIT 1`,
+                        [branch_id, row.invoice_id]
+                    );
+                    const firmLink = firmLinkRows?.[0];
+                    const firmId =
+                        firmLink?.firm_id != null && String(firmLink.firm_id).trim() !== ""
+                            ? String(firmLink.firm_id).trim()
+                            : null;
+                    if (firmId) {
+                        particular.firm_id = firmId;
+                        particular.firm = {
+                            firm_id: firmId,
+                            firm_name: firmLink.firm_name ?? null,
+                            firm_type: firmLink.firm_type ?? null,
+                            gst_no: firmLink.gst_no ?? null,
+                            pan_no: firmLink.pan_no ?? null,
+                        };
+                    }
+                } catch (_) {
+                    // keep sale_items-only particular if firm lookup fails
+                }
             }
 
             fullList.push({
@@ -2214,7 +2245,7 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
 /**
  * Generate ledger PDF → upload to OneSaaS → share via selected channels
  * using "document sharing" notification templates.
- * Body: { party_type, party_id, from_date, to_date, channels: ['whatsapp'|'email'|'sms'] }
+ * Body: { party_type, party_id, from_date, to_date, channels: ['whatsapp'|'email'], mobile?, email? }
  */
 router.post("/ledger/share", auth, validateBranch, async (req, res) => {
     try {
@@ -2225,7 +2256,7 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
         const partyId = String(req.body?.party_id || "").trim();
         const fromDate = String(req.body?.from_date || "").trim();
         const toDate = String(req.body?.to_date || "").trim();
-        const allowedChannels = new Set(["whatsapp", "email", "sms"]);
+        const allowedChannels = new Set(["whatsapp", "email"]);
         const requestedChannels = Array.isArray(req.body?.channels)
             ? [
                   ...new Set(
@@ -2246,7 +2277,7 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
         if (channels.length === 0 || channels.length !== requestedChannels.length) {
             return res.status(400).json({
                 success: false,
-                message: "channels must include whatsapp, email, and/or sms",
+                message: "channels must include whatsapp and/or email",
             });
         }
         if (!sent_by) {
@@ -2294,18 +2325,30 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
 
         const client = await USER_SNIPPED_DATA(partyId);
         const sharedBy = await USER_SNIPPED_DATA(sent_by);
+        const bodyMobile =
+            req.body?.mobile != null ? String(req.body.mobile).trim() : "";
+        const bodyEmail =
+            req.body?.email != null ? String(req.body.email).trim() : "";
+        const bodyCountryCode =
+            req.body?.country_code != null
+                ? String(req.body.country_code).replace(/\D/g, "").trim()
+                : "";
+        const recipientMobile = bodyMobile || client?.mobile || "";
+        const recipientEmail = bodyEmail || client?.email || "";
+        const recipientCountryCode =
+            bodyCountryCode || client?.country_code || "91";
         const variables = {
             name: client?.name || partyId,
-            mobile: client?.mobile || "",
-            email: client?.email || "",
+            mobile: recipientMobile,
+            email: recipientEmail,
             firm_name: ledger.partyDetails?.name || "",
             document_name: documentName,
             document_link: documentUrl,
             shared_by: sharedBy?.name || sent_by,
             remark: `Ledger ${fromDate} to ${toDate}`,
             "{{name}}": client?.name || partyId,
-            "{{mobile}}": client?.mobile || "",
-            "{{email}}": client?.email || "",
+            "{{mobile}}": recipientMobile,
+            "{{email}}": recipientEmail,
             "{{firm_name}}": ledger.partyDetails?.name || "",
             "{{document_name}}": documentName,
             "{{document_link}}": documentUrl,
@@ -2317,8 +2360,8 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
         for (const channel of channels) {
             try {
                 if (channel === "email") {
-                    if (!client?.email) {
-                        throw new Error("Client does not have an email address");
+                    if (!recipientEmail) {
+                        throw new Error("Email address is required");
                     }
                     let template;
                     try {
@@ -2335,7 +2378,7 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
                     const smtpConfig = await getActiveSmtpConfig(branch_id);
                     const sendResult = await sendEmail(
                         smtpConfig,
-                        client.email,
+                        recipientEmail,
                         renderTemplate(template.subject, variables),
                         renderTemplate(template.html_body, variables),
                         template.text_body
@@ -2346,20 +2389,6 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
                         status: "sent",
                         message_id: sendResult.messageId || null,
                     };
-                } else if (channel === "sms") {
-                    if (!client?.mobile) {
-                        throw new Error("Client does not have a mobile number");
-                    }
-                    const sendResult = await sendSingleSmsNotification({
-                        branch_id,
-                        mobile: client.mobile,
-                        templateName: DOCUMENT_SHARING_TEMPLATE_NAME,
-                        variables,
-                    });
-                    channelResults.sms = {
-                        status: "sent",
-                        message_id: sendResult.request_id || null,
-                    };
                 } else if (channel === "whatsapp") {
                     await sendDocumentSharingWhatsapp({
                         branch_id,
@@ -2368,6 +2397,9 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
                         document_name: documentName,
                         document_link: documentUrl,
                         remark: `Ledger ${fromDate} to ${toDate}`,
+                        mobile: recipientMobile,
+                        email: recipientEmail,
+                        country_code: recipientCountryCode,
                     });
                     channelResults.whatsapp = { status: "sent" };
                 }

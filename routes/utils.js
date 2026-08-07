@@ -105,11 +105,23 @@ function notificationTypeCandidates(notificationType) {
     return [...candidates];
 }
 
-function channelResult(available, reason = "") {
+function channelResult(available, reason = "", extra = {}) {
     return {
         available: Boolean(available),
         reason: available ? "" : (reason || "Not available"),
+        ...(extra && typeof extra === "object" ? extra : {}),
     };
+}
+
+const WHATSAPP_CHANNEL_LABELS = {
+    onechatting: "OneChatting",
+    "ooms web": "WhatsApp Web",
+    "ooms system": "OOMS System",
+};
+
+function whatsappChannelLabel(channel) {
+    const key = String(channel || "").trim().toLowerCase();
+    return WHATSAPP_CHANNEL_LABELS[key] || key || "";
 }
 
 async function checkSmsAvailability(branch_id, notificationType) {
@@ -151,7 +163,7 @@ async function checkSmsAvailability(branch_id, notificationType) {
 async function checkEmailAvailability(branch_id, notificationType) {
     try {
         const [[activeConfig]] = await poolQuery(
-            `SELECT config_id
+            `SELECT config_id, config_name
              FROM email_configs
              WHERE branch_id = ? AND status = 'active'
              ORDER BY is_default DESC, id DESC
@@ -177,7 +189,12 @@ async function checkEmailAvailability(branch_id, notificationType) {
             return channelResult(false, `Email template is not configured for type '${notificationType}'`);
         }
 
-        return channelResult(true);
+        const smtpName = String(activeConfig.config_name || "").trim();
+        return channelResult(true, "", {
+            smtp_name: smtpName,
+            config_name: smtpName,
+            detail: smtpName || "SMTP",
+        });
     } catch (error) {
         console.error("Email availability check error:", error);
         return channelResult(false, "Unable to validate email availability");
@@ -206,6 +223,12 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
         if (channel === "disabled") {
             return channelResult(false, "WhatsApp channel is disabled");
         }
+
+        const channelMeta = {
+            channel,
+            channel_label: whatsappChannelLabel(channel),
+            detail: whatsappChannelLabel(channel),
+        };
 
         if (channel === "onechatting") {
             const developerToken = String(branchRow.onechatting_developer_token || "").trim();
@@ -243,7 +266,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
             if (!mapping?.map_id) {
                 return channelResult(false, `OneChatting template mapping missing for type '${notificationType}'`);
             }
-            return channelResult(true);
+            return channelResult(true, "", channelMeta);
         }
 
         if (channel === "ooms web") {
@@ -262,7 +285,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
             if (!templateRow?.template_id) {
                 return channelResult(false, `WhatsApp Web template mapping missing for type '${notificationType}'`);
             }
-            return channelResult(true);
+            return channelResult(true, "", channelMeta);
         }
 
         if (channel === "ooms system") {
@@ -279,7 +302,7 @@ async function checkWhatsappAvailability(branch_id, notificationType) {
             if (!mapping?.map_id) {
                 return channelResult(false, `OOMS system template mapping missing for type '${notificationType}'`);
             }
-            return channelResult(true);
+            return channelResult(true, "", channelMeta);
         }
 
         return channelResult(false, "Unsupported WhatsApp channel");

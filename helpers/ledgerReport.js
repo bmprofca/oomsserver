@@ -167,7 +167,7 @@ export async function collectLedgerStatement({
 
     const [transactions] = await pool.query(
         `SELECT transaction_id, transaction_date, transaction_type, amount,
-                invoice_no, party1_type, party1_id, party2_type, party2_id, remark
+                invoice_id, invoice_no, party1_type, party1_id, party2_type, party2_id, remark
          FROM \`transactions\`
          WHERE branch_id = ?
            AND (party1_type = ? AND party1_id = ? OR party2_type = ? AND party2_id = ?)
@@ -176,6 +176,72 @@ export async function collectLedgerStatement({
          ORDER BY transaction_date ASC, id ASC`,
         [branch_id, partyType, partyId, partyType, partyId, fromDate, toDate]
     );
+
+    // Sale rows store party1 as type "sale" (invoice id) — resolve firm name for Particulars
+    const saleInvoiceIds = [
+        ...new Set(
+            transactions
+                .filter((r) => String(r.transaction_type || "").toLowerCase() === "sale" && r.invoice_id)
+                .map((r) => String(r.invoice_id).trim())
+                .filter(Boolean)
+        ),
+    ];
+    const saleFirmByInvoiceId = new Map();
+    if (saleInvoiceIds.length > 0) {
+        const ph = saleInvoiceIds.map(() => "?").join(", ");
+        try {
+            const [firmRows] = await pool.query(
+                `SELECT se.invoice_id, se.firm_id, f.firm_name
+                 FROM sale_entries se
+                 LEFT JOIN firms f
+                   ON f.firm_id = se.firm_id
+                  AND CAST(f.branch_id AS CHAR) = CAST(se.branch_id AS CHAR)
+                  AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                 WHERE CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND se.invoice_id IN (${ph})`,
+                [branch_id, ...saleInvoiceIds]
+            );
+            for (const fr of firmRows || []) {
+                const inv = fr?.invoice_id != null ? String(fr.invoice_id).trim() : "";
+                if (!inv) continue;
+                const name = fr?.firm_name != null ? String(fr.firm_name).trim() : "";
+                if (name) saleFirmByInvoiceId.set(inv, name);
+            }
+        } catch (_) {
+            // leave map empty; particular falls back below
+        }
+    }
+
+    // Also batch sale service names (comma-joined) as primary Particulars label
+    const saleServiceByInvoiceId = new Map();
+    if (saleInvoiceIds.length > 0) {
+        const ph = saleInvoiceIds.map(() => "?").join(", ");
+        try {
+            const [svcRows] = await pool.query(
+                `SELECT si.invoice_id, s.name
+                 FROM sale_items si
+                 JOIN services s ON s.service_id = si.service_id
+                 WHERE CAST(si.branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND si.invoice_id IN (${ph})
+                 ORDER BY si.id ASC`,
+                [branch_id, ...saleInvoiceIds]
+            );
+            for (const sr of svcRows || []) {
+                const inv = sr?.invoice_id != null ? String(sr.invoice_id).trim() : "";
+                if (!inv) continue;
+                const name = sr?.name != null ? String(sr.name).trim() : "";
+                if (!name) continue;
+                const existing = saleServiceByInvoiceId.get(inv);
+                if (existing) {
+                    saleServiceByInvoiceId.set(inv, `${existing}, ${name}`);
+                } else {
+                    saleServiceByInvoiceId.set(inv, name);
+                }
+            }
+        } catch (_) {
+            // optional fallback
+        }
+    }
 
     const oppositeKeys = new Set();
     for (const row of transactions) {
@@ -230,23 +296,37 @@ export async function collectLedgerStatement({
         const details = oppositeSnippet.bank || oppositeSnippet.client || {};
 
         let particular = "";
-        if (hasOppositeParty) {
+        let particularSub = "";
+        let particularRemark = "";
+        const isSale = String(row.transaction_type || "").toLowerCase() === "sale";
+        if (isSale) {
+            const inv = row.invoice_id != null ? String(row.invoice_id).trim() : "";
+            particular = (inv && saleServiceByInvoiceId.get(inv)) || "";
+            particularSub = (inv && saleFirmByInvoiceId.get(inv)) || "";
+            if (!particular && particularSub) {
+                particular = particularSub;
+                particularSub = "";
+            }
+            if (row.remark) particularRemark = String(row.remark).trim();
+        } else if (hasOppositeParty) {
             if (oppType === "client") {
                 particular = details.name || details.username || "";
             } else if (oppType === "bank") {
                 particular = details.holder || details.bank || "";
             }
         }
-        if (row.remark) {
+        if (!isSale && row.remark) {
             particular = particular
                 ? `${particular}\n${row.remark}`
                 : row.remark;
         }
-        if (!particular) particular = "-";
+        if (!particular) particular = particularRemark || "-";
 
         statementData.push({
             date: row.transaction_date,
             particular,
+            particular_sub: particularSub || "",
+            particular_remark: particularRemark || "",
             type: row.transaction_type || "",
             invoice_no: row.invoice_no || "N/A",
             debit: rowDebit,
@@ -586,6 +666,8 @@ export function generateLedgerPdfBuffer({
             const rows = Array.isArray(statementData) ? statementData : [];
             rows.forEach((row, index) => {
                 const particularText = String(row.particular || "-");
+                const particularSub = String(row.particular_sub || "").trim();
+                const particularRemark = String(row.particular_remark || "").trim();
                 const typeText = formatTypeLabel(row.type);
                 const voucherText = String(row.invoice_no || "N/A");
                 const dateText = formatDateForDisplay(row.date);
@@ -595,11 +677,21 @@ export function generateLedgerPdfBuffer({
                 const debitText = formatCurrency(debit);
                 const creditText = formatCurrency(credit);
                 const balanceText = formatCurrency(balance, { signed: true });
+                const subFontSize = 8;
+                const particularWidth = Math.max(8, cols.particular.width - cellPadX * 2);
 
+                const particularH =
+                    measureH(particularText, cols.particular) +
+                    (particularSub
+                        ? measureH(particularSub, cols.particular, "Helvetica", subFontSize) + 2
+                        : 0) +
+                    (particularRemark
+                        ? measureH(particularRemark, cols.particular, "Helvetica", subFontSize) + 2
+                        : 0);
                 const contentH = Math.max(
                     measureH(String(index + 1), cols.serial),
                     measureH(dateText, cols.date),
-                    measureH(particularText, cols.particular),
+                    particularH,
                     measureH(typeText, cols.type),
                     measureH(voucherText, cols.voucher),
                     measureH(debitText, cols.debit),
@@ -623,10 +715,44 @@ export function generateLedgerPdfBuffer({
                     ...textOpts(cols.date),
                     height: rowHeight - cellPadY,
                 });
-                doc.text(particularText, textX(cols.particular), textY, {
-                    ...textOpts(cols.particular),
-                    height: rowHeight - cellPadY,
+                let particularCursorY = textY;
+                doc.fillColor("#0f172a").font("Helvetica").fontSize(bodyFontSize);
+                doc.text(particularText, textX(cols.particular), particularCursorY, {
+                    width: particularWidth,
+                    align: cols.particular.align,
+                    lineGap: 1,
                 });
+                particularCursorY += doc.heightOfString(particularText, {
+                    width: particularWidth,
+                    lineGap: 1,
+                });
+                if (particularSub) {
+                    particularCursorY += 1;
+                    doc.fillColor("#64748b")
+                        .font("Helvetica")
+                        .fontSize(subFontSize)
+                        .text(particularSub, textX(cols.particular), particularCursorY, {
+                            width: particularWidth,
+                            align: cols.particular.align,
+                            lineGap: 1,
+                        });
+                    particularCursorY += doc.heightOfString(particularSub, {
+                        width: particularWidth,
+                        lineGap: 1,
+                    });
+                }
+                if (particularRemark) {
+                    particularCursorY += 1;
+                    doc.fillColor("#475569")
+                        .font("Helvetica")
+                        .fontSize(subFontSize)
+                        .text(particularRemark, textX(cols.particular), particularCursorY, {
+                            width: particularWidth,
+                            align: cols.particular.align,
+                            lineGap: 1,
+                        });
+                }
+                doc.fillColor("#334155").font("Helvetica").fontSize(bodyFontSize);
                 doc.text(typeText, textX(cols.type), textY, {
                     ...textOpts(cols.type),
                     height: rowHeight - cellPadY,

@@ -983,6 +983,9 @@ async function sendDocumentSharingWhatsapp({
     document_link,
     remark = "",
     firm_name = "",
+    mobile: mobileOverride,
+    email: emailOverride,
+    country_code: countryCodeOverride,
     variables: extraVariables = {},
 }) {
     if (!branch_id || !username) {
@@ -993,12 +996,22 @@ async function sendDocumentSharingWhatsapp({
     }
 
     const clientData = await USER_SNIPPED_DATA(username);
+    const recipientMobile =
+        mobileOverride != null && String(mobileOverride).trim()
+            ? String(mobileOverride).trim()
+            : clientData?.mobile;
+    const recipientEmail =
+        emailOverride != null && String(emailOverride).trim()
+            ? String(emailOverride).trim()
+            : clientData?.email != null
+              ? String(clientData.email)
+              : "";
     const recipientNumber = formatWhatsappNumber(
-        clientData?.country_code,
-        clientData?.mobile
+        countryCodeOverride || clientData?.country_code,
+        recipientMobile
     );
     if (!recipientNumber) {
-        throw new Error("Client does not have a valid mobile number");
+        throw new Error("A valid mobile number is required");
     }
 
     const channel = await getBranchWhatsappChannel(branch_id);
@@ -1046,8 +1059,8 @@ async function sendDocumentSharingWhatsapp({
     const variables = {
         "{{name}}": clientData?.name != null ? String(clientData.name) : String(username),
         "{{username}}": String(username),
-        "{{mobile}}": clientData?.mobile != null ? String(clientData.mobile) : "",
-        "{{email}}": clientData?.email != null ? String(clientData.email) : "",
+        "{{mobile}}": recipientMobile != null ? String(recipientMobile) : "",
+        "{{email}}": recipientEmail,
         "{{firm_name}}": firm_name != null ? String(firm_name) : "",
         "{{document_name}}": document_name != null ? String(document_name) : "Document",
         "{{document_link}}": String(document_link),

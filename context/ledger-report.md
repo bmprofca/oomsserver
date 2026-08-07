@@ -13,7 +13,7 @@ generateLedgerPdfBuffer (portrait A4)
         ↓
 GET /transaction/download/ledger  →  PDF bytes
    or
-POST /transaction/ledger/share    →  upload PDF → WhatsApp / email / SMS
+POST /transaction/ledger/share    →  upload PDF → WhatsApp / email
 ```
 
 **Helper:** `SERVER/helpers/ledgerReport.js`  
@@ -26,9 +26,9 @@ POST /transaction/ledger/share    →  upload PDF → WhatsApp / email / SMS
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/transaction/download/ledger` | branch | Query: `party_type`, `party_id`, `from_date`, `to_date`, `format` (`pdf` / excel / csv) |
-| POST | `/transaction/ledger/share` | branch | Body: party + date range + `channels[]`; currently **client** party only |
+| POST | `/transaction/ledger/share` | branch | Body: party + date range + `channels[]` (`whatsapp` / `email`) + optional `mobile` / `email`; currently **client** party only. Delivery uses payload contacts (fallback to profile). |
 
-Share flow: build PDF → upload to `upload.onesaas.in` → send via notification type **`document sharing`**.
+Share flow: build PDF → upload to `upload.onesaas.in` → send via notification type **`document sharing`**. Recipient WhatsApp/email addresses come from the request body when provided (`sendDocumentSharingWhatsapp` accepts `mobile` / `email` overrides).
 
 ---
 
@@ -45,6 +45,18 @@ Returns:
 - `summary` — totalDebit, totalCredit, closingBalance
 
 Debit/credit rules match `/transaction/list` party1/party2 logic.
+
+### Sale particulars
+
+Sale transactions use `party1_type = 'sale'` (invoice id), so opposite-party snippets are empty — do **not** leave Particulars blank.
+
+Format for sale rows (matches ledger UI):
+
+1. **Service names** (primary) — all names joined with `, `
+2. **Firm name** (secondary, smaller) via `particular_sub` when linked firm exists
+3. Remark appended under services when present; else `-` if nothing else
+
+Batch-load firms/services by `invoice_id` inside `collectLedgerStatement` (select includes `invoice_id`).
 
 ---
 

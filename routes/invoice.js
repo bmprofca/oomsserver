@@ -14,7 +14,6 @@ import { isValidFormatForType, INVOICE_GENERATE_TYPES } from "../helpers/invoice
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import {
     sendDocumentSharingWhatsapp,
-    DOCUMENT_SHARING_TEMPLATE_NAME,
 } from "../helpers/whatsappNotification.js";
 import {
     getActivePaymentTemplate,
@@ -22,7 +21,6 @@ import {
     renderTemplate,
     sendEmail,
 } from "./payment_reminder.js";
-import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 
 const router = express.Router();
 
@@ -302,7 +300,7 @@ router.post("/generate", auth, validateBranch, generateHandler);
 
 /**
  * Generate invoice PDF → upload → share via document sharing templates.
- * Body: { invoice_id, type, channels: ['whatsapp'|'email'|'sms'] }
+ * Body: { invoice_id, type, channels: ['whatsapp'|'email'], mobile?, email? }
  */
 router.post("/share", auth, validateBranch, async (req, res) => {
     try {
@@ -311,7 +309,7 @@ router.post("/share", auth, validateBranch, async (req, res) => {
             req.headers.username || req.headers.Username || req.user?.username;
         const invoiceId = String(req.body?.invoice_id || "").trim();
         const bodyType = req.body?.type;
-        const allowedChannels = new Set(["whatsapp", "email", "sms"]);
+        const allowedChannels = new Set(["whatsapp", "email"]);
         const requestedChannels = Array.isArray(req.body?.channels)
             ? [
                   ...new Set(
@@ -344,7 +342,7 @@ router.post("/share", auth, validateBranch, async (req, res) => {
         if (channels.length === 0 || channels.length !== requestedChannels.length) {
             return res.status(400).json({
                 success: false,
-                message: "channels must include whatsapp, email, and/or sms",
+                message: "channels must include whatsapp and/or email",
             });
         }
         if (!sent_by) {
@@ -424,18 +422,30 @@ router.post("/share", auth, validateBranch, async (req, res) => {
         const sharedBy = await USER_SNIPPED_DATA(sent_by);
         const invoiceLabel = tx.invoice_no || invoiceId;
         const remark = `${invoiceType} invoice ${invoiceLabel}`;
+        const bodyMobile =
+            req.body?.mobile != null ? String(req.body.mobile).trim() : "";
+        const bodyEmail =
+            req.body?.email != null ? String(req.body.email).trim() : "";
+        const bodyCountryCode =
+            req.body?.country_code != null
+                ? String(req.body.country_code).replace(/\D/g, "").trim()
+                : "";
+        const recipientMobile = bodyMobile || client?.mobile || "";
+        const recipientEmail = bodyEmail || client?.email || "";
+        const recipientCountryCode =
+            bodyCountryCode || client?.country_code || "91";
         const variables = {
             name: client?.name || clientUsername,
-            mobile: client?.mobile || "",
-            email: client?.email || "",
+            mobile: recipientMobile,
+            email: recipientEmail,
             firm_name: client?.name || "",
             document_name: documentName,
             document_link: documentUrl,
             shared_by: sharedBy?.name || sent_by,
             remark,
             "{{name}}": client?.name || clientUsername,
-            "{{mobile}}": client?.mobile || "",
-            "{{email}}": client?.email || "",
+            "{{mobile}}": recipientMobile,
+            "{{email}}": recipientEmail,
             "{{firm_name}}": client?.name || "",
             "{{document_name}}": documentName,
             "{{document_link}}": documentUrl,
@@ -447,8 +457,8 @@ router.post("/share", auth, validateBranch, async (req, res) => {
         for (const channel of channels) {
             try {
                 if (channel === "email") {
-                    if (!client?.email) {
-                        throw new Error("Client does not have an email address");
+                    if (!recipientEmail) {
+                        throw new Error("Email address is required");
                     }
                     let template;
                     try {
@@ -465,7 +475,7 @@ router.post("/share", auth, validateBranch, async (req, res) => {
                     const smtpConfig = await getActiveSmtpConfig(branch_id);
                     const sendResult = await sendEmail(
                         smtpConfig,
-                        client.email,
+                        recipientEmail,
                         renderTemplate(template.subject, variables),
                         renderTemplate(template.html_body, variables),
                         template.text_body
@@ -476,20 +486,6 @@ router.post("/share", auth, validateBranch, async (req, res) => {
                         status: "sent",
                         message_id: sendResult.messageId || null,
                     };
-                } else if (channel === "sms") {
-                    if (!client?.mobile) {
-                        throw new Error("Client does not have a mobile number");
-                    }
-                    const sendResult = await sendSingleSmsNotification({
-                        branch_id,
-                        mobile: client.mobile,
-                        templateName: DOCUMENT_SHARING_TEMPLATE_NAME,
-                        variables,
-                    });
-                    channelResults.sms = {
-                        status: "sent",
-                        message_id: sendResult.request_id || null,
-                    };
                 } else if (channel === "whatsapp") {
                     await sendDocumentSharingWhatsapp({
                         branch_id,
@@ -498,6 +494,9 @@ router.post("/share", auth, validateBranch, async (req, res) => {
                         document_name: documentName,
                         document_link: documentUrl,
                         remark,
+                        mobile: recipientMobile,
+                        email: recipientEmail,
+                        country_code: recipientCountryCode,
                     });
                     channelResults.whatsapp = { status: "sent" };
                 }

@@ -91,7 +91,8 @@ POST /invoice/share
 
 - Auth: `auth` + `validateBranch`
 - Generates PDF, uploads, then sends via document-sharing templates (`channels`).
-- Body: `invoice_id`, `type` (same generate types), `channels`
+- Body: `invoice_id`, `type` (same generate types), `channels`, optional `mobile` / `email`
+- Delivery uses payload `mobile` / `email` when present; otherwise falls back to the resolved party profile.
 
 Recipient resolution (high level):
 
