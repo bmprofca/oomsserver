@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import pool from "../db.js";
+import { formatPurchaseParticularsText } from "./purchaseParticulars.js";
 
 function formatCurrency(amount, { signed = false } = {}) {
     const n = Number(amount) || 0;
@@ -243,6 +244,71 @@ export async function collectLedgerStatement({
         }
     }
 
+    const purchaseInvoiceIds = [
+        ...new Set(
+            transactions
+                .filter((r) => String(r.transaction_type || "").toLowerCase() === "purchase" && r.invoice_id)
+                .map((r) => String(r.invoice_id).trim())
+                .filter(Boolean)
+        ),
+    ];
+    const purchaseServiceByInvoiceId = new Map();
+    const purchaseTaskByInvoiceId = new Map();
+    const purchaseFirmByInvoiceId = new Map();
+    if (purchaseInvoiceIds.length > 0) {
+        const ph = purchaseInvoiceIds.map(() => "?").join(", ");
+        try {
+            const [svcRows] = await pool.query(
+                `SELECT pi.invoice_id, s.name
+                 FROM purchase_items pi
+                 JOIN services s ON s.service_id = pi.service_id
+                 WHERE CAST(pi.branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND pi.invoice_id IN (${ph})
+                 ORDER BY pi.id ASC`,
+                [branch_id, ...purchaseInvoiceIds]
+            );
+            for (const sr of svcRows || []) {
+                const inv = sr?.invoice_id != null ? String(sr.invoice_id).trim() : "";
+                if (!inv) continue;
+                const name = sr?.name != null ? String(sr.name).trim() : "";
+                if (!name) continue;
+                const existing = purchaseServiceByInvoiceId.get(inv);
+                if (existing) {
+                    purchaseServiceByInvoiceId.set(inv, `${existing}, ${name}`);
+                } else {
+                    purchaseServiceByInvoiceId.set(inv, name);
+                }
+            }
+        } catch (_) {
+            // optional
+        }
+        try {
+            const [peRows] = await pool.query(
+                `SELECT pe.invoice_id, pe.task_id, f.firm_name
+                 FROM purchase_entries pe
+                 LEFT JOIN tasks t
+                   ON t.task_id = pe.task_id
+                  AND CAST(t.branch_id AS CHAR) = CAST(pe.branch_id AS CHAR)
+                 LEFT JOIN firms f
+                   ON f.firm_id = t.firm_id
+                  AND CAST(f.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
+                  AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                 WHERE CAST(pe.branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND pe.invoice_id IN (${ph})`,
+                [branch_id, ...purchaseInvoiceIds]
+            );
+            for (const pe of peRows || []) {
+                const inv = pe?.invoice_id != null ? String(pe.invoice_id).trim() : "";
+                const tid = pe?.task_id != null ? String(pe.task_id).trim() : "";
+                const fname = pe?.firm_name != null ? String(pe.firm_name).trim() : "";
+                if (inv && tid) purchaseTaskByInvoiceId.set(inv, tid);
+                if (inv && fname) purchaseFirmByInvoiceId.set(inv, fname);
+            }
+        } catch (_) {
+            // optional
+        }
+    }
+
     const oppositeKeys = new Set();
     for (const row of transactions) {
         const isParty2 = row.party2_type === partyType && String(row.party2_id) === partyId;
@@ -298,7 +364,9 @@ export async function collectLedgerStatement({
         let particular = "";
         let particularSub = "";
         let particularRemark = "";
-        const isSale = String(row.transaction_type || "").toLowerCase() === "sale";
+        const txTypeLower = String(row.transaction_type || "").toLowerCase();
+        const isSale = txTypeLower === "sale";
+        const isPurchase = txTypeLower === "purchase";
         if (isSale) {
             const inv = row.invoice_id != null ? String(row.invoice_id).trim() : "";
             particular = (inv && saleServiceByInvoiceId.get(inv)) || "";
@@ -308,6 +376,30 @@ export async function collectLedgerStatement({
                 particularSub = "";
             }
             if (row.remark) particularRemark = String(row.remark).trim();
+        } else if (isPurchase) {
+            const inv = row.invoice_id != null ? String(row.invoice_id).trim() : "";
+            const svcJoined = (inv && purchaseServiceByInvoiceId.get(inv)) || "";
+            const serviceNames = svcJoined
+                ? svcJoined.split(", ").map((s) => s.trim()).filter(Boolean)
+                : [];
+            const tid = inv ? purchaseTaskByInvoiceId.get(inv) : "";
+            const firmName = inv ? purchaseFirmByInvoiceId.get(inv) : "";
+            let partyLabel = "";
+            if (hasOppositeParty) {
+                if (oppType === "client" || oppType === "ca") {
+                    partyLabel = details.name || details.username || "";
+                } else if (oppType === "bank") {
+                    partyLabel = details.holder || details.bank || "";
+                }
+            }
+            particular = formatPurchaseParticularsText({
+                firmName: firmName || null,
+                partyName: firmName ? null : partyLabel || null,
+                serviceNames,
+                isTask: Boolean(tid),
+            });
+            particularSub = "";
+            if (row.remark) particularRemark = String(row.remark).trim();
         } else if (hasOppositeParty) {
             if (oppType === "client") {
                 particular = details.name || details.username || "";
@@ -315,7 +407,7 @@ export async function collectLedgerStatement({
                 particular = details.holder || details.bank || "";
             }
         }
-        if (!isSale && row.remark) {
+        if (!isSale && !isPurchase && row.remark) {
             particular = particular
                 ? `${particular}\n${row.remark}`
                 : row.remark;

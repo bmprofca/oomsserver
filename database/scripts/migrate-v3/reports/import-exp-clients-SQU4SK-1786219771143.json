@@ -1,0 +1,323 @@
+{
+  "branch_id": "SQU4SK",
+  "args": {
+    "limit": 5,
+    "offset": 0,
+    "dryRun": false,
+    "json": "C:/Users/rinku/Downloads/exp.php.json"
+  },
+  "summary": [
+    {
+      "username": "ANBD1WI02M",
+      "created": true,
+      "skipped": false,
+      "firms": 0,
+      "documents": 0,
+      "docsFailed": 0,
+      "opening_balance": null
+    },
+    {
+      "username": "HW49ARNJPF",
+      "created": true,
+      "skipped": false,
+      "firms": 0,
+      "documents": 0,
+      "docsFailed": 0,
+      "opening_balance": {
+        "amount": 142.86,
+        "type": "credit"
+      }
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "created": true,
+      "skipped": false,
+      "firms": 1,
+      "documents": 15,
+      "docsFailed": 15,
+      "opening_balance": {
+        "amount": 3000,
+        "type": "debit"
+      }
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "created": true,
+      "skipped": false,
+      "firms": 1,
+      "documents": 15,
+      "docsFailed": 15,
+      "opening_balance": null
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "created": true,
+      "skipped": false,
+      "firms": 1,
+      "documents": 7,
+      "docsFailed": 7,
+      "opening_balance": null
+    }
+  ],
+  "failedDocs": [
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "QYZ15UL32V",
+      "file_name": "68fcb673ac4d93.69526412.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcb673ac4d93.69526412.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "GD65QCFO0S",
+      "file_name": "68fcb75669b7d4.97385076.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcb75669b7d4.97385076.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "T2OIE9D3WJ",
+      "file_name": "68fcb8a717cf07.66097607.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcb8a717cf07.66097607.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "Z1VXDSILW2",
+      "file_name": "68fcb97090d715.44490484.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcb97090d715.44490484.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "HXKM29DPUQ",
+      "file_name": "68fcf86ccd5710.83934177.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcf86ccd5710.83934177.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "Y8GKBCVRU3",
+      "file_name": "68fcf88ead9139.11281806.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcf88ead9139.11281806.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "ZLEMU5XVWQ",
+      "file_name": "68fcf8c5bccc86.10839581.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcf8c5bccc86.10839581.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "Y14CGJNBW8",
+      "file_name": "68fcf8da37a4b6.18542425.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcf8da37a4b6.18542425.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "DI8V5OWT1M",
+      "file_name": "68fcf94acb9757.63078195.pdf",
+      "url": "https://ooms.in/uploads/documents//68fcf94acb9757.63078195.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "2QRVK74HLS",
+      "file_name": "68fcf965111107.17856395.pdf",
+      "url": "https://ooms.in/uploads/documents//68fcf965111107.17856395.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "8QMPRIUKHV",
+      "file_name": "68fcf98b3da5c3.32705877.pdf",
+      "url": "https://ooms.in/uploads/documents//68fcf98b3da5c3.32705877.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "K0A1FCPNUE",
+      "file_name": "68fcf9a71aaf37.94567585.pdf",
+      "url": "https://ooms.in/uploads/documents//68fcf9a71aaf37.94567585.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "B59PDCUV40",
+      "file_name": "6a4f8138bef3f5.78652143.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/6a4f8138bef3f5.78652143.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "WL15GJX92Z",
+      "file_name": "6a4f8157dc0429.67121887.pdf",
+      "url": "https://ooms.in/uploads/documents/B/L &amp; P/L Account/6a4f8157dc0429.67121887.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "AQGTV7EUP6",
+      "document_id": "I4J16QXA7V",
+      "file_name": "6a4f8171abf4d6.35307577.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/6a4f8171abf4d6.35307577.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "XMONSLFGUW",
+      "file_name": "68fcdac287c118.35031220.jpg",
+      "url": "https://ooms.in/uploads/documents//68fcdac287c118.35031220.jpg",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "K7SPHD9XBO",
+      "file_name": "68fcdaee37b0e4.84034520.jpg",
+      "url": "https://ooms.in/uploads/documents//68fcdaee37b0e4.84034520.jpg",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "OUZEAPSLJX",
+      "file_name": "68fcdb07ea4eb5.97585096.jpg",
+      "url": "https://ooms.in/uploads/documents//68fcdb07ea4eb5.97585096.jpg",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "YJI2HCZ48E",
+      "file_name": "68fcdb6ed9a260.43314907.jpg",
+      "url": "https://ooms.in/uploads/documents//68fcdb6ed9a260.43314907.jpg",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "G4S2THLCNO",
+      "file_name": "68fcdb8a805851.95694450.pdf",
+      "url": "https://ooms.in/uploads/documents//68fcdb8a805851.95694450.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "346OGNMQDR",
+      "file_name": "68fcf0a981c8e0.49499978.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcf0a981c8e0.49499978.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "D5NBZOMSGU",
+      "file_name": "68fcf60050bc33.13177545.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcf60050bc33.13177545.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "FY3TDWZEO9",
+      "file_name": "68fcf61b5a0cb9.36277521.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcf61b5a0cb9.36277521.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "PVFW024BQM",
+      "file_name": "68fcf6698c1941.24878057.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcf6698c1941.24878057.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "6LYOV435BM",
+      "file_name": "68fcf6b5012624.68654446.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcf6b5012624.68654446.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "XSRL9A73CW",
+      "file_name": "68fcf70396af74.17003072.jpg",
+      "url": "https://ooms.in/uploads/documents//68fcf70396af74.17003072.jpg",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "RZ1LYOWAXC",
+      "file_name": "69230792343e31.79974547.pdf",
+      "url": "https://ooms.in/uploads/documents/B/L &amp; P/L Account/69230792343e31.79974547.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "XI5H0SWAQ7",
+      "file_name": "6a44d2e66b4349.60973341.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/6a44d2e66b4349.60973341.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "G04NX3ZFJQ",
+      "file_name": "6a44d365ebb982.19194976.pdf",
+      "url": "https://ooms.in/uploads/documents/B/L &amp; P/L Account/6a44d365ebb982.19194976.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "ILYRAZPBXF",
+      "document_id": "NBCZ7PVMKO",
+      "file_name": "6a44d375682118.82979428.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/6a44d375682118.82979428.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "3O4AKSHREJ",
+      "file_name": "68fcfe552d3534.91537307.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcfe552d3534.91537307.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "MT8AR5XFIP",
+      "file_name": "68fcfe6ddaeb60.55554314.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcfe6ddaeb60.55554314.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "PYVODH481X",
+      "file_name": "68fcfee7647296.80301103.xlsx",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fcfee7647296.80301103.xlsx",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "46E8K7PZBO",
+      "file_name": "68fcffb8ded1e7.97518167.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fcffb8ded1e7.97518167.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "GXRATMYJ18",
+      "file_name": "68fd005fcfe104.28282658.pdf",
+      "url": "https://ooms.in/uploads/documents/Full Set/68fd005fcfe104.28282658.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "FNOD4KIP3A",
+      "file_name": "68fd0076568f11.25421698.pdf",
+      "url": "https://ooms.in/uploads/documents/ITR-V (Acknowledgement)/68fd0076568f11.25421698.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    },
+    {
+      "username": "SBZM5DT2AK",
+      "document_id": "NYEFIR7K3T",
+      "file_name": "68fd0116e83962.96993475.pdf",
+      "url": "https://ooms.in/uploads/documents//68fd0116e83962.96993475.pdf",
+      "reason": "Failed to download file: HTTP 404"
+    }
+  ]
+}

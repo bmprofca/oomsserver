@@ -3,6 +3,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 import { executeCreatePurchase, executeEditPurchase } from "../helpers/purchaseCreate.js";
+import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ async function createPurchase({
     party_type,
     transaction_date,
     remark,
+    task_id,
     items
 }) {
     const username = req.headers["username"] || req.headers["Username"] || "";
@@ -26,6 +28,7 @@ async function createPurchase({
             party_type,
             transaction_date,
             remark,
+            task_id,
             items,
         });
         return res.status(200).json({
@@ -49,6 +52,7 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             user_type,
             transaction_date,
             remark,
+            task_id,
             items
         } = req.body || {};
 
@@ -66,6 +70,7 @@ router.post("/create/user", auth, validateBranch, async (req, res) => {
             party_type: user_type,
             transaction_date,
             remark,
+            task_id,
             items
         });
     } catch (error) {
@@ -285,7 +290,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const [rows] = await pool.query(
             `SELECT invoice.invoice_id, invoice.invoice_no, invoice.subtotal, invoice.discount_type, invoice.discount_perc_rate, invoice.discount_value, invoice.additional_charge, invoice.total, invoice.round_off, invoice.grand_total,
-                    pe.purchase_id, pe.party_id AS entry_party_id, pe.party_type AS entry_party_type, pe.purchase_date AS purchase_entry_date, pe.amount AS purchase_entry_amount,
+                    pe.purchase_id, pe.party_id AS entry_party_id, pe.party_type AS entry_party_type, pe.task_id AS entry_task_id, pe.purchase_date AS purchase_entry_date, pe.amount AS purchase_entry_amount,
                     pe.create_by AS entry_create_by, pe.modify_by AS entry_modify_by,
                     transactions.transaction_id, transactions.transaction_date, transactions.amount, transactions.remark,
                     transactions.party1_type, transactions.party1_id, transactions.create_by, transactions.modify_by
@@ -359,6 +364,42 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         );
         const total_amount = Number(totalAmountRows) || 0;
 
+        const taskIds = [
+            ...new Set(
+                rows
+                    .map((r) =>
+                        r.entry_task_id != null && String(r.entry_task_id).trim() !== ""
+                            ? String(r.entry_task_id).trim()
+                            : null
+                    )
+                    .filter(Boolean)
+            ),
+        ];
+        const taskFirmByTaskId = new Map();
+        if (taskIds.length > 0) {
+            const ph = taskIds.map(() => "?").join(", ");
+            try {
+                const [taskFirmRows] = await pool.query(
+                    `SELECT t.task_id, f.firm_name
+                     FROM tasks t
+                     LEFT JOIN firms f
+                       ON f.firm_id = t.firm_id
+                      AND CAST(f.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
+                      AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                     WHERE CAST(t.branch_id AS CHAR) = CAST(? AS CHAR)
+                       AND t.task_id IN (${ph})`,
+                    [branch_id, ...taskIds]
+                );
+                for (const tr of taskFirmRows || []) {
+                    const tid = tr?.task_id != null ? String(tr.task_id).trim() : "";
+                    const fname = tr?.firm_name != null ? String(tr.firm_name).trim() : "";
+                    if (tid && fname) taskFirmByTaskId.set(tid, fname);
+                }
+            } catch (_) {
+                // optional enrichment
+            }
+        }
+
         const data = [];
         for (let index = 0; index < rows.length; index++) {
             const row = rows[index];
@@ -376,12 +417,33 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             const create_by = createByKey ? await USER_SNIPPED_DATA(createByKey) : {};
             const modify_by = modifyByKey ? await USER_SNIPPED_DATA(modifyByKey) : {};
             const lineItems = itemsByPurchaseId.get(row.purchase_id) || [];
+            const task_id =
+                row.entry_task_id != null && String(row.entry_task_id).trim() !== ""
+                    ? String(row.entry_task_id).trim()
+                    : null;
+            const task_firm_name = task_id ? taskFirmByTaskId.get(task_id) || null : null;
+            const serviceNames = lineItems
+                .map((li) => (li?.service?.name != null ? String(li.service.name).trim() : ""))
+                .filter(Boolean);
+            const partyName =
+                purchase_type === "bank"
+                    ? purchase_party?.holder || purchase_party?.bank || ""
+                    : purchase_party?.name || "";
+            const particulars = formatPurchaseParticularsText({
+                firmName: task_firm_name,
+                partyName: task_firm_name ? null : partyName,
+                serviceNames,
+                isTask: Boolean(task_id),
+            });
 
             data.push({
                 transaction_id: row.transaction_id,
                 transaction_date: row.transaction_date ?? row.purchase_entry_date,
                 amount: row.amount ?? row.purchase_entry_amount,
                 remark: row.remark,
+                task_id,
+                task_firm_name,
+                particulars: particulars || null,
                 create_by,
                 modify_by,
                 invoice_no: row.invoice_no,

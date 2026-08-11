@@ -3150,6 +3150,149 @@ router.post("/details/documents/create/mca", auth, validateBranch, async (req, r
     }
 });
 
+router.post("/details/documents/create/general", auth, validateBranch, async (req, res) => {
+    const conn = await pool.getConnection();
+    const branch_id = req.branch_id;
+    const createdBy = req.headers["username"] || "";
+    const { firm_id = "", username = "", documents = [] } = req.body;
+
+    if (!firm_id || typeof firm_id !== "string" || firm_id.trim() === "") {
+        conn.release();
+        return res.status(400).json({ success: false, message: "Firm ID is required" });
+    }
+    if (!username || typeof username !== "string" || username.trim() === "") {
+        conn.release();
+        return res.status(400).json({ success: false, message: "Username is required" });
+    }
+    if (!Array.isArray(documents) || documents.length === 0) {
+        conn.release();
+        return res.status(400).json({ success: false, message: "Documents array is required and must not be empty" });
+    }
+
+    const [firmCheck] = await pool.query(
+        "SELECT firm_id FROM firms WHERE firm_id = ? AND branch_id = ? AND is_deleted = '0'",
+        [firm_id.trim(), branch_id]
+    );
+    if (firmCheck.length === 0) {
+        conn.release();
+        return res.status(404).json({ success: false, message: "Firm not found or does not belong to this branch" });
+    }
+
+    const savedFiles = [];
+    try {
+        await conn.beginTransaction();
+
+        for (let i = 0; i < documents.length; i++) {
+            const doc = documents[i];
+            const url = doc?.url;
+            const name = doc?.name ?? null;
+            const remark = doc?.remark ?? null;
+            const category_id = doc?.category || doc?.category_id || null;
+
+            if (!url || typeof url !== "string" || url.trim() === "") {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Document at index ${i} is missing a valid url`,
+                });
+            }
+            if (!category_id || typeof category_id !== "string" || category_id.trim() === "") {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Document at index ${i} is missing a valid category`,
+                });
+            }
+
+            const reserved = ["IT", "GST", "MCA", "TASK"];
+            if (reserved.includes(String(category_id).trim().toUpperCase())) {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Document at index ${i} uses a reserved category`,
+                });
+            }
+
+            const [catCheck] = await conn.query(
+                `SELECT category_id FROM document_categories
+                 WHERE category_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1`,
+                [category_id.trim(), branch_id]
+            );
+            if (catCheck.length === 0) {
+                await conn.rollback();
+                conn.release();
+                return res.status(404).json({
+                    success: false,
+                    message: `Category not found for document at index ${i}`,
+                });
+            }
+
+            let filename, mimeType, size;
+            try {
+                const result = await downloadAndUploadProfileDocument(url.trim(), "general");
+                filename = result.filename;
+                mimeType = result.mimeType;
+                size = result.size;
+            } catch (downloadErr) {
+                await conn.rollback();
+                await rollbackUploadedDocuments(savedFiles);
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: `Failed to download document at index ${i}: ${downloadErr.message}`,
+                });
+            }
+            savedFiles.push({ filename, categoryFolder: "general" });
+
+            const document_id = await UNIQUE_RANDOM_STRING("documents", "document_id", {
+                length: ID_LENGTH,
+                conn,
+            });
+            await conn.query(
+                `INSERT INTO documents (
+                    document_id, branch_id, firm_id, username, category_id, name, remark,
+                    is_reserved, file, size, mime_type, created_by, create_date, modify_by, modify_date, is_deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '1', ?, ?, ?, ?, NOW(), ?, NOW(), '0')`,
+                [
+                    document_id,
+                    branch_id,
+                    firm_id.trim(),
+                    username.trim(),
+                    category_id.trim(),
+                    name,
+                    remark,
+                    filename,
+                    size,
+                    mimeType,
+                    createdBy,
+                    createdBy,
+                ]
+            );
+        }
+
+        await conn.commit();
+        conn.release();
+        return res.status(200).json({
+            success: true,
+            message: "General documents created successfully",
+            data: { firm_id: firm_id.trim(), username: username.trim(), count: documents.length },
+        });
+    } catch (error) {
+        await conn.rollback();
+        await rollbackUploadedDocuments(savedFiles);
+        conn.release();
+        console.error("Error creating general documents:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to create general documents",
+            error: error.message,
+        });
+    }
+});
+
 router.get("/details/documents/types", auth, validateBranch, async (req, res) => {
     return res.status(200).json({
         success: true,
@@ -3212,43 +3355,55 @@ async function getDocumentListByCategory(branch_id, category_id, categoryFolder,
     const month = query.month != null ? String(query.month).trim() : "";
     const type = query.type != null ? String(query.type).trim() : "";
     const year = query.year != null ? String(query.year).trim() : "";
+    const search = query.search != null ? String(query.search).trim() : "";
 
-    const conditions = ["branch_id = ?", "category_id = ?", "is_deleted = '0'"];
+    const conditions = ["d.branch_id = ?", "d.category_id = ?", "d.is_deleted = '0'"];
     const params = [branch_id, category_id];
 
     if (username !== "") {
-        conditions.push("username = ?");
+        conditions.push("d.username = ?");
         params.push(username);
     }
     if (firm_id !== "") {
-        conditions.push("firm_id LIKE ?");
+        conditions.push("d.firm_id LIKE ?");
         params.push(`%${firm_id}%`);
     }
     if (month !== "") {
-        conditions.push("month LIKE ?");
+        conditions.push("d.month LIKE ?");
         params.push(`%${month}%`);
     }
     if (type !== "") {
-        conditions.push("type LIKE ?");
+        conditions.push("d.type LIKE ?");
         params.push(`%${type}%`);
     }
     if (year !== "") {
-        conditions.push("f_year LIKE ?");
+        conditions.push("d.f_year LIKE ?");
         params.push(`%${year}%`);
+    }
+    if (search !== "") {
+        conditions.push("(d.name LIKE ? OR d.remark LIKE ? OR IFNULL(f.firm_name, '') LIKE ?)");
+        const pattern = `%${search}%`;
+        params.push(pattern, pattern, pattern);
     }
 
     const whereClause = conditions.join(" AND ");
 
     const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) AS total FROM documents WHERE ${whereClause}`,
+        `SELECT COUNT(*) AS total
+         FROM documents d
+         LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
+         WHERE ${whereClause}`,
         params
     );
 
     const [rows] = await pool.query(
-        `SELECT document_id, branch_id, firm_id, username, category_id, name, f_year, type, remark, month, file, size, mime_type, created_by, create_date, modify_by, modify_date
-         FROM documents
+        `SELECT d.document_id, d.branch_id, d.firm_id, d.username, d.category_id, d.name, d.f_year, d.type,
+                d.remark, d.month, d.file, d.size, d.mime_type, d.created_by, d.create_date, d.modify_by, d.modify_date,
+                f.firm_name
+         FROM documents d
+         LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
          WHERE ${whereClause}
-         ORDER BY id DESC
+         ORDER BY d.id DESC
          LIMIT ? OFFSET ?`,
         [...params, limitNum, offset]
     );
@@ -3257,6 +3412,7 @@ async function getDocumentListByCategory(branch_id, category_id, categoryFolder,
         document_id: el.document_id,
         branch_id: el.branch_id,
         firm_id: el.firm_id,
+        firm_name: el.firm_name || null,
         username: el.username,
         category_id: el.category_id,
         name: el.name,
@@ -3381,6 +3537,368 @@ router.get("/details/documents/list/mca", auth, validateBranch, async (req, res)
             success: false,
             message: "Failed to fetch MCA documents",
             error: error.message
+        });
+    }
+});
+
+async function assertClientInBranch(branch_id, username) {
+    const [clientCheck] = await pool.query(
+        "SELECT 1 FROM clients WHERE username = ? AND branch_id = ? AND user_type = 'client' AND is_deleted = '0' LIMIT 1",
+        [username, branch_id]
+    );
+    return clientCheck.length > 0;
+}
+
+async function getGeneralDocumentList(branch_id, query) {
+    const page = Number(query.page) || 1;
+    const limitNum = Number(query.limit) || 20;
+    const offset = (page - 1) * limitNum;
+
+    const username = query.username != null ? String(query.username).trim() : "";
+    const firm_id = query.firm_id != null ? String(query.firm_id).trim() : "";
+    const category_id = query.category_id != null ? String(query.category_id).trim() : "";
+    const search = query.search != null ? String(query.search).trim() : "";
+
+    const conditions = [
+        "d.branch_id = ?",
+        "d.is_deleted = '0'",
+        "d.category_id NOT IN ('IT', 'GST', 'MCA', 'TASK')",
+    ];
+    const params = [branch_id];
+
+    if (username !== "") {
+        conditions.push("d.username = ?");
+        params.push(username);
+    }
+    if (firm_id !== "") {
+        conditions.push("d.firm_id = ?");
+        params.push(firm_id);
+    }
+    if (category_id !== "") {
+        conditions.push("d.category_id = ?");
+        params.push(category_id);
+    }
+    if (search !== "") {
+        conditions.push("(d.name LIKE ? OR d.remark LIKE ? OR dc.name LIKE ?)");
+        const pattern = `%${search}%`;
+        params.push(pattern, pattern, pattern);
+    }
+
+    const whereClause = conditions.join(" AND ");
+
+    const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) AS total
+         FROM documents d
+         LEFT JOIN document_categories dc ON dc.category_id = d.category_id AND dc.branch_id = d.branch_id
+         WHERE ${whereClause}`,
+        params
+    );
+
+    const [rows] = await pool.query(
+        `SELECT d.document_id, d.branch_id, d.firm_id, d.username, d.category_id, d.name, d.f_year, d.type,
+                d.remark, d.month, d.file, d.size, d.mime_type, d.created_by, d.create_date, d.modify_by, d.modify_date,
+                dc.name AS category_name, f.firm_name
+         FROM documents d
+         LEFT JOIN document_categories dc ON dc.category_id = d.category_id AND dc.branch_id = d.branch_id
+         LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
+         WHERE ${whereClause}
+         ORDER BY d.id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limitNum, offset]
+    );
+
+    const data = await Promise.all(rows.map(async (el) => ({
+        document_id: el.document_id,
+        branch_id: el.branch_id,
+        firm_id: el.firm_id,
+        firm_name: el.firm_name || null,
+        username: el.username,
+        category_id: el.category_id,
+        category_name: el.category_name || null,
+        name: el.name,
+        f_year: el.f_year,
+        type: el.type,
+        remark: el.remark,
+        month: el.month,
+        file: el.file ? await getProfileDocumentAccessUrl("general", el.file) : null,
+        size: el.size,
+        mime_type: el.mime_type,
+        create_date: el.create_date,
+        modify_date: el.modify_date,
+    })));
+
+    return { data, total, page, limitNum, offset, rowCount: rows.length };
+}
+
+async function getClientTaskDocumentList(branch_id, query) {
+    const page = Number(query.page) || 1;
+    const limitNum = Number(query.limit) || 20;
+    const offset = (page - 1) * limitNum;
+
+    const username = query.username != null ? String(query.username).trim() : "";
+    const firm_id = query.firm_id != null ? String(query.firm_id).trim() : "";
+    const search = query.search != null ? String(query.search).trim() : "";
+    const service = query.service != null ? String(query.service).trim() : "";
+
+    const conditions = [
+        "d.branch_id = ?",
+        "d.category_id = 'TASK'",
+        "d.is_deleted = '0'",
+    ];
+    const params = [branch_id];
+
+    if (username !== "") {
+        conditions.push("d.username = ?");
+        params.push(username);
+    }
+    if (firm_id !== "") {
+        conditions.push("d.firm_id = ?");
+        params.push(firm_id);
+    }
+    if (service !== "") {
+        conditions.push("(t.service_id = ? OR s.service_id = ? OR s.name = ?)");
+        params.push(service, service, service);
+    }
+    if (search !== "") {
+        conditions.push("(d.name LIKE ? OR d.remark LIKE ? OR s.name LIKE ? OR f.firm_name LIKE ?)");
+        const pattern = `%${search}%`;
+        params.push(pattern, pattern, pattern, pattern);
+    }
+
+    const whereClause = conditions.join(" AND ");
+
+    const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) AS total
+         FROM documents d
+         LEFT JOIN tasks t ON t.task_id = d.task_id AND t.branch_id = d.branch_id
+         LEFT JOIN services s ON s.service_id = t.service_id
+         LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
+         WHERE ${whereClause}`,
+        params
+    );
+
+    const [rows] = await pool.query(
+        `SELECT d.document_id, d.branch_id, d.firm_id, d.username, d.category_id, d.name, d.remark,
+                d.file, d.size, d.mime_type, d.task_id, d.created_by, d.create_date, d.modify_by, d.modify_date,
+                f.firm_name, s.name AS service_name, t.task_id AS linked_task_id
+         FROM documents d
+         LEFT JOIN tasks t ON t.task_id = d.task_id AND t.branch_id = d.branch_id
+         LEFT JOIN services s ON s.service_id = t.service_id
+         LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
+         WHERE ${whereClause}
+         ORDER BY d.id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limitNum, offset]
+    );
+
+    const data = await Promise.all(rows.map(async (el) => ({
+        document_id: el.document_id,
+        branch_id: el.branch_id,
+        firm_id: el.firm_id,
+        firm_name: el.firm_name || null,
+        username: el.username,
+        category_id: el.category_id,
+        task_id: el.task_id || el.linked_task_id || null,
+        name: el.name,
+        service_name: el.service_name || null,
+        remark: el.remark,
+        file: el.file ? await getProfileDocumentAccessUrl("task", el.file) : null,
+        size: el.size,
+        mime_type: el.mime_type,
+        create_date: el.create_date,
+        modify_date: el.modify_date,
+    })));
+
+    return { data, total, page, limitNum, offset, rowCount: rows.length };
+}
+
+router.get("/details/documents/list/general", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.query.username != null ? String(req.query.username).trim() : "";
+        if (!username) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, username))) {
+            return res.status(403).json({ success: false, message: "User not found or does not belong to this branch" });
+        }
+        const result = await getGeneralDocumentList(branch_id, req.query);
+        return res.status(200).json({
+            success: true,
+            message: "General documents fetched successfully",
+            data: result.data,
+            pagination: {
+                page: result.page,
+                limit: result.limitNum,
+                total: result.total,
+                total_pages: Math.ceil(result.total / result.limitNum) || 1,
+                is_last_page: result.offset + result.rowCount >= result.total,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching general documents:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch general documents",
+            error: error.message,
+        });
+    }
+});
+
+router.get("/details/documents/list/task", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.query.username != null ? String(req.query.username).trim() : "";
+        if (!username) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, username))) {
+            return res.status(403).json({ success: false, message: "User not found or does not belong to this branch" });
+        }
+        const result = await getClientTaskDocumentList(branch_id, req.query);
+        return res.status(200).json({
+            success: true,
+            message: "Task documents fetched successfully",
+            data: result.data,
+            pagination: {
+                page: result.page,
+                limit: result.limitNum,
+                total: result.total,
+                total_pages: Math.ceil(result.total / result.limitNum) || 1,
+                is_last_page: result.offset + result.rowCount >= result.total,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching task documents:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch task documents",
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * Aggregate client document storage by file type (mime family).
+ * GET /details/documents/storage-usage?username=
+ */
+router.get("/details/documents/storage-usage", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.query.username != null ? String(req.query.username).trim() : "";
+        if (!username) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, username))) {
+            return res.status(403).json({
+                success: false,
+                message: "User not found or does not belong to this branch",
+            });
+        }
+
+        const STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB
+
+        const [rows] = await pool.query(
+            `SELECT
+                COALESCE(NULLIF(TRIM(mime_type), ''), 'unknown') AS mime_type,
+                COUNT(*) AS file_count,
+                COALESCE(SUM(CAST(size AS UNSIGNED)), 0) AS total_bytes
+             FROM documents
+             WHERE branch_id = ?
+               AND username = ?
+               AND is_deleted = '0'
+             GROUP BY COALESCE(NULLIF(TRIM(mime_type), ''), 'unknown')
+             ORDER BY total_bytes DESC`,
+            [branch_id, username]
+        );
+
+        const classifyMime = (mime) => {
+            const m = String(mime || "unknown").toLowerCase();
+            if (m === "unknown" || m === "application/octet-stream") return { key: "other", label: "Other" };
+            if (m.includes("pdf")) return { key: "pdf", label: "PDF" };
+            if (m.startsWith("image/")) return { key: "image", label: "Images" };
+            if (
+                m.includes("spreadsheet") ||
+                m.includes("excel") ||
+                m === "text/csv" ||
+                m.includes("csv")
+            ) {
+                return { key: "spreadsheet", label: "Spreadsheets" };
+            }
+            if (m.includes("word") || m.includes("msword") || m.includes("document")) {
+                return { key: "document", label: "Documents" };
+            }
+            if (
+                m.includes("zip") ||
+                m.includes("rar") ||
+                m.includes("7z") ||
+                m.includes("compressed") ||
+                m.includes("tar") ||
+                m.includes("gzip")
+            ) {
+                return { key: "archive", label: "Archives" };
+            }
+            if (m.startsWith("video/")) return { key: "video", label: "Video" };
+            if (m.startsWith("audio/")) return { key: "audio", label: "Audio" };
+            if (m.startsWith("text/")) return { key: "text", label: "Text" };
+            return { key: "other", label: "Other" };
+        };
+
+        const byTypeMap = new Map();
+        let usedBytes = 0;
+        let totalFiles = 0;
+
+        for (const row of rows) {
+            const bytes = Number(row.total_bytes) || 0;
+            const count = Number(row.file_count) || 0;
+            usedBytes += bytes;
+            totalFiles += count;
+
+            const { key, label } = classifyMime(row.mime_type);
+            const existing = byTypeMap.get(key) || {
+                type: key,
+                label,
+                bytes: 0,
+                count: 0,
+                mime_types: [],
+            };
+            existing.bytes += bytes;
+            existing.count += count;
+            if (row.mime_type && !existing.mime_types.includes(row.mime_type)) {
+                existing.mime_types.push(row.mime_type);
+            }
+            byTypeMap.set(key, existing);
+        }
+
+        const by_type = [...byTypeMap.values()]
+            .sort((a, b) => b.bytes - a.bytes)
+            .map((item) => ({
+                ...item,
+                percent: usedBytes > 0 ? Number(((item.bytes / usedBytes) * 100).toFixed(2)) : 0,
+            }));
+
+        return res.status(200).json({
+            success: true,
+            message: "Document storage usage fetched successfully",
+            data: {
+                username,
+                used_bytes: usedBytes,
+                limit_bytes: STORAGE_LIMIT_BYTES,
+                remaining_bytes: Math.max(0, STORAGE_LIMIT_BYTES - usedBytes),
+                used_percent:
+                    STORAGE_LIMIT_BYTES > 0
+                        ? Number(((usedBytes / STORAGE_LIMIT_BYTES) * 100).toFixed(2))
+                        : 0,
+                total_files: totalFiles,
+                by_type,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching document storage usage:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch document storage usage",
+            error: error.message,
         });
     }
 });
@@ -3520,6 +4038,99 @@ router.put("/details/documents/category-edit", auth, validateBranch, async (req,
             message: "Failed to update document category",
             error: error.message
         });
+    }
+});
+
+/**
+ * Soft-delete client documents (is_deleted = '1'). Does not remove files from B2.
+ * Body: { username, document_ids: string[] }
+ */
+router.delete("/details/documents/delete", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        conn = await pool.getConnection();
+        const branch_id = req.branch_id;
+        const modifyBy = req.headers["username"] || "";
+        const { username = "", document_ids } = req.body || {};
+
+        const clientUsername = String(username || "").trim();
+        if (!clientUsername) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, clientUsername))) {
+            return res.status(403).json({
+                success: false,
+                message: "User not found or does not belong to this branch",
+            });
+        }
+        if (!Array.isArray(document_ids) || document_ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "document_ids must be a non-empty array",
+            });
+        }
+
+        const ids = [...new Set(document_ids.map((id) => String(id).trim()).filter(Boolean))];
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "document_ids must contain valid document ids",
+            });
+        }
+
+        const placeholders = ids.map(() => "?").join(",");
+        const [rows] = await conn.query(
+            `SELECT document_id FROM documents
+             WHERE branch_id = ?
+               AND username = ?
+               AND document_id IN (${placeholders})
+               AND is_deleted = '0'`,
+            [branch_id, clientUsername, ...ids]
+        );
+
+        const foundIds = new Set((rows || []).map((r) => String(r.document_id)));
+        const notFound = ids.filter((id) => !foundIds.has(id));
+        if (notFound.length > 0) {
+            return res.status(404).json({
+                success: false,
+                message: "One or more documents not found for this client",
+                not_found_document_ids: notFound,
+            });
+        }
+
+        const orderedIds = ids.filter((id) => foundIds.has(id));
+
+        await conn.beginTransaction();
+        await conn.query(
+            `UPDATE documents
+             SET is_deleted = '1', modify_by = ?, modify_date = NOW()
+             WHERE branch_id = ?
+               AND username = ?
+               AND document_id IN (${placeholders})
+               AND is_deleted = '0'`,
+            [modifyBy, branch_id, clientUsername, ...orderedIds]
+        );
+        await conn.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: "Documents deleted successfully",
+            data: { document_ids: orderedIds, deleted_count: orderedIds.length },
+        });
+    } catch (error) {
+        try {
+            await conn?.rollback();
+        } catch {
+            /* ignore */
+        }
+        console.error("Error soft-deleting documents:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete documents",
+            error: error.message,
+        });
+    } finally {
+        if (conn) conn.release();
     }
 });
 

@@ -4355,29 +4355,39 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
                 s.name AS service_name,
                 (
                     SELECT pe.amount
-                    FROM purchase_items pi
-                    INNER JOIN purchase_entries pe
-                        ON pe.purchase_id = pi.purchase_id
-                        AND CAST(pe.branch_id AS CHAR) = CAST(pi.branch_id AS CHAR)
-                    WHERE CAST(pi.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
-                      AND pi.remark = t.task_id
+                    FROM purchase_entries pe
+                    WHERE CAST(pe.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
                       AND pe.party_type = 'ca'
                       AND pe.party_id = t.ca_id
+                      AND (
+                        pe.task_id = t.task_id
+                        OR EXISTS (
+                          SELECT 1 FROM purchase_items pi
+                          WHERE pi.purchase_id = pe.purchase_id
+                            AND CAST(pi.branch_id AS CHAR) = CAST(pe.branch_id AS CHAR)
+                            AND pi.remark = t.task_id
+                        )
+                      )
                     ORDER BY pe.id DESC
                     LIMIT 1
                 ) AS purchase_amount,
                 (
                     SELECT inv.invoice_no
-                    FROM purchase_items pi
-                    INNER JOIN purchase_entries pe
-                        ON pe.purchase_id = pi.purchase_id
-                        AND CAST(pe.branch_id AS CHAR) = CAST(pi.branch_id AS CHAR)
+                    FROM purchase_entries pe
                     INNER JOIN invoice inv
                         ON inv.invoice_id = pe.invoice_id
-                    WHERE CAST(pi.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
-                      AND pi.remark = t.task_id
+                    WHERE CAST(pe.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
                       AND pe.party_type = 'ca'
                       AND pe.party_id = t.ca_id
+                      AND (
+                        pe.task_id = t.task_id
+                        OR EXISTS (
+                          SELECT 1 FROM purchase_items pi
+                          WHERE pi.purchase_id = pe.purchase_id
+                            AND CAST(pi.branch_id AS CHAR) = CAST(pe.branch_id AS CHAR)
+                            AND pi.remark = t.task_id
+                        )
+                      )
                     ORDER BY pe.id DESC
                     LIMIT 1
                 ) AS purchase_invoice_no
@@ -4518,7 +4528,8 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
             party_id: task.ca_id,
             party_type: "ca",
             transaction_date: TODAY_DATE(),
-            remark: `CA purchase for task ${task_id}`,
+            remark: null,
+            task_id,
             items: [
                 {
                     service_id: task.service_id,

@@ -1,0 +1,25 @@
+{
+  "branch": "SQU4SK",
+  "dryRun": true,
+  "json": "D:\\REACT\\OneSaaS\\OOMS\\client data to be updated.json",
+  "stats": {
+    "clients": 297,
+    "profiles": 297,
+    "firms": 297,
+    "categories": 5,
+    "documents": 1801,
+    "passwordGroups": 7,
+    "credentials": 348,
+    "openingBalances": 90,
+    "openingBalanceErrors": [],
+    "docErrors": [],
+    "credentialErrors": [
+      {
+        "credential_id": "APP5548_BRN7256_1775628816545_48141838",
+        "firm_id": "APP5548_BRN7256_1766580424259_70147761",
+        "reason": "Missing credential_id or username"
+      }
+    ],
+    "clientErrors": []
+  }
+}

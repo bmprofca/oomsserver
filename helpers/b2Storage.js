@@ -2,6 +2,7 @@ import "dotenv/config";
 import axios from "axios";
 import crypto from "crypto";
 import { RANDOM_STRING } from "./function.js";
+import { buildProfileDocumentUrl } from "./mediaUrl.js";
 
 const B2_BUCKET = process.env.B2_BUCKET || "OOMS-CRM";
 const B2_ACCESS_KEY = process.env.B2_ACCESS_KEY || "";
@@ -138,21 +139,27 @@ function getProfileDocumentObjectKey(categoryFolder, filename) {
     return `${DOCUMENT_BASE_PREFIX}/${categoryFolder}/${filename}`;
 }
 
-async function uploadProfileDocumentBuffer(categoryFolder, filename, buffer, mimeType) {
+async function uploadProfileDocumentBuffer(categoryFolder, filename, buffer, mimeType, options = {}) {
+    const {
+        timeoutMs = 300000,
+        onUploadProgress = null,
+    } = options;
     const key = getProfileDocumentObjectKey(categoryFolder, filename);
     const uploadUrlData = await getUploadUrl();
     const sha1 = crypto.createHash("sha1").update(buffer).digest("hex");
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
 
     await axios.post(uploadUrlData.uploadUrl, buffer, {
         headers: {
             Authorization: uploadUrlData.authorizationToken,
-            "X-Bz-File-Name": key,
+            "X-Bz-File-Name": encodedKey,
             "X-Bz-Content-Sha1": sha1,
             "Content-Type": mimeType || "application/octet-stream",
         },
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
-        timeout: 120000,
+        timeout: timeoutMs,
+        onUploadProgress: typeof onUploadProgress === "function" ? onUploadProgress : undefined,
     });
 
     return {
@@ -193,23 +200,13 @@ function encodeB2ObjectPath(key) {
         .join("/");
 }
 
+/**
+ * Public document URL for API responses — proxied via /proxy/media
+ * (not a direct B2 signed download URL).
+ * Example: .../proxy/media/profile/document/it/file.pdf
+ */
 async function getProfileDocumentAccessUrl(categoryFolder, filename) {
-    if (!filename) return null;
-
-    const key = getProfileDocumentObjectKey(categoryFolder, filename);
-    const auth = await authorizeB2();
-    const bucketId = await getBucketId();
-
-    const downloadAuth = await b2Post("/b2api/v2/b2_get_download_authorization", {
-        bucketId,
-        fileNamePrefix: key,
-        validDurationInSeconds: B2_DOWNLOAD_AUTH_TTL_SECONDS,
-    });
-
-    const encodedKey = encodeB2ObjectPath(key);
-    const authorizationToken = encodeURIComponent(downloadAuth.authorizationToken);
-
-    return `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}?Authorization=${authorizationToken}`;
+    return buildProfileDocumentUrl(categoryFolder, filename);
 }
 
 async function downloadB2Object(objectKey, retryOnAuth = true) {
@@ -734,4 +731,5 @@ export {
     getProfileDocumentObjectKey,
     getProfileImageAccessUrl,
     getProfileImageObjectKey,
+    uploadProfileDocumentBuffer,
 };

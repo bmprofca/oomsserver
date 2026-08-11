@@ -4,6 +4,18 @@ const MEDIA_ROOT = "media";
 const PROXY_PREFIX = "/proxy";
 
 /**
+ * Host that serves /proxy/media (must reach B2).
+ * Local machines often cannot access Backblaze; point this at the live API.
+ * Prefer MEDIA_PROXY_BASE_DOMAIN, then BASE_DOMAIN, then production default.
+ */
+export function getMediaProxyBaseDomain() {
+    const fromEnv = String(
+        process.env.MEDIA_PROXY_BASE_DOMAIN || BASE_DOMAIN || "https://server.ooms.in"
+    ).trim();
+    return fromEnv.replace(/\/$/, "") || "https://server.ooms.in";
+}
+
+/**
  * Reject path traversal and invalid segments.
  */
 function isSafePathSegment(segment) {
@@ -46,7 +58,7 @@ export function buildMediaProxyUrl(...segments) {
     if (!isValidMediaObjectKey(objectKey)) return null;
 
     const encodedPath = parts.map((part) => encodeURIComponent(part)).join("/");
-    const base = String(BASE_DOMAIN || "").replace(/\/$/, "");
+    const base = getMediaProxyBaseDomain();
 
     return `${base}${PROXY_PREFIX}/${MEDIA_ROOT}/${encodedPath}`;
 }

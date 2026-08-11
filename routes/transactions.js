@@ -19,6 +19,7 @@ import {
     collectLedgerStatement,
     generateLedgerPdfBuffer,
 } from "../helpers/ledgerReport.js";
+import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import {
     getActivePaymentTemplate,
@@ -940,6 +941,74 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     }
                 } catch (_) {
                     // keep sale_items-only particular if firm lookup fails
+                }
+            }
+
+            if (row.transaction_type === "purchase") {
+                try {
+                    const [purchaseRows] = await pool.query(
+                        `SELECT services.name, purchase_items.amount, purchase_items.remark
+                         FROM purchase_items
+                         JOIN services ON purchase_items.service_id = services.service_id
+                         WHERE CAST(purchase_items.branch_id AS CHAR) = CAST(? AS CHAR)
+                           AND purchase_items.invoice_id = ?
+                         ORDER BY purchase_items.id ASC`,
+                        [branch_id, row.invoice_id]
+                    );
+                    particular.purchase_items = (purchaseRows || []).map((item) => ({
+                        name: item.name,
+                        fees: Number(item.amount) || 0,
+                        tax_rate: 0,
+                        tax_value: 0,
+                        total: Number(item.amount) || 0,
+                        remark: item.remark ?? null,
+                    }));
+                } catch (_) {
+                    particular.purchase_items = [];
+                }
+                try {
+                    const [peRows] = await pool.query(
+                        `SELECT pe.task_id, f.firm_name
+                         FROM purchase_entries pe
+                         LEFT JOIN tasks t
+                           ON t.task_id = pe.task_id
+                          AND CAST(t.branch_id AS CHAR) = CAST(pe.branch_id AS CHAR)
+                         LEFT JOIN firms f
+                           ON f.firm_id = t.firm_id
+                          AND CAST(f.branch_id AS CHAR) = CAST(t.branch_id AS CHAR)
+                          AND (f.is_deleted = '0' OR f.is_deleted = 0)
+                         WHERE CAST(pe.branch_id AS CHAR) = CAST(? AS CHAR)
+                           AND pe.invoice_id = ?
+                         LIMIT 1`,
+                        [branch_id, row.invoice_id]
+                    );
+                    const tid =
+                        peRows?.[0]?.task_id != null && String(peRows[0].task_id).trim() !== ""
+                            ? String(peRows[0].task_id).trim()
+                            : null;
+                    const firmName =
+                        peRows?.[0]?.firm_name != null && String(peRows[0].firm_name).trim() !== ""
+                            ? String(peRows[0].firm_name).trim()
+                            : null;
+                    if (tid) particular.task_id = tid;
+                    if (firmName) particular.firm_name = firmName;
+
+                    const serviceNames = (particular.purchase_items || [])
+                        .map((it) => (it?.name != null ? String(it.name).trim() : ""))
+                        .filter(Boolean);
+                    const partyLabel =
+                        particular?.details?.name ||
+                        particular?.details?.holder ||
+                        particular?.details?.bank ||
+                        "";
+                    particular.summary = formatPurchaseParticularsText({
+                        firmName,
+                        partyName: firmName ? null : partyLabel,
+                        serviceNames,
+                        isTask: Boolean(tid),
+                    });
+                } catch (_) {
+                    // optional
                 }
             }
 

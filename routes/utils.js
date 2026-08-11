@@ -50,7 +50,9 @@ function normalizeNotificationType(typeRaw) {
         payment_reminder: "payment reminder",
         sale: "sale",
         "sale invoice": "sale_invoice",
+        sale_invoice: "sale_invoice",
         "sale reminder": "sale_reminder",
+        sale_reminder: "sale_reminder",
         "task create": "task create",
         "task complete": "task complete",
         "task cancel": "task cancel",
@@ -99,6 +101,20 @@ function notificationTypeCandidates(notificationType) {
             "document-sharing",
             "document share",
             "document_share",
+        ].forEach((item) => candidates.add(item));
+    }
+
+    if (
+        primary === "sale" ||
+        primary === "sale invoice" ||
+        primary === "sale_invoice"
+    ) {
+        [
+            "sale",
+            "sale invoice",
+            "sale_invoice",
+            "sale-invoice",
+            "saleinvoice",
         ].forEach((item) => candidates.add(item));
     }
 
@@ -185,7 +201,43 @@ async function checkEmailAvailability(branch_id, notificationType) {
              LIMIT 1`,
             [branch_id, ...typeCandidates]
         );
-        if (!activeTemplate?.template_id) {
+
+        let hasTemplate = Boolean(activeTemplate?.template_id);
+
+        // Sale / payment static emails often resolve via email_static_mapping columns.
+        if (!hasTemplate) {
+            const primary = String(notificationType || "").trim().toLowerCase();
+            const mapCol =
+                primary === "sale" ||
+                primary === "sale_invoice" ||
+                primary === "sale invoice"
+                    ? "sale_invoice"
+                    : primary === "payment"
+                      ? "payment"
+                      : primary === "payment receive" ||
+                          primary === "receive" ||
+                          primary === "received"
+                        ? "payment_receipt"
+                        : null;
+
+            if (mapCol) {
+                const [[mapRow]] = await poolQuery(
+                    `SELECT \`${mapCol}\` AS mapped_id
+                     FROM email_static_mapping
+                     WHERE branch_id = ?
+                       AND \`${mapCol}\` IS NOT NULL
+                       AND TRIM(\`${mapCol}\`) <> ''
+                     ORDER BY id ASC
+                     LIMIT 1`,
+                    [branch_id]
+                );
+                if (mapRow?.mapped_id) {
+                    hasTemplate = true;
+                }
+            }
+        }
+
+        if (!hasTemplate) {
             return channelResult(false, `Email template is not configured for type '${notificationType}'`);
         }
 

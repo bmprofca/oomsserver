@@ -244,7 +244,12 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             additional_charge,
             round_off,
             items,
+            notification,
         } = req.body || {};
+
+        const shouldNotifyEmail = notification?.email !== false;
+        const shouldNotifyWhatsapp = notification?.whatsapp === true;
+        const shouldNotifySms = notification?.sms === true;
 
         if (!party_id || String(party_id).trim() === "") {
             return res.status(400).json({ success: false, message: "party_id is required" });
@@ -451,21 +456,29 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
             const saleItemsForEmail = await getSaleItems(sale_entry_id);
 
-            await notifySaleInvoiceEmail({
-                branch_id,
-                sale_id: sale_entry_id,
-                invoice_id,
-                invoice_no,
-                party_id: partyIdVal,
-                party_type: partyTypeVal,
-                sale_date: txnDate,
-                grand_total: pricing.grandTotal,
-                items: saleItemsForEmail,
-                subtotal: amountTotal,
-                discount_value: pricing.discountValue,
-                tax_value: pricing.taxValue,
-                total: pricing.totalBeforeRound,
-            });
+            if (shouldNotifyEmail) {
+                await notifySaleInvoiceEmail({
+                    branch_id,
+                    sale_id: sale_entry_id,
+                    invoice_id,
+                    invoice_no,
+                    party_id: partyIdVal,
+                    party_type: partyTypeVal,
+                    sale_date: txnDate,
+                    grand_total: pricing.grandTotal,
+                    items: saleItemsForEmail,
+                    subtotal: amountTotal,
+                    discount_value: pricing.discountValue,
+                    tax_value: pricing.taxValue,
+                    total: pricing.totalBeforeRound,
+                });
+            }
+            if (shouldNotifyWhatsapp) {
+                // WhatsApp sale-invoice hook is not wired yet (template type: sale / sale_invoice).
+            }
+            if (shouldNotifySms) {
+                // SMS sale-invoice hook is not wired yet.
+            }
 
             return res.status(200).json({
                 success: true,

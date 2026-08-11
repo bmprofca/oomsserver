@@ -116,8 +116,10 @@ const fetchExpenseItemsByExpenseIds = async (branch_id, expenseIds) => {
             ei.name AS item_name, ei.type AS item_type
          FROM expense_entries_items eei
          LEFT JOIN expense_items ei
-            ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
-         WHERE eei.branch_id = ? AND eei.expense_id IN (${placeholders})
+            ON ei.item_id COLLATE utf8mb4_unicode_ci = eei.item_id COLLATE utf8mb4_unicode_ci
+           AND ei.branch_id COLLATE utf8mb4_unicode_ci = eei.branch_id COLLATE utf8mb4_unicode_ci
+         WHERE eei.branch_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
+           AND eei.expense_id COLLATE utf8mb4_unicode_ci IN (${placeholders})
          ORDER BY eei.id ASC`,
         [branch_id, ...expenseIds]
     );
@@ -943,9 +945,9 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const itemFilterClause = hasItemId
             ? `AND EXISTS (
                 SELECT 1 FROM expense_entries_items eei
-                WHERE eei.branch_id = ee.branch_id
-                  AND eei.expense_id = ee.expense_id
-                  AND eei.item_id = ?
+                WHERE eei.branch_id COLLATE utf8mb4_unicode_ci = ee.branch_id COLLATE utf8mb4_unicode_ci
+                  AND eei.expense_id COLLATE utf8mb4_unicode_ci = ee.expense_id COLLATE utf8mb4_unicode_ci
+                  AND eei.item_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
             )`
             : "";
 
@@ -953,10 +955,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             ? `AND EXISTS (
                 SELECT 1 FROM expense_entries_items eei
                 INNER JOIN expense_items ei
-                    ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
-                WHERE eei.branch_id = ee.branch_id
-                  AND eei.expense_id = ee.expense_id
-                  AND ei.type = ?
+                    ON ei.item_id COLLATE utf8mb4_unicode_ci = eei.item_id COLLATE utf8mb4_unicode_ci
+                   AND ei.branch_id COLLATE utf8mb4_unicode_ci = eei.branch_id COLLATE utf8mb4_unicode_ci
+                WHERE eei.branch_id COLLATE utf8mb4_unicode_ci = ee.branch_id COLLATE utf8mb4_unicode_ci
+                  AND eei.expense_id COLLATE utf8mb4_unicode_ci = ee.expense_id COLLATE utf8mb4_unicode_ci
+                  AND ei.type COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
             )`
             : "";
 
@@ -965,9 +968,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 EXISTS (
                     SELECT 1 FROM expense_entries_items eei
                     INNER JOIN expense_items ei
-                        ON ei.item_id = eei.item_id AND ei.branch_id = eei.branch_id
-                    WHERE eei.branch_id = ee.branch_id
-                      AND eei.expense_id = ee.expense_id
+                        ON ei.item_id COLLATE utf8mb4_unicode_ci = eei.item_id COLLATE utf8mb4_unicode_ci
+                       AND ei.branch_id COLLATE utf8mb4_unicode_ci = eei.branch_id COLLATE utf8mb4_unicode_ci
+                    WHERE eei.branch_id COLLATE utf8mb4_unicode_ci = ee.branch_id COLLATE utf8mb4_unicode_ci
+                      AND eei.expense_id COLLATE utf8mb4_unicode_ci = ee.expense_id COLLATE utf8mb4_unicode_ci
                       AND (
                         ei.name LIKE ?
                         OR IFNULL(ei.remark, '') LIKE ?
@@ -981,14 +985,16 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             )`
             : "";
 
-        const whereClause = `ee.branch_id = ?
+        const whereClause = `ee.branch_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
             AND NOT EXISTS (
                 SELECT 1 FROM discount_entries de
-                WHERE de.branch_id = ee.branch_id AND de.transaction_id = ee.transaction_id
+                WHERE de.branch_id COLLATE utf8mb4_unicode_ci = ee.branch_id COLLATE utf8mb4_unicode_ci
+                  AND de.transaction_id COLLATE utf8mb4_unicode_ci = ee.transaction_id COLLATE utf8mb4_unicode_ci
             )
             AND NOT EXISTS (
                 SELECT 1 FROM payslip_entries pe
-                WHERE pe.branch_id = ee.branch_id AND pe.transaction_id = ee.transaction_id
+                WHERE pe.branch_id COLLATE utf8mb4_unicode_ci = ee.branch_id COLLATE utf8mb4_unicode_ci
+                  AND pe.transaction_id COLLATE utf8mb4_unicode_ci = ee.transaction_id COLLATE utf8mb4_unicode_ci
                   AND pe.is_deleted = '0'
             )
             AND (ee.expense_date >= ? AND ee.expense_date <= ?)
@@ -1011,6 +1017,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             );
         }
 
+        const joinTransactions = `LEFT JOIN transactions t
+             ON ee.transaction_id COLLATE utf8mb4_unicode_ci = t.transaction_id COLLATE utf8mb4_unicode_ci
+            AND ee.branch_id COLLATE utf8mb4_unicode_ci = t.branch_id COLLATE utf8mb4_unicode_ci`;
+
         const [rows] = await pool.query(
             `SELECT
                 ee.expense_id, ee.expense_date, ee.party_type, ee.party_id, ee.amount,
@@ -1018,7 +1028,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 ee.create_by, ee.modify_by, ee.create_date, ee.modify_date,
                 t.remark, t.transaction_date
              FROM expense_entries ee
-             LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
+             ${joinTransactions}
              WHERE ${whereClause}
              ORDER BY ee.expense_date DESC, ee.id DESC
              LIMIT ? OFFSET ?`,
@@ -1028,7 +1038,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[{ total: totalRows }]] = await pool.query(
             `SELECT COUNT(*) AS total
              FROM expense_entries ee
-             LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
+             ${joinTransactions}
              WHERE ${whereClause}`,
             params
         );
@@ -1037,7 +1047,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const [[{ total_amount: totalAmountRows }]] = await pool.query(
             `SELECT COALESCE(SUM(ee.amount), 0) AS total_amount
              FROM expense_entries ee
-             LEFT JOIN transactions t ON ee.transaction_id = t.transaction_id AND ee.branch_id = t.branch_id
+             ${joinTransactions}
              WHERE ${whereClause}`,
             params
         );

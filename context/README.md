@@ -22,6 +22,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`attendance-removed.md`](./attendance-removed.md) | Legacy notes from attendance removal / pre-rebuild (salary kept on `/salary`) |
 | [`invoice.md`](./invoice.md) | `POST /invoice/generate` + `/share`, sale/purchase edit, PDFKit, `downloadable` |
 | [`ledger-report.md`](./ledger-report.md) | Ledger PDF (`ledgerReport.js`), download/share endpoints, document sharing HEADER override |
+| [`proxy.md`](./proxy.md) | B2 media proxy URLs (`/proxy/media`), `mediaUrl.js`, local-dev → live host |
 
 ## Pair with client
 

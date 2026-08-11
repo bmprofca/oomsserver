@@ -53,12 +53,15 @@ export async function executeCreatePurchase({
     party_type,
     transaction_date,
     remark,
+    task_id = null,
     items,
 }) {
     const party1_id = String(party_id ?? "").trim();
     const party1_type = String(party_type ?? "").trim();
     const txnDate = String(transaction_date ?? "").trim();
     const remarkVal = remark != null ? String(remark).trim() : null;
+    const taskIdVal =
+        task_id != null && String(task_id).trim() !== "" ? String(task_id).trim() : null;
     const username = String(create_by ?? "").trim();
 
     if (!branch_id) {
@@ -161,14 +164,15 @@ export async function executeCreatePurchase({
             conn: connection,
         });
         await connection.query(
-            `INSERT INTO purchase_entries (branch_id, purchase_id, invoice_id, party_id, party_type, purchase_date, create_by, modify_by, amount)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO purchase_entries (branch_id, purchase_id, invoice_id, party_id, party_type, task_id, purchase_date, create_by, modify_by, amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 branch_id,
                 purchase_entry_id,
                 invoice_id,
                 party1_id,
                 party1_type,
+                taskIdVal,
                 txnDate,
                 username,
                 username,
@@ -225,6 +229,7 @@ export async function executeCreatePurchase({
             invoice_no,
             party_id: party1_id,
             party_type: party1_type,
+            task_id: taskIdVal,
             transaction_date: txnDate,
             subtotal,
             total,
@@ -324,7 +329,7 @@ export async function executeEditPurchase({
         }
 
         const [existingRows] = await connection.query(
-            `SELECT pe.purchase_id, pe.invoice_id, invoice.invoice_no, invoice.transaction_id
+            `SELECT pe.purchase_id, pe.invoice_id, pe.task_id, invoice.invoice_no, invoice.transaction_id
              FROM purchase_entries pe
              INNER JOIN invoice ON invoice.invoice_id = pe.invoice_id
              WHERE ${lookupClauses.join(" AND ")}
@@ -342,6 +347,10 @@ export async function executeEditPurchase({
         const invoice_id = existing.invoice_id;
         const transaction_id = existing.transaction_id;
         const invoice_no = existing.invoice_no;
+        const existingTaskId =
+            existing.task_id != null && String(existing.task_id).trim() !== ""
+                ? String(existing.task_id).trim()
+                : null;
 
         const purchaseItemsToInsert = [];
         let subtotal = 0;
@@ -459,6 +468,7 @@ export async function executeEditPurchase({
             invoice_no,
             party_id: party1_id,
             party_type: party1_type,
+            task_id: existingTaskId,
             transaction_date: txnDate,
             subtotal,
             total,
