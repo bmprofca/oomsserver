@@ -16,6 +16,7 @@ import {
     deleteProfileImage,
     downloadAndUploadProfileDocument,
     downloadAndUploadProfileImage,
+    downloadProfileDocument,
     getProfileDocumentAccessUrl,
 } from "../helpers/b2Storage.js";
 import { resolveProfileImageUrl } from "../helpers/mediaUrl.js";
@@ -32,8 +33,9 @@ import {
     renderTemplate,
     sendEmail,
 } from "./payment_reminder.js";
-import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp } from "../helpers/whatsappNotification.js";
+import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentSharingWhatsapp } from "../helpers/whatsappNotification.js";
 import { sendSingleSmsNotification } from "../services/smsQueueService.js";
+import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 
 const router = express.Router();
 
@@ -4037,6 +4039,315 @@ router.put("/details/documents/category-edit", auth, validateBranch, async (req,
             success: false,
             message: "Failed to update document category",
             error: error.message
+        });
+    }
+});
+
+function documentCategoryFolder(category_id) {
+    const id = String(category_id || "").trim().toUpperCase();
+    if (id === "GST") return "gst";
+    if (id === "IT") return "it";
+    if (id === "MCA") return "mca";
+    if (id === "TASK") return "task";
+    return "general";
+}
+
+async function streamToBuffer(stream) {
+    const chunks = [];
+    for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+}
+
+/**
+ * Share one or more client documents via WhatsApp / email (document sharing templates).
+ * Body: { username, document_ids: string[], channels: ('whatsapp'|'email')[], mobile?, email?, country_code? }
+ */
+router.post("/details/documents/share", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const sent_by =
+            req.headers.username || req.headers.Username || req.user?.username;
+        const clientUsername = String(req.body?.username || "").trim();
+        const allowedChannels = new Set(["whatsapp", "email"]);
+        const requestedChannels = Array.isArray(req.body?.channels)
+            ? [
+                  ...new Set(
+                      req.body.channels.map((item) =>
+                          String(item).trim().toLowerCase()
+                      )
+                  ),
+              ]
+            : [];
+        const channels = requestedChannels.filter((c) => allowedChannels.has(c));
+        const documentIds = [
+            ...new Set(
+                (Array.isArray(req.body?.document_ids) ? req.body.document_ids : [])
+                    .map((id) => String(id).trim())
+                    .filter(Boolean)
+            ),
+        ];
+
+        if (!clientUsername) {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required",
+            });
+        }
+        if (!(await assertClientInBranch(branch_id, clientUsername))) {
+            return res.status(403).json({
+                success: false,
+                message: "User not found or does not belong to this branch",
+            });
+        }
+        if (documentIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "document_ids must be a non-empty array",
+            });
+        }
+        if (channels.length === 0 || channels.length !== requestedChannels.length) {
+            return res.status(400).json({
+                success: false,
+                message: "channels must include whatsapp and/or email",
+            });
+        }
+        if (!sent_by) {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required",
+            });
+        }
+
+        const placeholders = documentIds.map(() => "?").join(", ");
+        const [rows] = await pool.query(
+            `SELECT d.document_id, d.category_id, d.name, d.remark, d.file, d.mime_type, d.size,
+                    f.firm_name
+             FROM documents d
+             LEFT JOIN firms f ON f.firm_id = d.firm_id AND f.branch_id = d.branch_id
+             WHERE d.branch_id = ?
+               AND d.username = ?
+               AND d.is_deleted = '0'
+               AND d.document_id IN (${placeholders})`,
+            [branch_id, clientUsername, ...documentIds]
+        );
+
+        if (!rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "No documents found to share",
+            });
+        }
+
+        const foundIds = new Set(rows.map((r) => String(r.document_id)));
+        const missing = documentIds.filter((id) => !foundIds.has(id));
+        if (missing.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Some documents were not found",
+                data: { not_found_document_ids: missing },
+            });
+        }
+
+        const orderedDocs = documentIds.map((id) =>
+            rows.find((r) => String(r.document_id) === id)
+        );
+
+        const prepared = [];
+        for (const doc of orderedDocs) {
+            if (!doc?.file) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Document ${doc?.document_id || ""} has no file to share`,
+                });
+            }
+            const folder = documentCategoryFolder(doc.category_id);
+            const { stream, mimeType } = await downloadProfileDocument(folder, doc.file);
+            const buffer = await streamToBuffer(stream);
+            const baseName = String(doc.name || doc.file || "document")
+                .replace(/[^\w.\-]+/g, "_")
+                .slice(0, 80);
+            const extFromFile = String(doc.file).includes(".")
+                ? `.${String(doc.file).split(".").pop()}`
+                : "";
+            const documentName = /\.[a-z0-9]+$/i.test(baseName)
+                ? baseName
+                : `${baseName}${extFromFile || ""}`;
+            const uploaded = await uploadBufferToOneSaas({
+                buffer,
+                filename: documentName,
+                mimeType: mimeType || doc.mime_type || "application/octet-stream",
+            });
+            prepared.push({
+                document_id: doc.document_id,
+                document_name: documentName,
+                document_url: uploaded.url,
+                firm_name: doc.firm_name || "",
+                remark: doc.remark || "",
+            });
+        }
+
+        const client = await USER_SNIPPED_DATA(clientUsername);
+        const sharedBy = await USER_SNIPPED_DATA(sent_by);
+        const bodyMobile =
+            req.body?.mobile != null ? String(req.body.mobile).trim() : "";
+        const bodyEmail =
+            req.body?.email != null ? String(req.body.email).trim() : "";
+        const bodyCountryCode =
+            req.body?.country_code != null
+                ? String(req.body.country_code).replace(/\D/g, "").trim()
+                : "";
+        const recipientMobile = bodyMobile || client?.mobile || "";
+        const recipientEmail = bodyEmail || client?.email || "";
+        const recipientCountryCode =
+            bodyCountryCode || client?.country_code || "91";
+
+        const channelResults = {};
+        for (const channel of channels) {
+            const failures = [];
+            try {
+                if (channel === "email") {
+                    if (!recipientEmail) {
+                        throw new Error("Email address is required");
+                    }
+                    let template;
+                    try {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document_sharing"
+                        );
+                    } catch {
+                        template = await getActivePaymentTemplate(
+                            branch_id,
+                            "document sharing"
+                        );
+                    }
+                    const smtpConfig = await getActiveSmtpConfig(branch_id);
+                    for (const item of prepared) {
+                        try {
+                            const variables = {
+                                name: client?.name || clientUsername,
+                                mobile: recipientMobile,
+                                email: recipientEmail,
+                                firm_name: item.firm_name,
+                                document_name: item.document_name,
+                                document_link: item.document_url,
+                                shared_by: sharedBy?.name || sent_by,
+                                remark: item.remark,
+                                "{{name}}": client?.name || clientUsername,
+                                "{{mobile}}": recipientMobile,
+                                "{{email}}": recipientEmail,
+                                "{{firm_name}}": item.firm_name,
+                                "{{document_name}}": item.document_name,
+                                "{{document_link}}": item.document_url,
+                                "{{shared_by}}": sharedBy?.name || sent_by,
+                                "{{remark}}": item.remark,
+                            };
+                            await sendEmail(
+                                smtpConfig,
+                                recipientEmail,
+                                renderTemplate(template.subject, variables),
+                                renderTemplate(template.html_body, variables),
+                                template.text_body
+                                    ? renderTemplate(template.text_body, variables)
+                                    : null
+                            );
+                        } catch (docError) {
+                            failures.push(
+                                docError?.message ||
+                                    `Failed to email ${item.document_name}`
+                            );
+                        }
+                    }
+                } else if (channel === "whatsapp") {
+                    for (const item of prepared) {
+                        try {
+                            await sendDocumentSharingWhatsapp({
+                                branch_id,
+                                username: clientUsername,
+                                sent_by,
+                                document_name: item.document_name,
+                                document_link: item.document_url,
+                                remark: item.remark,
+                                firm_name: item.firm_name,
+                                mobile: recipientMobile,
+                                email: recipientEmail,
+                                country_code: recipientCountryCode,
+                            });
+                        } catch (docError) {
+                            failures.push(
+                                docError?.response?.data?.message ||
+                                    docError?.message ||
+                                    `Failed to send ${item.document_name}`
+                            );
+                        }
+                    }
+                }
+
+                if (failures.length === prepared.length) {
+                    channelResults[channel] = {
+                        status: "failed",
+                        reason: failures[0] || `Failed to send via ${channel}`,
+                    };
+                } else if (failures.length > 0) {
+                    channelResults[channel] = {
+                        status: "failed",
+                        reason: `${failures.length} of ${prepared.length} document(s) failed`,
+                    };
+                } else {
+                    channelResults[channel] = { status: "sent" };
+                }
+            } catch (channelError) {
+                console.error(`Document share ${channel} failed:`, channelError);
+                channelResults[channel] = {
+                    status: "failed",
+                    reason:
+                        channelError?.response?.data?.message ||
+                        channelError?.message ||
+                        `Failed to send via ${channel}`,
+                };
+            }
+        }
+
+        const sentChannels = Object.values(channelResults).filter(
+            (r) => r.status === "sent"
+        ).length;
+        const status =
+            sentChannels === channels.length
+                ? "sent"
+                : sentChannels > 0
+                  ? "partial"
+                  : "failed";
+
+        const countLabel =
+            prepared.length === 1
+                ? "Document"
+                : `${prepared.length} documents`;
+
+        return res.status(status === "failed" ? 400 : 200).json({
+            success: status !== "failed",
+            message:
+                status === "sent"
+                    ? `${countLabel} shared successfully`
+                    : status === "partial"
+                      ? `${countLabel} shared on some channels`
+                      : `Failed to share ${countLabel.toLowerCase()}`,
+            data: {
+                status,
+                documents: prepared.map((item) => ({
+                    document_id: item.document_id,
+                    document_name: item.document_name,
+                    document_url: item.document_url,
+                })),
+                channels: channelResults,
+            },
+        });
+    } catch (error) {
+        console.error("Document share error:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to share documents",
         });
     }
 });
