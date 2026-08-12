@@ -36,6 +36,7 @@ import {
 import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentSharingWhatsapp } from "../helpers/whatsappNotification.js";
 import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
+import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
 
 const router = express.Router();
 
@@ -3298,53 +3299,8 @@ router.post("/details/documents/create/general", auth, validateBranch, async (re
 router.get("/details/documents/types", auth, validateBranch, async (req, res) => {
     return res.status(200).json({
         success: true,
-        data: {
-            it: [
-                {
-                    name: "Full Set",
-                    value: "full_set"
-                },
-                {
-                    name: "TIS",
-                    value: "tis"
-                },
-                {
-                    name: 'AIS',
-                    value: 'ais'
-                }
-            ],
-            gst: [
-                {
-                    name: "GSTR 3B (Monthly)",
-                    value: "gstr_3b_monthly"
-                },
-                {
-                    name: "GSTR 1 (Quarterly)",
-                    value: "gstr_1_quarterly"
-                },
-                {
-                    name: "GSTR 2 (Quarterly)",
-                    value: "gstr_2_quarterly"
-                },
-                {
-                    name: "GSTR 4 (Yearly)",
-                    value: "gstr_4_yearly"
-                }
-            ],
-            mca: [
-                {
-                    name: "DIN",
-                    value: "din"
-                },
-                {
-                    name: "Chalan",
-                    value: "chalan"
-                }
-            ]
-        }
-    })
-
-
+        data: CLIENT_DOCUMENT_TYPES,
+    });
 });
 
 async function getDocumentListByCategory(branch_id, category_id, categoryFolder, query) {
@@ -4073,12 +4029,12 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
         const allowedChannels = new Set(["whatsapp", "email"]);
         const requestedChannels = Array.isArray(req.body?.channels)
             ? [
-                  ...new Set(
-                      req.body.channels.map((item) =>
-                          String(item).trim().toLowerCase()
-                      )
-                  ),
-              ]
+                ...new Set(
+                    req.body.channels.map((item) =>
+                        String(item).trim().toLowerCase()
+                    )
+                ),
+            ]
             : [];
         const channels = requestedChannels.filter((c) => allowedChannels.has(c));
         const documentIds = [
@@ -4256,7 +4212,7 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                         } catch (docError) {
                             failures.push(
                                 docError?.message ||
-                                    `Failed to email ${item.document_name}`
+                                `Failed to email ${item.document_name}`
                             );
                         }
                     }
@@ -4278,8 +4234,8 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                         } catch (docError) {
                             failures.push(
                                 docError?.response?.data?.message ||
-                                    docError?.message ||
-                                    `Failed to send ${item.document_name}`
+                                docError?.message ||
+                                `Failed to send ${item.document_name}`
                             );
                         }
                     }
@@ -4317,8 +4273,8 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
             sentChannels === channels.length
                 ? "sent"
                 : sentChannels > 0
-                  ? "partial"
-                  : "failed";
+                    ? "partial"
+                    : "failed";
 
         const countLabel =
             prepared.length === 1
@@ -4331,8 +4287,8 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                 status === "sent"
                     ? `${countLabel} shared successfully`
                     : status === "partial"
-                      ? `${countLabel} shared on some channels`
-                      : `Failed to share ${countLabel.toLowerCase()}`,
+                        ? `${countLabel} shared on some channels`
+                        : `Failed to share ${countLabel.toLowerCase()}`,
             data: {
                 status,
                 documents: prepared.map((item) => ({

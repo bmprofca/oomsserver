@@ -209,16 +209,16 @@ async function checkEmailAvailability(branch_id, notificationType) {
             const primary = String(notificationType || "").trim().toLowerCase();
             const mapCol =
                 primary === "sale" ||
-                primary === "sale_invoice" ||
-                primary === "sale invoice"
+                    primary === "sale_invoice" ||
+                    primary === "sale invoice"
                     ? "sale_invoice"
                     : primary === "payment"
-                      ? "payment"
-                      : primary === "payment receive" ||
-                          primary === "receive" ||
-                          primary === "received"
-                        ? "payment_receipt"
-                        : null;
+                        ? "payment"
+                        : primary === "payment receive" ||
+                            primary === "receive" ||
+                            primary === "received"
+                            ? "payment_receipt"
+                            : null;
 
             if (mapCol) {
                 const [[mapRow]] = await poolQuery(

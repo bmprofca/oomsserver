@@ -9,29 +9,12 @@ import {
 } from "../helpers/b2Storage.js";
 import { validateClientSession, readClientCredential } from "../middleware/validateClientSession.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
+import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
 
 const router = express.Router();
 
 const SHARABLE_CATEGORY = "SHARABLE";
 const SHARABLE_FOLDER = "sharable";
-
-const DOCUMENT_TYPES = {
-    it: [
-        { name: "Full Set", value: "full_set" },
-        { name: "TIS", value: "tis" },
-        { name: "AIS", value: "ais" },
-    ],
-    gst: [
-        { name: "GSTR 3B (Monthly)", value: "gstr_3b_monthly" },
-        { name: "GSTR 1 (Quarterly)", value: "gstr_1_quarterly" },
-        { name: "GSTR 2 (Quarterly)", value: "gstr_2_quarterly" },
-        { name: "GSTR 4 (Yearly)", value: "gstr_4_yearly" },
-    ],
-    mca: [
-        { name: "DIN", value: "din" },
-        { name: "Chalan", value: "chalan" },
-    ],
-};
 
 async function formatAuditUser(username, cache) {
     const key = username != null ? String(username).trim() : "";
@@ -184,7 +167,7 @@ async function listDocumentsByCategory(req, res, { categoryId, categoryFolder, l
 router.get("/types", validateClientSession, async (req, res) => {
     return res.status(200).json({
         success: true,
-        data: DOCUMENT_TYPES,
+        data: CLIENT_DOCUMENT_TYPES,
     });
 });
 
