@@ -1,16 +1,18 @@
 import axios from "axios";
 import pool from "../db.js";
 
+/** WhatsApp Web V2 API — see WhatsAppWebV2/docs.md */
 export const WHATSAPPWEB_BASE_URL = String(
     process.env.WHATSAPPWEB_BASE_URL || ""
 ).trim().replace(/\/$/, "");
+
+/** Unused by V2 (no auth). Kept for env compatibility. */
 export const WHATSAPPWEB_API_KEY = String(
     process.env.WHATSAPPWEB_API_KEY || ""
 ).trim();
 
 function whatsappWebHeaders() {
     return {
-        "X-API-Key": WHATSAPPWEB_API_KEY,
         "Content-Type": "application/json",
     };
 }
@@ -18,6 +20,10 @@ function whatsappWebHeaders() {
 export function generateWhatsappWebSessionId() {
     const random = Math.random().toString(36).slice(2, 12);
     return `ooms${Date.now()}${random}`.slice(0, 100);
+}
+
+export function encodeWhatsappWebSessionPath(sessionId) {
+    return encodeURIComponent(String(sessionId || "").trim());
 }
 
 export async function getBranchWhatsappWebSession(branch_id) {
@@ -87,8 +93,12 @@ export async function whatsappWebRequest(method, path, { data, params, validateS
         url: `${WHATSAPPWEB_BASE_URL}${path}`,
         headers: whatsappWebHeaders(),
         params,
-        validateStatus,
+        timeout: 30000,
     };
+
+    if (validateStatus !== undefined) {
+        config.validateStatus = validateStatus;
+    }
 
     if (data !== undefined) {
         config.data = data;
@@ -97,9 +107,45 @@ export async function whatsappWebRequest(method, path, { data, params, validateS
     return axios(config);
 }
 
+export function extractWhatsappWebErrorMessage(error, fallbackMessage) {
+    const body = error?.response?.data;
+    if (body?.error?.message) {
+        return String(body.error.message);
+    }
+    if (body?.message) {
+        return String(body.message);
+    }
+    if (error?.message) {
+        return String(error.message);
+    }
+    return fallbackMessage;
+}
+
+export function extractWhatsappWebErrorCode(error) {
+    const code = error?.response?.data?.error?.code;
+    return code != null ? String(code) : null;
+}
+
 export function handleWhatsappWebAxiosError(error, res, fallbackMessage) {
     if (error.response) {
-        return res.status(error.response.status).json(error.response.data);
+        const body = error.response.data;
+        const message = extractWhatsappWebErrorMessage(error, fallbackMessage);
+        const code = extractWhatsappWebErrorCode(error);
+
+        if (body && typeof body === "object") {
+            return res.status(error.response.status).json({
+                ...body,
+                success: false,
+                message: body.message || message,
+                ...(code ? { error_code: code } : {}),
+            });
+        }
+
+        return res.status(error.response.status).json({
+            success: false,
+            message,
+            ...(code ? { error_code: code } : {}),
+        });
     }
 
     console.error(fallbackMessage, error);
@@ -114,16 +160,40 @@ export function proxyWhatsappWebResponse(res, response) {
 }
 
 export async function getSessionStatus(sessionId) {
-    return whatsappWebRequest("get", `/api/sessions/${encodeURIComponent(sessionId)}`);
+    return whatsappWebRequest(
+        "get",
+        `/sessions/${encodeWhatsappWebSessionPath(sessionId)}`
+    );
 }
 
-const WHATSAPPWEB_SEND_PATHS = {
-    text: "/api/messages/send-text",
-    image: "/api/messages/send-image",
-    video: "/api/messages/send-video",
-    document: "/api/messages/send-document",
-    audio: "/api/messages/send-audio",
-};
+export async function startWhatsappWebSession(sessionId) {
+    return whatsappWebRequest("post", "/sessions", {
+        data: { session: String(sessionId).trim() },
+    });
+}
+
+export async function getWhatsappWebQr(sessionId) {
+    return whatsappWebRequest(
+        "get",
+        `/sessions/${encodeWhatsappWebSessionPath(sessionId)}/qr`,
+        { validateStatus: (status) => status >= 200 && status < 500 }
+    );
+}
+
+export async function deleteWhatsappWebSession(sessionId) {
+    return whatsappWebRequest(
+        "delete",
+        `/sessions/${encodeWhatsappWebSessionPath(sessionId)}`,
+        { validateStatus: (status) => status >= 200 && status < 500 }
+    );
+}
+
+export async function reconnectWhatsappWebSession(sessionId) {
+    return whatsappWebRequest(
+        "post",
+        `/sessions/${encodeWhatsappWebSessionPath(sessionId)}/reconnect`
+    );
+}
 
 function resolveMediaCaption(content) {
     const caption = content?.caption ?? content?.message;
@@ -132,13 +202,35 @@ function resolveMediaCaption(content) {
     return text.trim() ? text : undefined;
 }
 
+function normalizeRecipientPhone(number) {
+    return String(number || "")
+        .replace(/[^\d@.]/g, "")
+        .trim();
+}
+
 export async function assertWhatsappWebSessionReady(branch_id) {
     const resolved = await resolveBranchSessionId(branch_id);
     if (!resolved.ok) {
         return resolved;
     }
 
-    const sessionStatus = await getSessionStatus(resolved.sessionId);
+    let sessionStatus;
+    try {
+        sessionStatus = await getSessionStatus(resolved.sessionId);
+    } catch (error) {
+        return {
+            ok: false,
+            status: error.response?.status || 500,
+            data: {
+                success: false,
+                message: extractWhatsappWebErrorMessage(
+                    error,
+                    "WhatsApp Web session is not connected"
+                ),
+            },
+        };
+    }
+
     const status = sessionStatus.data?.data?.status;
     if (status !== "connected") {
         return {
@@ -154,51 +246,94 @@ export async function assertWhatsappWebSessionReady(branch_id) {
     return { ok: true, sessionId: resolved.sessionId };
 }
 
-export function buildWhatsappWebSendPayload(template_type, content, sessionId, number) {
-    const base = { sessionId, number };
+/**
+ * Build V2 send body (session is in the URL path, not the body).
+ * @returns {{ kind: 'text'|'media', payload: object }}
+ */
+export function buildWhatsappWebSendPayload(template_type, content, number) {
+    const phone = normalizeRecipientPhone(number);
+    if (!phone) {
+        throw new Error("Recipient phone number is required");
+    }
 
     switch (template_type) {
         case "text":
-            return { ...base, message: content.message };
-        case "image":
-        case "video": {
-            const payload = { ...base, url: content.url };
-            const caption = resolveMediaCaption(content);
-            if (caption !== undefined) {
-                payload.caption = caption;
-            }
-            return payload;
-        }
-        case "document": {
-            const payload = { ...base, url: content.url };
-            if (content.filename) {
-                payload.filename = content.filename;
-            }
-            const caption = resolveMediaCaption(content);
-            if (caption !== undefined) {
-                payload.caption = caption;
-            }
-            return payload;
-        }
-        case "audio":
             return {
-                ...base,
-                url: content.url,
-                ...(content.is_voice !== undefined ? { is_voice: content.is_voice } : {}),
+                kind: "text",
+                payload: {
+                    phone,
+                    message: content?.message != null ? String(content.message) : "",
+                },
             };
+        case "image":
+        case "video":
+        case "document":
+        case "audio": {
+            const file = content?.url != null ? String(content.url).trim() : "";
+            if (!file) {
+                throw new Error("Media url is required");
+            }
+            const payload = { phone, file };
+            const caption = resolveMediaCaption(content);
+            if (caption !== undefined) {
+                payload.caption = caption;
+            }
+            const fileName =
+                content?.filename != null
+                    ? String(content.filename).trim()
+                    : content?.fileName != null
+                      ? String(content.fileName).trim()
+                      : "";
+            if (fileName) {
+                payload.fileName = fileName;
+            }
+            return { kind: "media", payload };
+        }
         default:
             throw new Error(`Unsupported template_type: ${template_type}`);
     }
 }
 
-export async function executeWhatsappWebSend({ sessionId, number, template_type, content }) {
-    const path = WHATSAPPWEB_SEND_PATHS[template_type];
-    if (!path) {
-        throw new Error(`Unsupported template_type: ${template_type}`);
-    }
-
-    const payload = buildWhatsappWebSendPayload(template_type, content, sessionId, number);
+async function postWhatsappWebSend(sessionId, kind, payload) {
+    const encoded = encodeWhatsappWebSessionPath(sessionId);
+    const path =
+        kind === "text"
+            ? `/sessions/${encoded}/messages`
+            : `/sessions/${encoded}/messages/media`;
     return whatsappWebRequest("post", path, { data: payload });
+}
+
+async function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Send via V2. On 409 SESSION_NOT_CONNECTED, try reconnect once then retry.
+ */
+export async function executeWhatsappWebSend({ sessionId, number, template_type, content }) {
+    const { kind, payload } = buildWhatsappWebSendPayload(template_type, content, number);
+
+    try {
+        return await postWhatsappWebSend(sessionId, kind, payload);
+    } catch (error) {
+        const code = extractWhatsappWebErrorCode(error);
+        const status = error.response?.status;
+        if (status !== 409 && code !== "SESSION_NOT_CONNECTED") {
+            throw error;
+        }
+
+        try {
+            await reconnectWhatsappWebSession(sessionId);
+            await sleep(1500);
+            const statusRes = await getSessionStatus(sessionId);
+            if (statusRes.data?.data?.status !== "connected") {
+                throw error;
+            }
+            return await postWhatsappWebSend(sessionId, kind, payload);
+        } catch (retryError) {
+            throw retryError?.response ? retryError : error;
+        }
+    }
 }
 
 export async function sendWhatsappWebMessage({ branch_id, number, template_type, content }) {
@@ -213,4 +348,27 @@ export async function sendWhatsappWebMessage({ branch_id, number, template_type,
         template_type,
         content,
     });
+}
+
+/** Map proxy send-* body fields to V2 media payload. */
+export function buildWhatsappWebMediaProxyPayload(body = {}) {
+    const phone = normalizeRecipientPhone(body.phone ?? body.number);
+    const file = String(body.file ?? body.url ?? "").trim();
+    const payload = { phone, file };
+    const caption = resolveMediaCaption(body);
+    if (caption !== undefined) {
+        payload.caption = caption;
+    }
+    const fileName = String(body.fileName ?? body.filename ?? "").trim();
+    if (fileName) {
+        payload.fileName = fileName;
+    }
+    return payload;
+}
+
+export function buildWhatsappWebTextProxyPayload(body = {}) {
+    return {
+        phone: normalizeRecipientPhone(body.phone ?? body.number),
+        message: body.message != null ? String(body.message) : "",
+    };
 }

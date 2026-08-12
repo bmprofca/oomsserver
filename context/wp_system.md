@@ -14,6 +14,20 @@ Branch channel value: **`ooms system`** (`branch_list.whatsapp_channel`).
 
 Other channels: `disabled` | `ooms web` | `onechatting`.
 
+### OOMS Web (`ooms web`) — WhatsApp Web V2
+
+Upstream: `WHATSAPPWEB_BASE_URL` (default `https://whatsappweb.onesaas.in`). **No API key.**
+
+| Action | Upstream |
+|--------|----------|
+| Start | `POST /sessions` `{ session }` |
+| Status / QR / Delete | `GET/DELETE /sessions/{session}`, `GET .../qr` |
+| Reconnect | `POST /sessions/{session}/reconnect` |
+| Text | `POST /sessions/{session}/messages` `{ phone, message }` |
+| Media | `POST /sessions/{session}/messages/media` `{ phone, file, caption?, fileName? }` |
+
+Login is **QR only** (pairing removed). OOMS proxies under `/broadcast/whatsapp/whatsappweb/*`; helper: `helpers/whatsappWeb.js`.
+
 ---
 
 ## Workflow (end-to-end)

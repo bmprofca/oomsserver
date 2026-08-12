@@ -13,6 +13,14 @@ import {
     resolveBranchSessionId,
     setBranchWhatsappWebSession,
     whatsappWebRequest,
+    startWhatsappWebSession,
+    getWhatsappWebQr,
+    deleteWhatsappWebSession,
+    reconnectWhatsappWebSession,
+    encodeWhatsappWebSessionPath,
+    buildWhatsappWebTextProxyPayload,
+    buildWhatsappWebMediaProxyPayload,
+    getSessionStatus,
 } from "../helpers/whatsappWeb.js";
 import {
     createTemplate as createWhatsappWebTemplate,
@@ -2621,11 +2629,13 @@ router.put("/wp-system/template-map/unset", auth, validateBranch, async (req, re
     }
 });
 
-// ENDPOINTS FOR UNOFFICIAL WHATSAPP WEB AUTOMATION
+// ENDPOINTS FOR WHATSAPP WEB V2 (QR-only; proxies to WHATSAPPWEB_BASE_URL)
 
 router.get("/whatsappweb/health", auth, validateBranch, async (req, res) => {
     try {
-        const response = await axios.get(`${WHATSAPPWEB_BASE_URL}/health`);
+        const response = await axios.get(`${WHATSAPPWEB_BASE_URL}/health`, {
+            timeout: 30000,
+        });
         return res.status(response.status).json(response.data);
     } catch (error) {
         return handleWhatsappWebAxiosError(error, res, "Failed to fetch WhatsApp Web health");
@@ -2652,14 +2662,11 @@ router.get("/whatsappweb/status", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const response = await whatsappWebRequest(
-            "get",
-            `/api/sessions/${encodeURIComponent(branchSession.sessionId)}`
-        );
-
+        const response = await getSessionStatus(branchSession.sessionId);
         const sessionData = response.data?.data || {};
         return res.status(response.status).json({
-            ...response.data,
+            success: true,
+            message: response.data?.message || "Session status retrieved",
             data: {
                 ...sessionData,
                 sessionId: branchSession.sessionId,
@@ -2667,7 +2674,25 @@ router.get("/whatsappweb/status", auth, validateBranch, async (req, res) => {
             },
         });
     } catch (error) {
-        if (error.response?.status === 404) {
+        const code = error.response?.data?.error?.code;
+        const httpStatus = error.response?.status;
+
+        // V2: session id known to OOMS but not loaded in WhatsApp Web memory — keep id for reconnect
+        if (httpStatus === 404 && code === "SESSION_NOT_FOUND") {
+            return res.status(200).json({
+                success: true,
+                message: error.response?.data?.error?.message || "Session not loaded on WhatsApp Web",
+                data: {
+                    sessionId: (await getBranchWhatsappWebSession(req.branch_id)).sessionId || null,
+                    status: "disconnected",
+                    connected: false,
+                    hasValidFiles: null,
+                },
+            });
+        }
+
+        // Wrong/unknown upstream path or truly gone session
+        if (httpStatus === 404) {
             await clearBranchWhatsappWebSession(req.branch_id);
             return res.status(200).json({
                 success: true,
@@ -2686,31 +2711,16 @@ router.get("/whatsappweb/status", auth, validateBranch, async (req, res) => {
 router.post("/whatsappweb/session/create", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { webhookUrl, pairingCodeEnabled } = req.body || {};
-        const sessionId = generateWhatsappWebSessionId();
-
-        const payload = { sessionId };
-        if (webhookUrl != null && String(webhookUrl).trim() !== "") {
-            payload.webhookUrl = String(webhookUrl).trim();
-        }
-        if (pairingCodeEnabled === true) {
-            payload.pairingCodeEnabled = true;
+        const existing = await getBranchWhatsappWebSession(branch_id);
+        if (!existing.ok) {
+            return res.status(existing.status).json(existing.data);
         }
 
-        let response;
-        try {
-            response = await whatsappWebRequest("post", "/api/sessions/create", { data: payload });
-        } catch (error) {
-            if (error.response?.status === 409) {
-                response = await whatsappWebRequest(
-                    "get",
-                    `/api/sessions/${encodeURIComponent(sessionId)}`
-                );
-            } else {
-                throw error;
-            }
-        }
+        // Reuse existing session id when present so reconnect / QR can resume.
+        const sessionId =
+            existing.sessionId || generateWhatsappWebSessionId();
 
+        const response = await startWhatsappWebSession(sessionId);
         await setBranchWhatsappWebSession(branch_id, sessionId);
 
         return res.status(response.status).json({
@@ -2718,6 +2728,7 @@ router.post("/whatsappweb/session/create", auth, validateBranch, async (req, res
             data: {
                 ...(response.data?.data || {}),
                 sessionId,
+                session: sessionId,
             },
         });
     } catch (error) {
@@ -2733,18 +2744,19 @@ router.get("/whatsappweb/qr", auth, validateBranch, async (req, res) => {
             return res.status(resolved.status).json(resolved.data);
         }
 
-        const response = await whatsappWebRequest(
-            "get",
-            `/api/sessions/${encodeURIComponent(resolved.sessionId)}/qr`,
-            { validateStatus: (status) => status >= 200 && status < 500 }
-        );
+        const response = await getWhatsappWebQr(resolved.sessionId);
+        const qrData = response.data?.data || {};
+        const qrUrl = qrData.qr || null;
 
         if (response.data?.data) {
             return res.status(response.status).json({
                 ...response.data,
                 data: {
-                    ...response.data.data,
+                    ...qrData,
                     sessionId: resolved.sessionId,
+                    qr: qrUrl,
+                    // Compat for older clients expecting imageUrl
+                    imageUrl: qrUrl,
                 },
             });
         }
@@ -2755,33 +2767,36 @@ router.get("/whatsappweb/qr", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/whatsappweb/pairing-code", auth, validateBranch, async (req, res) => {
+router.post("/whatsappweb/session/reconnect", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const phone = req.body?.phone != null ? String(req.body.phone).trim() : "";
-
-        if (!phone) {
-            return res.status(400).json({
-                success: false,
-                message: "phone is required",
-            });
-        }
-
         const resolved = await resolveBranchSessionId(branch_id);
         if (!resolved.ok) {
             return res.status(resolved.status).json(resolved.data);
         }
 
-        const response = await whatsappWebRequest(
-            "post",
-            `/api/sessions/${encodeURIComponent(resolved.sessionId)}/pairing-code`,
-            { data: { phone } }
-        );
-
-        return proxyWhatsappWebResponse(res, response);
+        const response = await reconnectWhatsappWebSession(resolved.sessionId);
+        const data = response.data?.data || {};
+        return res.status(response.status).json({
+            ...response.data,
+            data: {
+                ...data,
+                sessionId: resolved.sessionId,
+                connected: data.status === "connected" || data.currentStatus === "connected",
+            },
+        });
     } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to generate pairing code");
+        return handleWhatsappWebAxiosError(error, res, "Failed to reconnect WhatsApp Web session");
     }
+});
+
+router.post("/whatsappweb/pairing-code", auth, validateBranch, async (_req, res) => {
+    return res.status(410).json({
+        success: false,
+        message:
+            "Pairing-code login is not supported on WhatsApp Web V2. Use QR scan instead.",
+        error_code: "NOT_SUPPORTED",
+    });
 });
 
 router.delete("/whatsappweb/session", auth, validateBranch, async (req, res) => {
@@ -2792,12 +2807,7 @@ router.delete("/whatsappweb/session", auth, validateBranch, async (req, res) => 
             return res.status(resolved.status).json(resolved.data);
         }
 
-        const response = await whatsappWebRequest(
-            "delete",
-            `/api/sessions/${encodeURIComponent(resolved.sessionId)}`,
-            { validateStatus: (status) => status >= 200 && status < 500 }
-        );
-
+        const response = await deleteWhatsappWebSession(resolved.sessionId);
         await clearBranchWhatsappWebSession(branch_id);
         return proxyWhatsappWebResponse(res, response);
     } catch (error) {
@@ -2812,24 +2822,12 @@ router.delete("/whatsappweb/session", auth, validateBranch, async (req, res) => 
     }
 });
 
-router.get("/whatsappweb/messages", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const resolved = await resolveBranchSessionId(branch_id);
-        if (!resolved.ok) {
-            return res.status(resolved.status).json(resolved.data);
-        }
-
-        const response = await whatsappWebRequest(
-            "get",
-            `/api/sessions/${encodeURIComponent(resolved.sessionId)}/messages`,
-            { params: req.query }
-        );
-
-        return proxyWhatsappWebResponse(res, response);
-    } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to fetch WhatsApp Web messages");
-    }
+router.get("/whatsappweb/messages", auth, validateBranch, async (_req, res) => {
+    return res.status(410).json({
+        success: false,
+        message: "Message list is not available on WhatsApp Web V2.",
+        error_code: "NOT_SUPPORTED",
+    });
 });
 
 router.post("/whatsappweb/send-text", auth, validateBranch, async (req, res) => {
@@ -2840,12 +2838,19 @@ router.post("/whatsappweb/send-text", auth, validateBranch, async (req, res) => 
             return res.status(resolved.status).json(resolved.data);
         }
 
-        const response = await whatsappWebRequest("post", "/api/messages/send-text", {
-            data: {
-                ...req.body,
-                sessionId: resolved.sessionId,
-            },
-        });
+        const payload = buildWhatsappWebTextProxyPayload(req.body || {});
+        if (!payload.phone || !payload.message) {
+            return res.status(400).json({
+                success: false,
+                message: "phone (or number) and message are required",
+            });
+        }
+
+        const response = await whatsappWebRequest(
+            "post",
+            `/sessions/${encodeWhatsappWebSessionPath(resolved.sessionId)}/messages`,
+            { data: payload }
+        );
 
         return proxyWhatsappWebResponse(res, response);
     } catch (error) {
@@ -2853,7 +2858,7 @@ router.post("/whatsappweb/send-text", auth, validateBranch, async (req, res) => 
     }
 });
 
-router.post("/whatsappweb/send-image", auth, validateBranch, async (req, res) => {
+async function proxyWhatsappWebMediaSend(req, res, fallbackMessage) {
     try {
         const branch_id = req.branch_id;
         const resolved = await resolveBranchSessionId(branch_id);
@@ -2861,81 +2866,41 @@ router.post("/whatsappweb/send-image", auth, validateBranch, async (req, res) =>
             return res.status(resolved.status).json(resolved.data);
         }
 
-        const response = await whatsappWebRequest("post", "/api/messages/send-image", {
-            data: {
-                ...req.body,
-                sessionId: resolved.sessionId,
-            },
-        });
-
-        return proxyWhatsappWebResponse(res, response);
-    } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to send WhatsApp Web image message");
-    }
-});
-
-router.post("/whatsappweb/send-video", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const resolved = await resolveBranchSessionId(branch_id);
-        if (!resolved.ok) {
-            return res.status(resolved.status).json(resolved.data);
+        const payload = buildWhatsappWebMediaProxyPayload(req.body || {});
+        if (!payload.phone || !payload.file) {
+            return res.status(400).json({
+                success: false,
+                message: "phone (or number) and file (or url) are required",
+            });
         }
 
-        const response = await whatsappWebRequest("post", "/api/messages/send-video", {
-            data: {
-                ...req.body,
-                sessionId: resolved.sessionId,
-            },
-        });
+        const response = await whatsappWebRequest(
+            "post",
+            `/sessions/${encodeWhatsappWebSessionPath(resolved.sessionId)}/messages/media`,
+            { data: payload }
+        );
 
         return proxyWhatsappWebResponse(res, response);
     } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to send WhatsApp Web video message");
+        return handleWhatsappWebAxiosError(error, res, fallbackMessage);
     }
-});
+}
 
-router.post("/whatsappweb/send-document", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const resolved = await resolveBranchSessionId(branch_id);
-        if (!resolved.ok) {
-            return res.status(resolved.status).json(resolved.data);
-        }
+router.post("/whatsappweb/send-image", auth, validateBranch, (req, res) =>
+    proxyWhatsappWebMediaSend(req, res, "Failed to send WhatsApp Web image message")
+);
 
-        const response = await whatsappWebRequest("post", "/api/messages/send-document", {
-            data: {
-                ...req.body,
-                sessionId: resolved.sessionId,
-            },
-        });
+router.post("/whatsappweb/send-video", auth, validateBranch, (req, res) =>
+    proxyWhatsappWebMediaSend(req, res, "Failed to send WhatsApp Web video message")
+);
 
-        return proxyWhatsappWebResponse(res, response);
-    } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to send WhatsApp Web document message");
-    }
-});
+router.post("/whatsappweb/send-document", auth, validateBranch, (req, res) =>
+    proxyWhatsappWebMediaSend(req, res, "Failed to send WhatsApp Web document message")
+);
 
-router.post("/whatsappweb/send-audio", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const resolved = await resolveBranchSessionId(branch_id);
-        if (!resolved.ok) {
-            return res.status(resolved.status).json(resolved.data);
-        }
-
-        const response = await whatsappWebRequest("post", "/api/messages/send-audio", {
-            data: {
-                ...req.body,
-                sessionId: resolved.sessionId,
-            },
-        });
-
-        return proxyWhatsappWebResponse(res, response);
-    } catch (error) {
-        return handleWhatsappWebAxiosError(error, res, "Failed to send WhatsApp Web audio message");
-    }
-});
+router.post("/whatsappweb/send-audio", auth, validateBranch, (req, res) =>
+    proxyWhatsappWebMediaSend(req, res, "Failed to send WhatsApp Web audio message")
+);
 
 function whatsappWebTemplateUsername(req) {
     return req.headers["username"] || req.headers["Username"] || null;

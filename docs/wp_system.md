@@ -12,7 +12,7 @@ The platform supports **three WhatsApp channels** per branch (`branch_list.whats
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `disabled`    | No WhatsApp notifications                                                                                                 |
 | `ooms system` | Built-in OOMS templates; backend sends via OneChatting with **static env tokens** (user does not connect developer token) |
-| `ooms web`    | Unofficial WhatsApp Web automation (maintained by us); branch session + static template content                           |
+| `ooms web`    | WhatsApp Web V2 (`WHATSAPPWEB_BASE_URL`, QR-only); branch session + static template content — see [`context/wp_system.md`](../context/wp_system.md) |
 | `onechatting` | Official OneChatting integration; user connects their own developer + user tokens                                         |
 
 **OOMS System** is our in-build notification channel:
