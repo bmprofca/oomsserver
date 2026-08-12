@@ -151,7 +151,7 @@ async function resolveOneChattingBranchDeveloperToken(branch_id) {
             status: 400,
             data: {
                 success: false,
-                message: "OneChatting developer token is not configured for this branch",
+                message: "OneChatting project developer token is not configured for this branch",
             },
         };
     }
@@ -1217,6 +1217,117 @@ router.put("/onechatting/developer-token", auth, validateBranch, async (req, res
         return res.status(500).json({
             success: false,
             message: "Failed to update developer token",
+        });
+    }
+});
+
+/**
+ * Branch-level OneChatting project developer token (templates, contacts sync, etc.).
+ * Stored on branch_list.onechatting_developer_token.
+ */
+router.get("/onechatting/project-developer-token", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const [rows] = await pool.query(
+            `SELECT onechatting_developer_token
+             FROM branch_list
+             WHERE branch_id = ?
+               AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id]
+        );
+
+        if (!rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Branch not found",
+            });
+        }
+
+        const token = rows[0].onechatting_developer_token
+            ? String(rows[0].onechatting_developer_token).trim()
+            : "";
+        const configured = Boolean(token);
+
+        return res.status(200).json({
+            success: true,
+            message: configured
+                ? "Project developer token retrieved successfully"
+                : "Project developer token is not configured",
+            data: {
+                configured,
+                developer_token: configured ? token : null,
+            },
+        });
+    } catch (error) {
+        console.error("GET PROJECT DEVELOPER TOKEN ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch project developer token",
+        });
+    }
+});
+
+router.put("/onechatting/project-developer-token", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const modifyBy = req.headers["username"] || req.headers["Username"] || "";
+        const { developer_token, clear } = req.body || {};
+
+        const [existing] = await pool.query(
+            `SELECT branch_id
+             FROM branch_list
+             WHERE branch_id = ?
+               AND is_deleted = '0'
+             LIMIT 1`,
+            [branch_id]
+        );
+
+        if (!existing.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Branch not found",
+            });
+        }
+
+        const shouldClear = clear === true;
+        let tokenValue = null;
+
+        if (!shouldClear) {
+            if (developer_token == null || String(developer_token).trim() === "") {
+                return res.status(400).json({
+                    success: false,
+                    message: "developer_token is required (or pass clear: true to remove it)",
+                });
+            }
+            tokenValue = String(developer_token).trim();
+        }
+
+        await pool.query(
+            `UPDATE branch_list
+             SET onechatting_developer_token = ?,
+                 modify_by = ?,
+                 modify_date = CURRENT_TIMESTAMP
+             WHERE branch_id = ?
+               AND is_deleted = '0'`,
+            [tokenValue, modifyBy, branch_id]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: shouldClear
+                ? "Project developer token cleared successfully"
+                : "Project developer token saved successfully",
+            data: {
+                configured: Boolean(tokenValue),
+                developer_token: tokenValue,
+            },
+        });
+    } catch (error) {
+        console.error("PUT PROJECT DEVELOPER TOKEN ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update project developer token",
         });
     }
 });

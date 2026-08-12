@@ -4274,6 +4274,7 @@ router.get("/staff-pending-summary", auth, validateBranch, async (req, res) => {
 /**
  * CA billing list — tasks where has_ca=1 and ca_id matches username,
  * filtered by is_ca_purchased status (0 pending / 1 generated / 2 cancelled).
+ * Pending (0) only includes tasks with status = 'complete'.
  * GET /task/ca-billing/list?page_no&limit&search&username&status
  */
 router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
@@ -4317,6 +4318,11 @@ router.get("/ca-billing/list", auth, validateBranch, async (req, res) => {
               AND t.is_ca_purchased = ?
         `;
         const params = [branch_id, caUsername, statusNum];
+
+        // Pending CA billing is only for completed tasks
+        if (statusNum === 0) {
+            baseQuery += ` AND t.status = 'complete'`;
+        }
 
         if (search) {
             const sp = `%${search}%`;
@@ -4489,7 +4495,7 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
         await connection.beginTransaction();
 
         const [taskRows] = await connection.query(
-            `SELECT task_id, service_id, fees, has_ca, ca_id, is_ca_purchased
+            `SELECT task_id, service_id, fees, has_ca, ca_id, is_ca_purchased, status
              FROM tasks
              WHERE branch_id = ? AND task_id = ?
              LIMIT 1
@@ -4504,6 +4510,13 @@ router.post("/ca-billing/generate", auth, validateBranch, async (req, res) => {
         if (String(task.has_ca) !== "1" || !task.ca_id) {
             await connection.rollback();
             return res.status(400).json({ success: false, message: "Task does not have a CA assigned" });
+        }
+        if (String(task.status || "").trim().toLowerCase() !== "complete") {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "CA purchase can only be generated for completed tasks",
+            });
         }
         if (Number(task.is_ca_purchased) !== 0) {
             await connection.rollback();
@@ -4596,7 +4609,7 @@ router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
         }
 
         const [taskRows] = await pool.query(
-            `SELECT task_id, has_ca, ca_id, is_ca_purchased
+            `SELECT task_id, has_ca, ca_id, is_ca_purchased, status
              FROM tasks
              WHERE branch_id = ? AND task_id = ?
              LIMIT 1`,
@@ -4608,6 +4621,12 @@ router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
         }
         if (String(task.has_ca) !== "1" || !task.ca_id) {
             return res.status(400).json({ success: false, message: "Task does not have a CA assigned" });
+        }
+        if (String(task.status || "").trim().toLowerCase() !== "complete") {
+            return res.status(400).json({
+                success: false,
+                message: "CA purchase can only be cancelled for completed tasks that are still pending",
+            });
         }
         if (Number(task.is_ca_purchased) !== 0) {
             return res.status(400).json({
