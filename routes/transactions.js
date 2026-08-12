@@ -19,7 +19,9 @@ import {
     collectLedgerStatement,
     generateLedgerPdfBuffer,
 } from "../helpers/ledgerReport.js";
+import { buildLedgerDownloadFilename } from "../helpers/ledgerFilename.js";
 import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
+import { formatCompliancePeriodLabel } from "../helpers/compliancePeriodLabel.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import {
     getActivePaymentTemplate,
@@ -941,6 +943,69 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     }
                 } catch (_) {
                     // keep sale_items-only particular if firm lookup fails
+                }
+
+                // Compliance period for task-billed sales (same label as task table)
+                try {
+                    let taskRow = null;
+                    const [taskByInvoice] = await pool.query(
+                        `SELECT t.task_id, t.task_type, t.compliance_period, t.compliance_year,
+                                t.is_recurring, s.frequency
+                         FROM tasks t
+                         LEFT JOIN services s
+                           ON s.service_id = t.service_id
+                         WHERE CAST(t.branch_id AS CHAR) = CAST(? AS CHAR)
+                           AND t.invoice_id = ?
+                         LIMIT 1`,
+                        [branch_id, row.invoice_id]
+                    );
+                    taskRow = taskByInvoice?.[0] || null;
+
+                    if (!taskRow) {
+                        let taskIdFromRemark = null;
+                        for (const item of sale_items) {
+                            const itemRemark =
+                                item?.remark != null ? String(item.remark).trim() : "";
+                            if (/^task:/i.test(itemRemark)) {
+                                const tid = itemRemark.replace(/^task:/i, "").trim();
+                                if (tid) {
+                                    taskIdFromRemark = tid;
+                                    break;
+                                }
+                            }
+                        }
+                        if (taskIdFromRemark) {
+                            const [taskById] = await pool.query(
+                                `SELECT t.task_id, t.task_type, t.compliance_period, t.compliance_year,
+                                        t.is_recurring, s.frequency
+                                 FROM tasks t
+                                 LEFT JOIN services s
+                                   ON s.service_id = t.service_id
+                                 WHERE CAST(t.branch_id AS CHAR) = CAST(? AS CHAR)
+                                   AND t.task_id = ?
+                                 LIMIT 1`,
+                                [branch_id, taskIdFromRemark]
+                            );
+                            taskRow = taskById?.[0] || null;
+                        }
+                    }
+
+                    if (taskRow?.task_id) {
+                        particular.task_id = String(taskRow.task_id).trim();
+                        particular.task_type = taskRow.task_type ?? null;
+                        const periodLabel = formatCompliancePeriodLabel({
+                            task_type: taskRow.task_type,
+                            is_recurring: taskRow.is_recurring,
+                            compliance_period: taskRow.compliance_period,
+                            compliance_year: taskRow.compliance_year,
+                            frequency: taskRow.frequency,
+                        });
+                        if (periodLabel) {
+                            particular.compliance_period_label = periodLabel;
+                        }
+                    }
+                } catch (_) {
+                    // optional — leave sale particulars without period
                 }
             }
 
@@ -2248,7 +2313,12 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
             summary,
         } = ledger;
 
-        const filename = `ledger_${partyType}_${partyId}_${fromDate}_to_${toDate}`;
+        const filenameBase = buildLedgerDownloadFilename({
+            name: partyDetails?.name || partyId,
+            fromDate,
+            toDate,
+            extension: "pdf",
+        }).replace(/\.PDF$/i, "");
 
         switch (String(format).toLowerCase()) {
             case "excel":
@@ -2261,7 +2331,7 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
                     openingDebit,
                     openingCredit,
                     openingBalance,
-                    filename
+                    filenameBase
                 );
                 break;
             case "csv":
@@ -2274,7 +2344,7 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
                     openingDebit,
                     openingCredit,
                     openingBalance,
-                    filename
+                    filenameBase
                 );
                 break;
             case "pdf":
@@ -2290,10 +2360,11 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
                     statementData,
                     summary,
                 });
+                const pdfFilename = `${filenameBase}.PDF`;
                 res.setHeader("Content-Type", "application/pdf");
                 res.setHeader(
                     "Content-Disposition",
-                    `attachment; filename=${filename}.pdf`
+                    `attachment; filename="${pdfFilename}"`
                 );
                 res.setHeader("Cache-Control", "no-cache");
                 return res.send(pdfBuffer);
@@ -2314,7 +2385,7 @@ router.get("/download/ledger", auth, validateBranch, async (req, res) => {
 /**
  * Generate ledger PDF → upload to OneSaaS → share via selected channels
  * using "document sharing" notification templates.
- * Body: { party_type, party_id, from_date, to_date, channels: ['whatsapp'|'email'], mobile?, email? }
+ * Body: { party_type: 'client'|'ca', party_id, from_date, to_date, channels: ['whatsapp'|'email'], mobile?, email? }
  */
 router.post("/ledger/share", auth, validateBranch, async (req, res) => {
     try {
@@ -2355,10 +2426,10 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
                 message: "Username is required",
             });
         }
-        if (partyType !== "client") {
+        if (partyType !== "client" && partyType !== "ca") {
             return res.status(400).json({
                 success: false,
-                message: "Only client ledger sharing is supported currently",
+                message: "Only client and CA ledger sharing is supported currently",
             });
         }
 
@@ -2383,8 +2454,12 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
             summary: ledger.summary,
         });
 
-        const documentName = `Ledger_${ledger.partyDetails?.name || partyId}_${fromDate}_to_${toDate}.pdf`
-            .replace(/[^\w.\-]+/g, "_");
+        const documentName = buildLedgerDownloadFilename({
+            name: ledger.partyDetails?.name || partyId,
+            fromDate,
+            toDate,
+            extension: "pdf",
+        });
         const uploaded = await uploadBufferToOneSaas({
             buffer: pdfBuffer,
             filename: documentName,
@@ -2392,7 +2467,7 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
         });
         const documentUrl = uploaded.url;
 
-        const client = await USER_SNIPPED_DATA(partyId);
+        const party = await USER_SNIPPED_DATA(partyId);
         const sharedBy = await USER_SNIPPED_DATA(sent_by);
         const bodyMobile =
             req.body?.mobile != null ? String(req.body.mobile).trim() : "";
@@ -2402,12 +2477,13 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
             req.body?.country_code != null
                 ? String(req.body.country_code).replace(/\D/g, "").trim()
                 : "";
-        const recipientMobile = bodyMobile || client?.mobile || "";
-        const recipientEmail = bodyEmail || client?.email || "";
+        const recipientMobile = bodyMobile || party?.mobile || "";
+        const recipientEmail = bodyEmail || party?.email || "";
         const recipientCountryCode =
-            bodyCountryCode || client?.country_code || "91";
+            bodyCountryCode || party?.country_code || "91";
+        const recipientName = party?.name || ledger.partyDetails?.name || partyId;
         const variables = {
-            name: client?.name || partyId,
+            name: recipientName,
             mobile: recipientMobile,
             email: recipientEmail,
             firm_name: ledger.partyDetails?.name || "",
@@ -2415,7 +2491,7 @@ router.post("/ledger/share", auth, validateBranch, async (req, res) => {
             document_link: documentUrl,
             shared_by: sharedBy?.name || sent_by,
             remark: `Ledger ${fromDate} to ${toDate}`,
-            "{{name}}": client?.name || partyId,
+            "{{name}}": recipientName,
             "{{mobile}}": recipientMobile,
             "{{email}}": recipientEmail,
             "{{firm_name}}": ledger.partyDetails?.name || "",
@@ -3054,7 +3130,7 @@ async function generateExcel(res, data, partyDetails, fromDate, toDate, openingD
     worksheet.addRow([`Generated on: ${new Date().toLocaleString()}`]);
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=${filename}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${String(filename).toUpperCase()}.XLSX"`);
 
     await workbook.xlsx.write(res);
     res.end();
@@ -3063,7 +3139,7 @@ async function generateExcel(res, data, partyDetails, fromDate, toDate, openingD
 // CSV Generation Function
 async function generateCSV(res, data, partyDetails, fromDate, toDate, openingDebit, openingCredit, openingBalance, filename) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=${filename}.csv`);
+    res.setHeader('Content-Disposition', `attachment; filename="${String(filename).toUpperCase()}.CSV"`);
 
     const rows = [
         ['Ledger Statement'],

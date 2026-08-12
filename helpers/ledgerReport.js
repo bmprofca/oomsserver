@@ -1,6 +1,7 @@
 import PDFDocument from "pdfkit";
 import pool from "../db.js";
 import { formatPurchaseParticularsText } from "./purchaseParticulars.js";
+import { formatCompliancePeriodLabel } from "./compliancePeriodLabel.js";
 
 function formatCurrency(amount, { signed = false } = {}) {
     const n = Number(amount) || 0;
@@ -71,7 +72,14 @@ export async function collectLedgerStatement({
 }) {
     let partyDetails = {
         name: partyId,
-        type: partyType === "client" ? "Client" : partyType === "bank" ? "Bank" : "Party",
+        type:
+            partyType === "client"
+                ? "Client"
+                : partyType === "ca"
+                  ? "CA"
+                  : partyType === "bank"
+                    ? "Bank"
+                    : "Party",
         id: partyId,
     };
 
@@ -110,6 +118,27 @@ export async function collectLedgerStatement({
                 id: rows[0].username,
             };
         }
+    } else if (partyType === "ca") {
+        const [rows] = await pool.query(
+            `SELECT p.name, p.email, p.mobile, p.pan_number, c.username
+             FROM clients c
+             LEFT JOIN profile p ON p.username = c.username
+               AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username)
+             WHERE c.username = ? AND c.branch_id = ? AND c.is_deleted = '0'
+               AND c.user_type = 'ca'
+             LIMIT 1`,
+            [partyId, branch_id]
+        );
+        if (rows[0]) {
+            partyDetails = {
+                name: rows[0].name || rows[0].username,
+                email: rows[0].email,
+                mobile: rows[0].mobile,
+                pan: rows[0].pan_number || null,
+                type: "CA",
+                id: rows[0].username,
+            };
+        }
     } else if (partyType === "bank") {
         const [rows] = await pool.query(
             `SELECT bank_id, account_no, holder, ifsc, bank, branch, type
@@ -130,35 +159,25 @@ export async function collectLedgerStatement({
         }
     }
 
+    const pt = String(partyType || "").trim();
+    const pid = String(partyId || "").trim();
+
+    // Ledger rule (matches /transaction/list): party2 => debit, party1 => credit.
     const [[openingRow]] = await pool.query(
         `SELECT
             SUM(CASE
-                WHEN \`party1_type\` = ? AND \`party1_id\` = ? AND \`party2_id\` IS NULL AND amount > 0 THEN ABS(amount)
                 WHEN \`party2_type\` = ? AND \`party2_id\` = ? THEN ABS(amount)
                 ELSE 0
             END) AS debit,
             SUM(CASE
-                WHEN \`party1_type\` = ? AND \`party1_id\` = ? AND (\`party2_id\` IS NULL AND amount < 0 OR \`party2_id\` IS NOT NULL) THEN ABS(amount)
+                WHEN \`party1_type\` = ? AND \`party1_id\` = ? THEN ABS(amount)
                 ELSE 0
             END) AS credit
         FROM \`transactions\`
         WHERE \`branch_id\` = ?
           AND (\`party1_type\` = ? AND \`party1_id\` = ? OR \`party2_type\` = ? AND \`party2_id\` = ?)
           AND \`transaction_date\` < ?`,
-        [
-            partyType,
-            partyId,
-            partyType,
-            partyId,
-            partyType,
-            partyId,
-            branch_id,
-            partyType,
-            partyId,
-            partyType,
-            partyId,
-            fromDate,
-        ]
+        [pt, pid, pt, pid, branch_id, pt, pid, pt, pid, fromDate]
     );
 
     const balanceBefore =
@@ -175,7 +194,7 @@ export async function collectLedgerStatement({
            AND transaction_date >= ?
            AND transaction_date <= ?
          ORDER BY transaction_date ASC, id ASC`,
-        [branch_id, partyType, partyId, partyType, partyId, fromDate, toDate]
+        [branch_id, pt, pid, pt, pid, fromDate, toDate]
     );
 
     // Sale rows store party1 as type "sale" (invoice id) — resolve firm name for Particulars
@@ -241,6 +260,99 @@ export async function collectLedgerStatement({
             }
         } catch (_) {
             // optional fallback
+        }
+    }
+
+    // Compliance period for task-billed sales (same label as task table)
+    const saleCompliancePeriodByInvoiceId = new Map();
+    if (saleInvoiceIds.length > 0) {
+        const ph = saleInvoiceIds.map(() => "?").join(", ");
+        try {
+            const [taskRows] = await pool.query(
+                `SELECT t.invoice_id, t.task_id, t.task_type, t.compliance_period,
+                        t.compliance_year, t.is_recurring, s.frequency
+                 FROM tasks t
+                 LEFT JOIN services s
+                   ON s.service_id = t.service_id
+                 WHERE CAST(t.branch_id AS CHAR) = CAST(? AS CHAR)
+                   AND t.invoice_id IN (${ph})`,
+                [branch_id, ...saleInvoiceIds]
+            );
+            for (const tr of taskRows || []) {
+                const inv = tr?.invoice_id != null ? String(tr.invoice_id).trim() : "";
+                if (!inv || saleCompliancePeriodByInvoiceId.has(inv)) continue;
+                const label = formatCompliancePeriodLabel({
+                    task_type: tr.task_type,
+                    is_recurring: tr.is_recurring,
+                    compliance_period: tr.compliance_period,
+                    compliance_year: tr.compliance_year,
+                    frequency: tr.frequency,
+                });
+                if (label) saleCompliancePeriodByInvoiceId.set(inv, label);
+            }
+        } catch (_) {
+            // optional
+        }
+
+        // Fallback: sale_items.remark = "task:{task_id}" when tasks.invoice_id is unset
+        const missingPeriodInvs = saleInvoiceIds.filter(
+            (id) => !saleCompliancePeriodByInvoiceId.has(id)
+        );
+        if (missingPeriodInvs.length > 0) {
+            const ph = missingPeriodInvs.map(() => "?").join(", ");
+            try {
+                const [remarkRows] = await pool.query(
+                    `SELECT si.invoice_id, si.remark
+                     FROM sale_items si
+                     WHERE CAST(si.branch_id AS CHAR) = CAST(? AS CHAR)
+                       AND si.invoice_id IN (${ph})
+                       AND si.remark LIKE 'task:%'`,
+                    [branch_id, ...missingPeriodInvs]
+                );
+                const taskIdByInvoice = new Map();
+                for (const rr of remarkRows || []) {
+                    const inv = rr?.invoice_id != null ? String(rr.invoice_id).trim() : "";
+                    if (!inv || taskIdByInvoice.has(inv)) continue;
+                    const remark = rr?.remark != null ? String(rr.remark).trim() : "";
+                    if (!/^task:/i.test(remark)) continue;
+                    const tid = remark.replace(/^task:/i, "").trim();
+                    if (tid) taskIdByInvoice.set(inv, tid);
+                }
+                const taskIds = [...new Set(taskIdByInvoice.values())];
+                if (taskIds.length > 0) {
+                    const tph = taskIds.map(() => "?").join(", ");
+                    const [tasksById] = await pool.query(
+                        `SELECT t.task_id, t.task_type, t.compliance_period, t.compliance_year,
+                                t.is_recurring, s.frequency
+                         FROM tasks t
+                         LEFT JOIN services s
+                           ON s.service_id = t.service_id
+                         WHERE CAST(t.branch_id AS CHAR) = CAST(? AS CHAR)
+                           AND t.task_id IN (${tph})`,
+                        [branch_id, ...taskIds]
+                    );
+                    const taskById = new Map();
+                    for (const tr of tasksById || []) {
+                        const tid = tr?.task_id != null ? String(tr.task_id).trim() : "";
+                        if (tid) taskById.set(tid, tr);
+                    }
+                    for (const [inv, tid] of taskIdByInvoice.entries()) {
+                        if (saleCompliancePeriodByInvoiceId.has(inv)) continue;
+                        const tr = taskById.get(tid);
+                        if (!tr) continue;
+                        const label = formatCompliancePeriodLabel({
+                            task_type: tr.task_type,
+                            is_recurring: tr.is_recurring,
+                            compliance_period: tr.compliance_period,
+                            compliance_year: tr.compliance_year,
+                            frequency: tr.frequency,
+                        });
+                        if (label) saleCompliancePeriodByInvoiceId.set(inv, label);
+                    }
+                }
+            } catch (_) {
+                // optional
+            }
         }
     }
 
@@ -311,7 +423,7 @@ export async function collectLedgerStatement({
 
     const oppositeKeys = new Set();
     for (const row of transactions) {
-        const isParty2 = row.party2_type === partyType && String(row.party2_id) === partyId;
+        const isParty2 = row.party2_type === pt && String(row.party2_id) === pid;
         const oppType = isParty2 ? row.party1_type : row.party2_type;
         const oppId = isParty2 ? row.party1_id : row.party2_id;
         if (oppType && oppId) oppositeKeys.add(`${oppType}|${oppId}`);
@@ -335,20 +447,14 @@ export async function collectLedgerStatement({
 
     for (const row of transactions) {
         const amount = Math.abs(Number(row.amount) || 0);
-        const isParty1 = row.party1_type === partyType && String(row.party1_id) === partyId;
-        const isParty2 = row.party2_type === partyType && String(row.party2_id) === partyId;
+        const isParty1 = row.party1_type === pt && String(row.party1_id) === pid;
+        const isParty2 = row.party2_type === pt && String(row.party2_id) === pid;
 
+        // Same rule as /transaction/list — independent of opposite party null/non-null.
         let rowDebit = 0;
         let rowCredit = 0;
-        if (row.party2_id == null) {
-            const amt = Number(row.amount) || 0;
-            if (amt > 0) rowDebit = amt;
-            else rowCredit = Math.abs(amt);
-        } else if (isParty1) {
-            rowCredit = amount;
-        } else if (isParty2) {
-            rowDebit = amount;
-        }
+        if (isParty2) rowDebit = amount;
+        if (isParty1) rowCredit = amount;
 
         runningBalance = runningBalance + (rowDebit - rowCredit);
         totalDebit += rowDebit;
@@ -364,6 +470,7 @@ export async function collectLedgerStatement({
         let particular = "";
         let particularSub = "";
         let particularRemark = "";
+        let particularPeriod = "";
         const txTypeLower = String(row.transaction_type || "").toLowerCase();
         const isSale = txTypeLower === "sale";
         const isPurchase = txTypeLower === "purchase";
@@ -371,6 +478,7 @@ export async function collectLedgerStatement({
             const inv = row.invoice_id != null ? String(row.invoice_id).trim() : "";
             particular = (inv && saleServiceByInvoiceId.get(inv)) || "";
             particularSub = (inv && saleFirmByInvoiceId.get(inv)) || "";
+            particularPeriod = (inv && saleCompliancePeriodByInvoiceId.get(inv)) || "";
             if (!particular && particularSub) {
                 particular = particularSub;
                 particularSub = "";
@@ -401,7 +509,7 @@ export async function collectLedgerStatement({
             particularSub = "";
             if (row.remark) particularRemark = String(row.remark).trim();
         } else if (hasOppositeParty) {
-            if (oppType === "client") {
+            if (oppType === "client" || oppType === "ca" || oppType === "agent") {
                 particular = details.name || details.username || "";
             } else if (oppType === "bank") {
                 particular = details.holder || details.bank || "";
@@ -418,6 +526,7 @@ export async function collectLedgerStatement({
             date: row.transaction_date,
             particular,
             particular_sub: particularSub || "",
+            particular_period: particularPeriod || "",
             particular_remark: particularRemark || "",
             type: row.transaction_type || "",
             invoice_no: row.invoice_no || "N/A",
@@ -759,6 +868,7 @@ export function generateLedgerPdfBuffer({
             rows.forEach((row, index) => {
                 const particularText = String(row.particular || "-");
                 const particularSub = String(row.particular_sub || "").trim();
+                const particularPeriod = String(row.particular_period || "").trim();
                 const particularRemark = String(row.particular_remark || "").trim();
                 const typeText = formatTypeLabel(row.type);
                 const voucherText = String(row.invoice_no || "N/A");
@@ -776,6 +886,9 @@ export function generateLedgerPdfBuffer({
                     measureH(particularText, cols.particular) +
                     (particularSub
                         ? measureH(particularSub, cols.particular, "Helvetica", subFontSize) + 2
+                        : 0) +
+                    (particularPeriod
+                        ? measureH(particularPeriod, cols.particular, "Helvetica", subFontSize) + 2
                         : 0) +
                     (particularRemark
                         ? measureH(particularRemark, cols.particular, "Helvetica", subFontSize) + 2
@@ -829,6 +942,21 @@ export function generateLedgerPdfBuffer({
                             lineGap: 1,
                         });
                     particularCursorY += doc.heightOfString(particularSub, {
+                        width: particularWidth,
+                        lineGap: 1,
+                    });
+                }
+                if (particularPeriod) {
+                    particularCursorY += 1;
+                    doc.fillColor("#64748b")
+                        .font("Helvetica")
+                        .fontSize(subFontSize)
+                        .text(particularPeriod, textX(cols.particular), particularCursorY, {
+                            width: particularWidth,
+                            align: cols.particular.align,
+                            lineGap: 1,
+                        });
+                    particularCursorY += doc.heightOfString(particularPeriod, {
                         width: particularWidth,
                         lineGap: 1,
                     });

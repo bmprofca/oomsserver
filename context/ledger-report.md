@@ -26,7 +26,7 @@ POST /transaction/ledger/share    →  upload PDF → WhatsApp / email
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/transaction/download/ledger` | branch | Query: `party_type`, `party_id`, `from_date`, `to_date`, `format` (`pdf` / excel / csv) |
-| POST | `/transaction/ledger/share` | branch | Body: party + date range + `channels[]` (`whatsapp` / `email`) + optional `mobile` / `email`; currently **client** party only. Delivery uses payload contacts (fallback to profile). |
+| POST | `/transaction/ledger/share` | branch | Body: party + date range + `channels[]` (`whatsapp` / `email`) + optional `mobile` / `email`; supports **client** and **ca**. Delivery uses payload contacts (fallback to profile). |
 
 Share flow: build PDF → upload to `upload.onesaas.in` → send via notification type **`document sharing`**. Recipient WhatsApp/email addresses come from the request body when provided (`sendDocumentSharingWhatsapp` accepts `mobile` / `email` overrides).
 
@@ -54,9 +54,12 @@ Format for sale rows (matches ledger UI):
 
 1. **Service names** (primary) — all names joined with `, `
 2. **Firm name** (secondary, smaller) via `particular_sub` when linked firm exists
-3. Remark appended under services when present; else `-` if nothing else
+3. **Compliance period** (secondary, smaller) via `particular_period` when the sale is linked to a compliance task — same `{period} · {year}` label as the task table (`SERVER/helpers/compliancePeriodLabel.js`)
+4. Remark appended under services when present; else `-` if nothing else
 
-Batch-load firms/services by `invoice_id` inside `collectLedgerStatement` (select includes `invoice_id`).
+Task link: prefer `tasks.invoice_id`; fallback `sale_items.remark` matching `task:{task_id}`.
+
+Batch-load firms/services/task periods by `invoice_id` inside `collectLedgerStatement` (select includes `invoice_id`).
 
 ---
 
