@@ -16,17 +16,17 @@ Other channels: `disabled` | `ooms web` | `onechatting`.
 
 ### OOMS Web (`ooms web`) — WhatsApp Web V2
 
-Upstream: `WHATSAPPWEB_BASE_URL` (default `https://whatsappweb.onesaas.in`). **No API key.**
+Upstream: `WHATSAPPWEB_BASE_URL` (default `https://whatsappweb.onesaas.in`). Auth: `WHATSAPPWEB_API_KEY` sent as `x-api-key` on every JSON call.
 
 | Action | Upstream |
 |--------|----------|
-| Start | `POST /sessions` `{ session }` |
+| Start | `POST /sessions` `{}` → server returns 6-char `data.session` (store in `branch_list.whatsappweb_session`) |
 | Status / QR / Delete | `GET/DELETE /sessions/{session}`, `GET .../qr` |
 | Reconnect | `POST /sessions/{session}/reconnect` |
 | Text | `POST /sessions/{session}/messages` `{ phone, message }` |
 | Media | `POST /sessions/{session}/messages/media` `{ phone, file, caption?, fileName? }` |
 
-Login is **QR only** (pairing removed). OOMS proxies under `/broadcast/whatsapp/whatsappweb/*`; helper: `helpers/whatsappWeb.js`.
+Login is **QR only** (poll QR during pairing; do not poll status). OOMS proxies under `/broadcast/whatsapp/whatsappweb/*`; helper: `helpers/whatsappWeb.js`.
 
 ---
 

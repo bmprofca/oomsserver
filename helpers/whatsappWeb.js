@@ -6,14 +6,20 @@ export const WHATSAPPWEB_BASE_URL = String(
     process.env.WHATSAPPWEB_BASE_URL || ""
 ).trim().replace(/\/$/, "");
 
-/** Unused by V2 (no auth). Kept for env compatibility. */
+/** Required on every upstream JSON call (`x-api-key`). */
 export const WHATSAPPWEB_API_KEY = String(
     process.env.WHATSAPPWEB_API_KEY || ""
 ).trim();
 
 function whatsappWebHeaders() {
+    if (!WHATSAPPWEB_API_KEY) {
+        throw new Error(
+            "WHATSAPPWEB_API_KEY is not configured (required as x-api-key for WhatsApp Web V2)"
+        );
+    }
     return {
         "Content-Type": "application/json",
+        "x-api-key": WHATSAPPWEB_API_KEY,
     };
 }
 
@@ -24,6 +30,62 @@ export function generateWhatsappWebSessionId() {
 
 export function encodeWhatsappWebSessionPath(sessionId) {
     return encodeURIComponent(String(sessionId || "").trim());
+}
+
+/**
+ * V2 upstream uses status "ready" (with linked/socket) once the session can talk to WhatsApp.
+ * Older docs/UI used "connected". Treat both as online.
+ */
+export function isWhatsappWebSessionConnected(sessionData = {}) {
+    const status = String(sessionData?.status || sessionData?.currentStatus || "")
+        .trim()
+        .toLowerCase();
+    if (status === "connected" || status === "ready") {
+        return true;
+    }
+    if (sessionData?.connected === true) {
+        return true;
+    }
+    if (
+        sessionData?.linked === true &&
+        status !== "disconnected" &&
+        status !== "destroyed" &&
+        status !== "needs_qr" &&
+        status !== "unreachable"
+    ) {
+        return true;
+    }
+    if (
+        String(sessionData?.socket || "").trim().toLowerCase() === "connected" &&
+        (status === "ready" || status === "connected" || sessionData?.linked === true)
+    ) {
+        return true;
+    }
+    return false;
+}
+
+/** Normalize upstream payload for OOMS clients (connected flag + stable status label). */
+export function normalizeWhatsappWebSessionPayload(sessionData = {}, sessionId = null) {
+    const connected = isWhatsappWebSessionConnected(sessionData);
+    const rawStatus = String(sessionData?.status || "").trim().toLowerCase();
+    let status = rawStatus || (sessionId ? "disconnected" : "not_configured");
+
+    if (connected) {
+        status = "connected";
+    } else if (rawStatus === "needs_qr") {
+        status = "needs_qr";
+    } else if (rawStatus === "unreachable") {
+        status = "unreachable";
+    } else if (rawStatus === "connecting") {
+        status = "connecting";
+    }
+
+    return {
+        ...sessionData,
+        sessionId: sessionId || sessionData?.sessionId || sessionData?.session || null,
+        connected,
+        status,
+    };
 }
 
 export async function getBranchWhatsappWebSession(branch_id) {
@@ -87,13 +149,17 @@ export async function resolveBranchSessionId(branch_id) {
     return { ok: true, sessionId: branchSession.sessionId };
 }
 
-export async function whatsappWebRequest(method, path, { data, params, validateStatus } = {}) {
+export async function whatsappWebRequest(method, path, { data, params, validateStatus, timeout } = {}) {
+    if (!WHATSAPPWEB_BASE_URL) {
+        throw new Error("WHATSAPPWEB_BASE_URL is not configured");
+    }
+
     const config = {
         method,
         url: `${WHATSAPPWEB_BASE_URL}${path}`,
         headers: whatsappWebHeaders(),
         params,
-        timeout: 30000,
+        timeout: timeout != null ? timeout : 30000,
     };
 
     if (validateStatus !== undefined) {
@@ -166,9 +232,10 @@ export async function getSessionStatus(sessionId) {
     );
 }
 
-export async function startWhatsappWebSession(sessionId) {
+export async function startWhatsappWebSession() {
+    // V2: server generates session id — do not send `session` in the body.
     return whatsappWebRequest("post", "/sessions", {
-        data: { session: String(sessionId).trim() },
+        data: {},
     });
 }
 
@@ -209,41 +276,8 @@ function normalizeRecipientPhone(number) {
 }
 
 export async function assertWhatsappWebSessionReady(branch_id) {
-    const resolved = await resolveBranchSessionId(branch_id);
-    if (!resolved.ok) {
-        return resolved;
-    }
-
-    let sessionStatus;
-    try {
-        sessionStatus = await getSessionStatus(resolved.sessionId);
-    } catch (error) {
-        return {
-            ok: false,
-            status: error.response?.status || 500,
-            data: {
-                success: false,
-                message: extractWhatsappWebErrorMessage(
-                    error,
-                    "WhatsApp Web session is not connected"
-                ),
-            },
-        };
-    }
-
-    const status = sessionStatus.data?.data?.status;
-    if (status !== "connected") {
-        return {
-            ok: false,
-            status: 400,
-            data: {
-                success: false,
-                message: "WhatsApp Web session is not connected",
-            },
-        };
-    }
-
-    return { ok: true, sessionId: resolved.sessionId };
+    // Docs: send anytime for a linked session — no status probe first.
+    return resolveBranchSessionId(branch_id);
 }
 
 /**
@@ -308,7 +342,8 @@ async function sleep(ms) {
 }
 
 /**
- * Send via V2. On 409 SESSION_NOT_CONNECTED, try reconnect once then retry.
+ * Send via V2. On transient connect failures, try reconnect once then retry.
+ * NEEDS_QR / SESSION_NOT_FOUND require a new QR — do not reconnect.
  */
 export async function executeWhatsappWebSend({ sessionId, number, template_type, content }) {
     const { kind, payload } = buildWhatsappWebSendPayload(template_type, content, number);
@@ -317,20 +352,47 @@ export async function executeWhatsappWebSend({ sessionId, number, template_type,
         return await postWhatsappWebSend(sessionId, kind, payload);
     } catch (error) {
         const code = extractWhatsappWebErrorCode(error);
+        if (code === "NEEDS_QR" || code === "SESSION_NOT_FOUND") {
+            const err = new Error(
+                extractWhatsappWebErrorMessage(
+                    error,
+                    "WhatsApp Web session needs QR linking again"
+                )
+            );
+            err.code = code;
+            err.response = error.response;
+            throw err;
+        }
+
         const status = error.response?.status;
-        if (status !== 409 && code !== "SESSION_NOT_CONNECTED") {
+        const transient =
+            status === 504 ||
+            code === "CONNECT_TIMEOUT" ||
+            code === "RECONNECT_FAILED" ||
+            code === "SESSION_NOT_CONNECTED" ||
+            status === 409;
+
+        if (!transient) {
             throw error;
         }
 
         try {
             await reconnectWhatsappWebSession(sessionId);
             await sleep(1500);
-            const statusRes = await getSessionStatus(sessionId);
-            if (statusRes.data?.data?.status !== "connected") {
-                throw error;
-            }
             return await postWhatsappWebSend(sessionId, kind, payload);
         } catch (retryError) {
+            const retryCode = extractWhatsappWebErrorCode(retryError);
+            if (retryCode === "NEEDS_QR" || retryCode === "SESSION_NOT_FOUND") {
+                const err = new Error(
+                    extractWhatsappWebErrorMessage(
+                        retryError,
+                        "WhatsApp Web session needs QR linking again"
+                    )
+                );
+                err.code = retryCode;
+                err.response = retryError.response;
+                throw err;
+            }
             throw retryError?.response ? retryError : error;
         }
     }

@@ -5,7 +5,6 @@ import { auth, validateBranch } from "../middleware/auth.js";
 import { TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
 import {
     WHATSAPPWEB_BASE_URL,
-    generateWhatsappWebSessionId,
     clearBranchWhatsappWebSession,
     getBranchWhatsappWebSession,
     handleWhatsappWebAxiosError,
@@ -21,6 +20,7 @@ import {
     buildWhatsappWebTextProxyPayload,
     buildWhatsappWebMediaProxyPayload,
     getSessionStatus,
+    normalizeWhatsappWebSessionPayload,
 } from "../helpers/whatsappWeb.js";
 import {
     createTemplate as createWhatsappWebTemplate,
@@ -2744,10 +2744,8 @@ router.put("/wp-system/template-map/unset", auth, validateBranch, async (req, re
 
 router.get("/whatsappweb/health", auth, validateBranch, async (req, res) => {
     try {
-        const response = await axios.get(`${WHATSAPPWEB_BASE_URL}/health`, {
-            timeout: 30000,
-        });
-        return res.status(response.status).json(response.data);
+        const response = await whatsappWebRequest("get", "/health");
+        return proxyWhatsappWebResponse(res, response);
     } catch (error) {
         return handleWhatsappWebAxiosError(error, res, "Failed to fetch WhatsApp Web health");
     }
@@ -2775,27 +2773,33 @@ router.get("/whatsappweb/status", auth, validateBranch, async (req, res) => {
 
         const response = await getSessionStatus(branchSession.sessionId);
         const sessionData = response.data?.data || {};
+        const normalized = normalizeWhatsappWebSessionPayload(
+            sessionData,
+            branchSession.sessionId
+        );
         return res.status(response.status).json({
             success: true,
             message: response.data?.message || "Session status retrieved",
-            data: {
-                ...sessionData,
-                sessionId: branchSession.sessionId,
-                connected: sessionData.status === "connected",
-            },
+            data: normalized,
         });
     } catch (error) {
         const code = error.response?.data?.error?.code;
         const httpStatus = error.response?.status;
+        const sessionId =
+            (await getBranchWhatsappWebSession(req.branch_id)).sessionId || null;
 
-        // V2: session id known to OOMS but not loaded in WhatsApp Web memory — keep id for reconnect
-        if (httpStatus === 404 && code === "SESSION_NOT_FOUND") {
+        // Not linked / needs QR — keep stored id so UI can recreate or show re-pair
+        if (httpStatus === 404 && (code === "SESSION_NOT_FOUND" || code === "NEEDS_QR")) {
             return res.status(200).json({
                 success: true,
-                message: error.response?.data?.error?.message || "Session not loaded on WhatsApp Web",
+                message:
+                    error.response?.data?.error?.message ||
+                    (code === "NEEDS_QR"
+                        ? "WhatsApp Web session needs QR linking"
+                        : "Session not found on WhatsApp Web"),
                 data: {
-                    sessionId: (await getBranchWhatsappWebSession(req.branch_id)).sessionId || null,
-                    status: "disconnected",
+                    sessionId,
+                    status: code === "NEEDS_QR" ? "needs_qr" : "disconnected",
                     connected: false,
                     hasValidFiles: null,
                 },
@@ -2827,11 +2831,25 @@ router.post("/whatsappweb/session/create", auth, validateBranch, async (req, res
             return res.status(existing.status).json(existing.data);
         }
 
-        // Reuse existing session id when present so reconnect / QR can resume.
-        const sessionId =
-            existing.sessionId || generateWhatsappWebSessionId();
+        // Best-effort remove old upstream login before creating a new server-generated id
+        if (existing.sessionId) {
+            try {
+                await deleteWhatsappWebSession(existing.sessionId);
+            } catch (_) {
+                // ignore — create still proceeds
+            }
+            await clearBranchWhatsappWebSession(branch_id);
+        }
 
-        const response = await startWhatsappWebSession(sessionId);
+        const response = await startWhatsappWebSession();
+        const sessionId = String(response.data?.data?.session || "").trim();
+        if (!sessionId) {
+            return res.status(500).json({
+                success: false,
+                message: "WhatsApp Web did not return a session id",
+            });
+        }
+
         await setBranchWhatsappWebSession(branch_id, sessionId);
 
         return res.status(response.status).json({
@@ -2890,11 +2908,7 @@ router.post("/whatsappweb/session/reconnect", auth, validateBranch, async (req, 
         const data = response.data?.data || {};
         return res.status(response.status).json({
             ...response.data,
-            data: {
-                ...data,
-                sessionId: resolved.sessionId,
-                connected: data.status === "connected" || data.currentStatus === "connected",
-            },
+            data: normalizeWhatsappWebSessionPayload(data, resolved.sessionId),
         });
     } catch (error) {
         return handleWhatsappWebAxiosError(error, res, "Failed to reconnect WhatsApp Web session");
