@@ -772,34 +772,6 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
             });
         }
 
-        const [existingMobile] = await pool.query(
-            `SELECT p.username FROM profile p
-             JOIN clients c ON p.username = c.username
-             WHERE p.mobile = ? AND c.user_type = 'client' AND c.is_deleted = '0' AND p.username != ?`,
-            [mobile, username]
-        );
-
-        if (existingMobile.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "A Client with this mobile number already exists",
-            });
-        }
-
-        const [existingEmail] = await pool.query(
-            `SELECT p.username FROM profile p
-             JOIN clients c ON p.username = c.username
-             WHERE p.email = ? AND c.user_type = 'client' AND c.is_deleted = '0' AND p.username != ?`,
-            [email, username]
-        );
-
-        if (existingEmail.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "A Client with this email already exists",
-            });
-        }
-
         const [existingPan] = await pool.query(
             `SELECT p.username FROM profile p
              JOIN clients c ON p.username = c.username
