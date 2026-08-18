@@ -252,3 +252,15 @@ WHERE branch_id = 'YOUR_BRANCH_ID';
 | `services/branchSetupService.js` | Seed branch services (no gst cols) |
 
 Client mirror: [`CLIENT/context/gst-change.md`](../../CLIENT/context/gst-change.md)
+
+## Sale GST endpoint
+
+- Sale modal UI may call `GET /sale/gst-config?transaction_date=YYYY-MM-DD`.
+- Response should expose branch GST settings for the selected sale date:
+  - `gst_applicable`
+  - `gst_applicable_after`
+  - `transaction_date`
+  - `effective_for_date`
+  - `tax_rate`
+- `tax_rate` must be `0` when GST is not effective for that date, even if the branch has GST enabled.
+- This endpoint is for **UI display/validation only**. Sale create/edit must still compute totals server-side from `helpers/gst.js`.

@@ -1,5 +1,5 @@
 import express from "express";
-import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
+import { fetchBranchGstSettings, getTaxRateFromEnv, isGstApplicable, resolveGst, toDateOnly } from "../helpers/gst.js";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, UNIQUE_RANDOM_STRING, ID_LENGTH, SET_OPENING_BALANCE, EDIT_OPENING_BALANCE, USER_SNIPPED_DATA, TODAY_DATE, TIMESTAMP, CAPITAL_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
@@ -518,6 +518,33 @@ router.post("/create", auth, validateBranch, async (req, res) => {
     }
 });
 
+router.get("/gst-config", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const transactionDate = toDateOnly(req.query?.transaction_date);
+        const settings = await fetchBranchGstSettings(pool, branch_id);
+        const applicable = isGstApplicable(transactionDate, settings);
+        const taxRate = settings.gst_applicable === "1" ? getTaxRateFromEnv() : 0;
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                gst_applicable: settings.gst_applicable,
+                gst_applicable_after: settings.gst_applicable_after,
+                transaction_date: transactionDate,
+                effective_for_date: applicable,
+                tax_rate: applicable ? taxRate : 0,
+            },
+        });
+    } catch (error) {
+        console.error("Sale GST config error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch sale GST config",
+        });
+    }
+});
+
 /**
  * Edit an existing sale invoice (keeps invoice_no / ids; replaces line items).
  * Body: invoice_id | sale_id | transaction_id + same fields as /create
@@ -526,6 +553,13 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
     try {
         const username = req.headers["username"] || req.headers["Username"] || "";
         const branch_id = req.branch_id;
+        const saleEntriesBranchId = await resolveSaleEntriesBranchId(pool, branch_id);
+        if (saleEntriesBranchId == null) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid branch context for sales",
+            });
+        }
         const {
             invoice_id: bodyInvoiceId,
             sale_id: bodySaleId,
@@ -591,17 +625,20 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
                 ? String(firm_id).trim()
                 : null;
 
-        const lookupParams = [];
-        const lookupClauses = ["CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)"];
-        lookupParams.push(branch_id);
+        const lookupParams = [saleEntriesBranchId];
+        const identifierClauses = [];
         if (invoiceIdIn) {
-            lookupClauses.push("se.invoice_id = ?");
+            identifierClauses.push("se.invoice_id = ?");
             lookupParams.push(invoiceIdIn);
-        } else if (saleIdIn) {
-            lookupClauses.push("se.sale_id = ?");
+        }
+        if (saleIdIn) {
+            identifierClauses.push("se.sale_id = ?");
             lookupParams.push(saleIdIn);
-        } else {
-            lookupClauses.push("invoice.transaction_id = ?");
+        }
+        if (txnIdIn) {
+            identifierClauses.push("invoice.transaction_id = ?");
+            lookupParams.push(txnIdIn);
+            identifierClauses.push("transactions.transaction_id = ?");
             lookupParams.push(txnIdIn);
         }
 
@@ -610,7 +647,12 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
                     invoice.invoice_no, invoice.transaction_id
              FROM sale_entries se
              INNER JOIN invoice ON invoice.invoice_id = se.invoice_id
-             WHERE ${lookupClauses.join(" AND ")}
+             LEFT JOIN transactions
+                    ON transactions.invoice_id = se.invoice_id
+                   AND CAST(transactions.branch_id AS CHAR) = CAST(se.branch_id AS CHAR)
+                   AND transactions.transaction_type = 'sale'
+             WHERE CAST(se.branch_id AS CHAR) = CAST(? AS CHAR)
+               AND (${identifierClauses.join(" OR ")})
              LIMIT 1`,
             lookupParams
         );

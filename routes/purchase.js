@@ -4,6 +4,7 @@ import { auth, validateBranch } from "../middleware/auth.js";
 import { USER_SNIPPED_DATA, BANK_SNIPPED_DATA } from "../helpers/function.js";
 import { executeCreatePurchase, executeEditPurchase } from "../helpers/purchaseCreate.js";
 import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
+import { validateTransactionParty } from "../helpers/transactionParty.js";
 
 const router = express.Router();
 
@@ -44,6 +45,56 @@ async function createPurchase({
         throw err;
     }
 }
+
+router.post("/create", auth, validateBranch, async (req, res) => {
+    try {
+        const {
+            party_id,
+            party_type,
+            transaction_date,
+            remark,
+            task_id,
+            items,
+        } = req.body || {};
+
+        if (!party_id || String(party_id).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_id is required" });
+        }
+        if (!party_type || String(party_type).trim() === "") {
+            return res.status(400).json({ success: false, message: "party_type is required" });
+        }
+
+        let partyTypeVal;
+        let partyIdVal;
+        try {
+            ({ partyTypeVal, partyIdVal } = await validateTransactionParty(
+                pool,
+                req.branch_id,
+                party_type,
+                party_id
+            ));
+        } catch (validationErr) {
+            return res.status(validationErr.statusCode || 400).json({
+                success: false,
+                message: validationErr.message,
+            });
+        }
+
+        return await createPurchase({
+            req,
+            res,
+            party_id: partyIdVal,
+            party_type: partyTypeVal,
+            transaction_date,
+            remark,
+            task_id,
+            items,
+        });
+    } catch (error) {
+        console.error("Create purchase fatal error:", error);
+        return res.status(500).json({ success: false, message: "Failed to create purchase", error: error.message });
+    }
+});
 
 router.post("/create/user", auth, validateBranch, async (req, res) => {
     try {
@@ -150,13 +201,19 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
             partyTypeVal = "bank";
         }
 
-        if (partyTypeVal === "bank" && partyIdVal) {
-            const [[bankRow]] = await pool.query(
-                "SELECT bank_id FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
-                [branch_id, partyIdVal]
-            );
-            if (!bankRow) {
-                return res.status(400).json({ success: false, message: "Invalid bank_id" });
+        if (partyIdVal && partyTypeVal) {
+            try {
+                ({ partyTypeVal, partyIdVal } = await validateTransactionParty(
+                    pool,
+                    branch_id,
+                    partyTypeVal,
+                    partyIdVal
+                ));
+            } catch (validationErr) {
+                return res.status(validationErr.statusCode || 400).json({
+                    success: false,
+                    message: validationErr.message,
+                });
             }
         }
 
