@@ -22,7 +22,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         const party2_id = party_2 != null ? String(party_2).trim() : "";
         const txnDate = transaction_date != null ? String(transaction_date).trim() : "";
         const amountNum = Number(amount);
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
 
         if (!party1_id) {
             return res.status(400).json({ success: false, message: "party_1 is required" });
@@ -182,7 +182,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const listParams = [...params, limit, offset];
 
         const [rows] = await pool.query(
-            `SELECT ce.*, invoice.invoice_id, invoice.invoice_no
+            `SELECT ce.*, invoice.invoice_id, invoice.invoice_no,
+                    DATE_FORMAT(ce.transaction_date, '%Y-%m-%d') AS transaction_date
              ${fromSql}
              WHERE ${whereClause}
              ORDER BY ce.transaction_date DESC, ce.id DESC
@@ -270,7 +271,7 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         const party2_id = party_2 != null ? String(party_2).trim() : "";
         const txnDate = transaction_date != null ? String(transaction_date).trim().slice(0, 10) : "";
         const amountNum = Number(amount);
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
 
         if (!party1_id || !party2_id) {
             return res.status(400).json({ success: false, message: "party_1 and party_2 are required" });

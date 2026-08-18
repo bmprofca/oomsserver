@@ -531,7 +531,7 @@ async function BANK_SNIPPED_DATA(bank_id = "") {
             remark: row[0].remark,
         };
 
-        if (row[0]?.type != 'cash') {
+        if (String(row[0]?.type || "").toLowerCase() !== "cash") {
             object.account_no = row[0].account_no;
             object.ifsc = row[0].ifsc;
             object.branch = row[0].branch;

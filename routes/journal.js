@@ -42,7 +42,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
         const p2_type = String(party2_type).trim();
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
         let journal_id;
         let transaction_id;
         let invoice_id;
@@ -174,7 +174,7 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         const amountNum = Number(amount);
         const amountFixed = Number(amountNum.toFixed(2));
         const txnDate = transaction_date ? String(transaction_date).trim().slice(0, 10) : new Date().toISOString().slice(0, 10);
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
         const p1_id = String(party1_id).trim();
         const p2_id = String(party2_id).trim();
         const p1_type = String(party1_type).trim();
@@ -293,6 +293,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const [rows] = await pool.query(
             `SELECT invoice.invoice_id, invoice.invoice_no, transactions.*,
+                    DATE_FORMAT(transactions.transaction_date, '%Y-%m-%d') AS transaction_date,
                     journal_entries.id AS journal_entry_pk, journal_entries.journal_id
             FROM invoice
             LEFT JOIN transactions ON invoice.transaction_id = transactions.transaction_id

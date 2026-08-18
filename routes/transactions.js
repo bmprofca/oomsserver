@@ -260,6 +260,15 @@ async function getOppositePartySnippet(branch_id, party_type, party_id) {
     return {};
 }
 
+async function resolvePartySnippet(party_type, party_id) {
+    if (!party_type || !party_id) return {};
+    const type = String(party_type).trim();
+    const id = String(party_id).trim();
+    if (type === "bank") return (await BANK_SNIPPED_DATA(id)) || {};
+    if (type === "capital") return (await CAPITAL_SNIPPED_DATA(id)) || {};
+    return (await USER_SNIPPED_DATA(id)) || {};
+}
+
 const SEARCH_PARTY_TYPES = ["client", "ca", "agent", "staff", "bank", "capital", "expense", "admin"];
 
 function normalizeSearchPartyTypes(party_types) {
@@ -787,6 +796,357 @@ router.get("/bank/details", auth, validateBranch, async (req, res) => {
     }
 });
 
+router.get("/details", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const transactionId = String(req.query?.transaction_id || "").trim();
+        if (!transactionId) {
+            return res.status(400).json({ success: false, message: "transaction_id is required" });
+        }
+
+        const [rows] = await pool.query(
+            `SELECT
+                transaction_id, invoice_id, invoice_no, transaction_type, amount, remark,
+                party1_type, party1_id, party2_type, party2_id,
+                DATE_FORMAT(transaction_date, '%Y-%m-%d') AS transaction_date,
+                create_date, modify_date, create_by, modify_by
+             FROM transactions
+             WHERE branch_id = ? AND transaction_id = ?
+             LIMIT 1`,
+            [branch_id, transactionId]
+        );
+        const row = rows?.[0];
+        if (!row) {
+            return res.status(404).json({ success: false, message: "Transaction not found" });
+        }
+
+        const party1Type = row.party1_type || null;
+        const party1Id = row.party1_id || null;
+        const party2Type = row.party2_type || null;
+        const party2Id = row.party2_id || null;
+        const [party1Details, party2Details] = await Promise.all([
+            resolvePartySnippet(party1Type, party1Id),
+            resolvePartySnippet(party2Type, party2Id),
+        ]);
+
+        const data = {
+            transaction_id: row.transaction_id,
+            transaction_type: row.transaction_type,
+            transaction_date: row.transaction_date,
+            amount: Number(row.amount) || 0,
+            remark: row.remark ?? null,
+            invoice_id: row.invoice_id || null,
+            invoice_no: row.invoice_no || null,
+            party1_type: party1Type,
+            party1_id: party1Id,
+            party2_type: party2Type,
+            party2_id: party2Id,
+            payment_from: { type: party1Type, details: party1Details },
+            payment_to: { type: party2Type, details: party2Details },
+        };
+
+        const txType = String(row.transaction_type || "").trim().toLowerCase();
+        const invoiceId = row.invoice_id != null ? String(row.invoice_id).trim() : "";
+
+        if (txType === "sale" && invoiceId) {
+            const [saleRows] = await pool.query(
+                `SELECT se.sale_id, se.party_type, se.party_id, se.firm_id, se.is_task, se.total AS sale_entry_total,
+                        i.subtotal, i.discount_type, i.discount_perc_rate, i.discount_value,
+                        i.additional_charge, i.total, i.round_off, i.grand_total
+                 FROM sale_entries se
+                 INNER JOIN invoice i ON i.invoice_id = se.invoice_id AND i.branch_id = se.branch_id
+                 WHERE CAST(se.branch_id AS CHAR) = CAST(? AS CHAR) AND se.invoice_id = ?
+                 LIMIT 1`,
+                [branch_id, invoiceId]
+            );
+            const sale = saleRows?.[0];
+            if (sale) {
+                const [itemRows] = await pool.query(
+                    `SELECT si.item_id, si.service_id, si.fees, si.total, si.remark,
+                            svc.service_id AS svc_id, svc.name AS svc_name, svc.sac_code AS svc_sac_code, svc.type AS svc_type
+                     FROM sale_items si
+                     LEFT JOIN services svc ON svc.service_id = si.service_id
+                     WHERE si.sale_id = ?
+                     ORDER BY si.id ASC`,
+                    [sale.sale_id]
+                );
+                const lineItems = (itemRows || []).map((ir) => {
+                    const svc =
+                        ir.svc_id != null && String(ir.svc_id).trim() !== ""
+                            ? {
+                                service_id: ir.svc_id,
+                                name: ir.svc_name,
+                                sac_code: ir.svc_sac_code,
+                                type: ir.svc_type,
+                            }
+                            : {};
+                    return {
+                        item_id: ir.item_id,
+                        service_id: ir.service_id,
+                        fees: ir.fees != null ? Number(ir.fees) : null,
+                        tax_perc: null,
+                        tax_value:
+                            ir.total != null && ir.fees != null
+                                ? Number((Number(ir.total) - Number(ir.fees)).toFixed(2))
+                                : null,
+                        total: ir.total != null ? Number(ir.total) : null,
+                        remark: ir.remark,
+                        service: svc,
+                    };
+                });
+
+                const saleType = sale.party_type || party2Type;
+                const salePartyId = sale.party_id || party2Id;
+                let sale_party = {};
+                if (saleType === "bank") sale_party = await BANK_SNIPPED_DATA(salePartyId);
+                else sale_party = await USER_SNIPPED_DATA(salePartyId);
+
+                const firmId = sale.firm_id != null && String(sale.firm_id).trim() !== "" ? String(sale.firm_id).trim() : null;
+                let firm = {};
+                if (saleType === "client" && firmId) {
+                    const [firmRows] = await pool.query(
+                        `SELECT firm_id, username, firm_name, firm_type, gst_no, pan_no
+                         FROM firms
+                         WHERE CAST(branch_id AS CHAR) = CAST(? AS CHAR) AND firm_id = ?
+                           AND (is_deleted = '0' OR is_deleted = 0)
+                         LIMIT 1`,
+                        [branch_id, firmId]
+                    );
+                    firm = firmRows?.[0] || {};
+                }
+
+                const isTask = sale.is_task === "1" || sale.is_task === 1;
+                let task_id = null;
+                if (isTask) {
+                    const [taskRows] = await pool.query(
+                        `SELECT task_id FROM tasks
+                         WHERE CAST(branch_id AS CHAR) = CAST(? AS CHAR) AND invoice_id = ?
+                         LIMIT 1`,
+                        [branch_id, invoiceId]
+                    );
+                    task_id = taskRows?.[0]?.task_id || null;
+                    if (!task_id) {
+                        for (const item of lineItems) {
+                            const itemRemark = item?.remark != null ? String(item.remark).trim() : "";
+                            if (/^task:/i.test(itemRemark)) {
+                                const tid = itemRemark.replace(/^task:/i, "").trim();
+                                if (tid) {
+                                    task_id = tid;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const subtotalNum = Number(sale.subtotal) || 0;
+                const discountNum = Number(sale.discount_value) || 0;
+                const additionalNum = Number(sale.additional_charge) || 0;
+                const totalNum = Number(sale.total) || 0;
+                const taxableSubtotal = Number((subtotalNum - discountNum).toFixed(2));
+                const gstValue = Number((totalNum - taxableSubtotal - additionalNum).toFixed(2));
+                const taxRate = taxableSubtotal > 0 ? Number(((gstValue / taxableSubtotal) * 100).toFixed(2)) : 0;
+
+                Object.assign(data, {
+                    sale_id: sale.sale_id,
+                    sale_type: saleType,
+                    sale_party,
+                    firm_id: firmId,
+                    firm,
+                    is_task: isTask,
+                    task_id,
+                    items: lineItems,
+                    calculation: {
+                        subtotal: sale.subtotal,
+                        discount_type: sale.discount_type,
+                        discount_perc_rate: sale.discount_perc_rate,
+                        discount_value: sale.discount_value,
+                        tax_rate: taxRate,
+                        gst_value: gstValue,
+                        additional_charge: sale.additional_charge,
+                        total: sale.total,
+                        round_off: sale.round_off,
+                        grand_total: sale.grand_total,
+                    },
+                });
+            }
+        }
+
+        if (txType === "purchase" && invoiceId) {
+            const [purchaseRows] = await pool.query(
+                `SELECT pe.purchase_id, pe.party_type, pe.party_id, pe.task_id, pe.amount AS purchase_entry_amount,
+                        i.subtotal, i.discount_type, i.discount_perc_rate, i.discount_value,
+                        i.additional_charge, i.total, i.round_off, i.grand_total
+                 FROM purchase_entries pe
+                 INNER JOIN invoice i ON i.invoice_id = pe.invoice_id AND i.branch_id = pe.branch_id
+                 WHERE CAST(pe.branch_id AS CHAR) = CAST(? AS CHAR) AND pe.invoice_id = ?
+                 LIMIT 1`,
+                [branch_id, invoiceId]
+            );
+            const purchase = purchaseRows?.[0];
+            if (purchase) {
+                const [itemRows] = await pool.query(
+                    `SELECT pi.item_id, pi.service_id, pi.amount, pi.remark,
+                            svc.service_id AS svc_id, svc.name AS svc_name, svc.sac_code AS svc_sac_code, svc.type AS svc_type
+                     FROM purchase_items pi
+                     LEFT JOIN services svc ON svc.service_id = pi.service_id
+                     WHERE pi.purchase_id = ?
+                     ORDER BY pi.item_id ASC`,
+                    [purchase.purchase_id]
+                );
+                const lineItems = (itemRows || []).map((ir) => {
+                    const amountNum = ir.amount != null ? Number(ir.amount) : null;
+                    const svc =
+                        ir.svc_id != null && String(ir.svc_id).trim() !== ""
+                            ? {
+                                service_id: ir.svc_id,
+                                name: ir.svc_name,
+                                sac_code: ir.svc_sac_code,
+                                type: ir.svc_type,
+                            }
+                            : {};
+                    return {
+                        item_id: ir.item_id,
+                        service_id: ir.service_id,
+                        fees: amountNum,
+                        amount: amountNum,
+                        tax_perc: null,
+                        tax_value: 0,
+                        total: amountNum,
+                        remark: ir.remark,
+                        service: svc,
+                    };
+                });
+                const purchaseType = purchase.party_type || party1Type;
+                const purchasePartyId = purchase.party_id || party1Id;
+                let purchase_party = {};
+                if (purchaseType === "bank") purchase_party = await BANK_SNIPPED_DATA(purchasePartyId);
+                else purchase_party = await USER_SNIPPED_DATA(purchasePartyId);
+
+                Object.assign(data, {
+                    purchase_id: purchase.purchase_id,
+                    purchase_type: purchaseType,
+                    purchase_party,
+                    task_id: purchase.task_id || null,
+                    items: lineItems,
+                    calculation: {
+                        subtotal: purchase.subtotal,
+                        discount_type: purchase.discount_type,
+                        discount_perc_rate: purchase.discount_perc_rate,
+                        discount_value: purchase.discount_value,
+                        tax_rate: 0,
+                        gst_value: 0,
+                        additional_charge: purchase.additional_charge,
+                        total: purchase.total,
+                        round_off: purchase.round_off,
+                        grand_total: purchase.grand_total,
+                    },
+                });
+            }
+        }
+
+        if (txType === "expense") {
+            const [expenseRows] = await pool.query(
+                `SELECT expense_id, expense_date, party_type, party_id, amount, remark, invoice_id, invoice_no, transaction_id
+                 FROM expense_entries
+                 WHERE CAST(branch_id AS CHAR) = CAST(? AS CHAR) AND transaction_id = ?
+                 LIMIT 1`,
+                [branch_id, transactionId]
+            );
+            const expense = expenseRows?.[0];
+            if (expense) {
+                const [itemRows] = await pool.query(
+                    `SELECT eei.item_id, eei.amount, eei.remark, ei.name AS item_name, ei.type AS item_type
+                     FROM expense_entries_items eei
+                     LEFT JOIN expense_items ei
+                       ON ei.item_id COLLATE utf8mb4_unicode_ci = eei.item_id COLLATE utf8mb4_unicode_ci
+                      AND ei.branch_id COLLATE utf8mb4_unicode_ci = eei.branch_id COLLATE utf8mb4_unicode_ci
+                     WHERE eei.branch_id = ? AND eei.expense_id = ?`,
+                    [branch_id, expense.expense_id]
+                );
+                const entryItems = (itemRows || []).map((ir) => ({
+                    item_id: ir.item_id,
+                    amount: Number(ir.amount) || 0,
+                    remark: ir.remark ?? null,
+                    item: {
+                        item_id: ir.item_id,
+                        name: ir.item_name ?? null,
+                        type: ir.item_type ?? null,
+                    },
+                }));
+                const expensePartyType = expense.party_type || party1Type;
+                const expensePartyId = expense.party_id || party1Id;
+                Object.assign(data, {
+                    expense_id: expense.expense_id,
+                    expense_date: expense.expense_date,
+                    party_type: expensePartyType,
+                    party_id: expensePartyId,
+                    items: entryItems,
+                    item: entryItems[0]?.item || null,
+                    expense_party: {
+                        type: expensePartyType,
+                        details: await resolvePartySnippet(expensePartyType, expensePartyId),
+                    },
+                });
+            }
+        }
+
+        if (txType === "journal") {
+            const [journalRows] = await pool.query(
+                `SELECT journal_id FROM journal_entries
+                 WHERE branch_id = ? AND transaction_id = ? AND is_deleted = '0'
+                 LIMIT 1`,
+                [branch_id, transactionId]
+            );
+            data.journal_id = journalRows?.[0]?.journal_id || null;
+        }
+
+        if (txType === "contra") {
+            const [contraRows] = await pool.query(
+                `SELECT contra_id FROM contra_entries
+                 WHERE branch_id = ? AND transaction_id = ?
+                 LIMIT 1`,
+                [branch_id, transactionId]
+            );
+            data.contra_id = contraRows?.[0]?.contra_id || null;
+        }
+
+        if (txType === "discount") {
+            const [discountRows] = await pool.query(
+                `SELECT discount_id, discount_date, party_type, party_id, amount
+                 FROM discount_entries
+                 WHERE branch_id = ? AND transaction_id = ?
+                 LIMIT 1`,
+                [branch_id, transactionId]
+            );
+            const discount = discountRows?.[0];
+            if (discount) {
+                const discountPartyType = discount.party_type || party2Type || party1Type;
+                const discountPartyId = discount.party_id || party2Id || party1Id;
+                Object.assign(data, {
+                    discount_id: discount.discount_id,
+                    discount_date: discount.discount_date,
+                    party_type: discountPartyType,
+                    party_id: discountPartyId,
+                    discount_party: {
+                        type: discountPartyType,
+                        details: await resolvePartySnippet(discountPartyType, discountPartyId),
+                    },
+                });
+            }
+        }
+
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("Transaction details error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch transaction details",
+            error: error.message,
+        });
+    }
+});
+
 router.get("/list", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -894,6 +1254,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             const create_by = await USER_SNIPPED_DATA(create_by_username);
             const modify_by = await USER_SNIPPED_DATA(modify_by_username);
+            let saleIsTask = false;
 
             if (row.transaction_type === "sale") {
                 const [saleRows] = await pool.query(
@@ -915,7 +1276,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 // Prefer linked firm (client sale) for ledger Particulars when present
                 try {
                     const [firmLinkRows] = await pool.query(
-                        `SELECT se.firm_id, f.firm_name, f.firm_type, f.gst_no, f.pan_no
+                        `SELECT se.firm_id, se.is_task, f.firm_name, f.firm_type, f.gst_no, f.pan_no
                          FROM sale_entries se
                          LEFT JOIN firms f
                            ON f.firm_id = se.firm_id
@@ -927,6 +1288,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                         [branch_id, row.invoice_id]
                     );
                     const firmLink = firmLinkRows?.[0];
+                    saleIsTask = firmLink?.is_task === "1" || firmLink?.is_task === 1;
                     const firmId =
                         firmLink?.firm_id != null && String(firmLink.firm_id).trim() !== ""
                             ? String(firmLink.firm_id).trim()
@@ -993,6 +1355,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     if (taskRow?.task_id) {
                         particular.task_id = String(taskRow.task_id).trim();
                         particular.task_type = taskRow.task_type ?? null;
+                        saleIsTask = true;
                         const periodLabel = formatCompliancePeriodLabel({
                             task_type: taskRow.task_type,
                             is_recurring: taskRow.is_recurring,
@@ -1008,6 +1371,9 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                     // optional — leave sale particulars without period
                 }
             }
+
+            const saleTaskId = particular.task_id || null;
+            const isTaskSale = row.transaction_type === "sale" && (saleIsTask || Boolean(saleTaskId));
 
             if (row.transaction_type === "purchase") {
                 try {
@@ -1089,6 +1455,8 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 downloadable: Boolean(
                     row.invoice_id && isSupportedGenerateType(row.transaction_type)
                 ),
+                is_task: Boolean(isTaskSale),
+                task_id: saleTaskId,
                 create_by,
                 modify_by,
                 particular

@@ -580,7 +580,7 @@ router.post("/entry/create", auth, validateBranch, async (req, res) => {
         const partyIdVal = String(party_id).trim();
         const txnDate = String(transaction_date).trim();
         const expenseDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
         const amountTotal = Number(
             normalizedItems.reduce((sum, row) => sum + row.amount, 0).toFixed(2)
         );
@@ -802,7 +802,7 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
         const partyIdVal = String(party_id).trim();
         const txnDate = String(transaction_date).trim().slice(0, 10);
         const expenseDate = txnDate;
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
         const amountTotal = Number(
             normalizedItems.reduce((sum, row) => sum + row.amount, 0).toFixed(2)
         );
@@ -1023,10 +1023,13 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const [rows] = await pool.query(
             `SELECT
-                ee.expense_id, ee.expense_date, ee.party_type, ee.party_id, ee.amount,
+                ee.expense_id,
+                DATE_FORMAT(ee.expense_date, '%Y-%m-%d') AS expense_date,
+                ee.party_type, ee.party_id, ee.amount,
                 ee.invoice_id, ee.invoice_no, ee.transaction_id,
                 ee.create_by, ee.modify_by, ee.create_date, ee.modify_date,
-                t.remark, t.transaction_date
+                t.remark,
+                DATE_FORMAT(t.transaction_date, '%Y-%m-%d') AS transaction_date
              FROM expense_entries ee
              ${joinTransactions}
              WHERE ${whereClause}
@@ -1145,7 +1148,7 @@ router.post("/discount/create", auth, validateBranch, async (req, res) => {
         const txnDate = String(transaction_date).trim();
         const discountDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
         const amountNum = Math.abs(Number(amount));
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
 
         let invoice_no = "";
         let transaction_id;
@@ -1366,7 +1369,7 @@ router.put("/discount/edit", auth, validateBranch, async (req, res) => {
         const txnDate = String(transaction_date).trim();
         const discountDate = txnDate.length >= 10 ? txnDate.slice(0, 10) : txnDate;
         const amountNum = Math.abs(Number(amount));
-        const remarkVal = remark != null ? String(remark).trim() : null;
+        const remarkVal = remark == null ? null : (String(remark).trim() || null);
         const transaction_id = existing.transaction_id;
         const invoice_id = existing.invoice_id;
         const expense_id = existing.expense_id;
