@@ -5110,10 +5110,17 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 }
 
                 if (rowErrors.length > 0) {
+                    const record = {};
+                    headers.forEach((h) => {
+                        if (!h) return;
+                        const value = row[h];
+                        record[h] = value === undefined || value === null ? "" : value;
+                    });
                     validationErrors.push({
                         row: rowNum,
                         name: name || 'Unknown',
-                        errors: rowErrors
+                        errors: rowErrors,
+                        record
                     });
                 } else {
                     parsedClients.push({
@@ -5169,11 +5176,11 @@ router.post("/import", auth, validateBranch, (req, res) => {
                 });
             }
 
-            // If not preview and there are errors, fail immediately (atomic rollback pattern)
-            if (validationErrors.length > 0) {
+            // Import valid rows even when some rows have disputes.
+            if (parsedClients.length === 0) {
                 return res.status(400).json({
                     success: false,
-                    message: "Import failed due to validation errors. Please check the preview to fix your sheet.",
+                    message: "No valid rows to import. Download the dispute records, fix them, and re-import.",
                     errors: validationErrors
                 });
             }
@@ -5270,10 +5277,14 @@ router.post("/import", auth, validateBranch, (req, res) => {
 
             return res.status(200).json({
                 success: true,
-                message: `Successfully imported ${createdClients.length} clients!`,
+                message: validationErrors.length > 0
+                    ? `Imported ${createdClients.length} client(s). ${validationErrors.length} row(s) skipped due to issues.`
+                    : `Successfully imported ${createdClients.length} clients!`,
                 data: {
                     imported_count: createdClients.length,
-                    opening_balance_applied: openingBalanceCount
+                    skipped_count: validationErrors.length,
+                    opening_balance_applied: openingBalanceCount,
+                    errors: validationErrors
                 }
             });
 
