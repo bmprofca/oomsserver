@@ -11,7 +11,6 @@ import {
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
 import { isValidFormatForType, INVOICE_GENERATE_TYPES } from "../helpers/invoiceFormatMapping.js";
-import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import {
     sendDocumentSharingWhatsapp,
 } from "../helpers/whatsappNotification.js";
@@ -80,7 +79,7 @@ async function getActiveFormatKeyForInvoiceType(branch_id, invoiceType) {
 
 /** Body `response` for POST /generate: pdf (default) | base64 | link */
 function normGenerateResponseMode(s) {
-    const n = String(s == null || s === "" ? "pdf" : s).trim().toLowerCase();
+    const n = String(s == null || s === "" ? "link" : s).trim().toLowerCase();
     if (n === "pdf" || n === "base64" || n === "link") return n;
     return null;
 }
@@ -238,7 +237,7 @@ const generateHandler = async (req, res) => {
         if (responseMode == null) {
             return res.status(400).json({
                 success: false,
-                message: 'response must be "pdf", "base64", or "link" (omit for pdf)',
+                message: 'response must be "link", "base64", or "pdf" (omit for link — uploads to OneSaaS and returns URL)',
             });
         }
 
@@ -248,13 +247,6 @@ const generateHandler = async (req, res) => {
                 success: false,
                 message: built.error.message,
             });
-        }
-
-        if (responseMode === "pdf") {
-            res.setHeader("Content-Type", "application/pdf");
-            res.setHeader("Content-Disposition", `attachment; filename="${built.filename}"`);
-            res.setHeader("Cache-Control", "no-cache");
-            return res.send(built.buffer);
         }
 
         if (responseMode === "base64") {
@@ -274,7 +266,7 @@ const generateHandler = async (req, res) => {
         const saved = await saveInvoicePdfLink(built);
         return res.status(200).json({
             success: true,
-            message: "Invoice PDF saved",
+            message: "Invoice PDF uploaded successfully",
             data: {
                 invoice_id: built.invoice_id,
                 type: built.type,
@@ -407,16 +399,9 @@ router.post("/share", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const documentName = String(built.filename || `invoice-${invoiceId}.pdf`).replace(
-            /[^\w.\-]+/g,
-            "_"
-        );
-        const uploaded = await uploadBufferToOneSaas({
-            buffer: built.buffer,
-            filename: documentName,
-            mimeType: "application/pdf",
-        });
-        const documentUrl = uploaded.url;
+        const saved = await saveInvoicePdfLink(built);
+        const documentName = saved.filename;
+        const documentUrl = saved.url;
 
         const client = await USER_SNIPPED_DATA(clientUsername);
         const sharedBy = await USER_SNIPPED_DATA(sent_by);

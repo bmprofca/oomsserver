@@ -1,8 +1,6 @@
-import fs from "fs/promises";
-import path from "path";
 import pool from "../db.js";
 import { buildUnifiedInvoicePdfBuffer } from "../helpers/pdfGenerator.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { uploadBufferToOneSaas } from "./onesaasUploadService.js";
 
 const ALLOWED_GENERATE_TYPES = new Set([
     "sale",
@@ -260,15 +258,8 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         lines,
     });
 
-    const typeFolder = path.join(process.cwd(), "media", "format", invoiceType);
-    await fs.mkdir(typeFolder, { recursive: true });
-
     const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
     const saveFilename = `${safeNo}.pdf`;
-    const filePath = path.join(typeFolder, saveFilename);
-    await fs.writeFile(filePath, buffer);
-
-    const localUrl = `${BASE_DOMAIN}/media/format/${invoiceType}/${saveFilename}`;
 
     return {
         buffer,
@@ -276,15 +267,23 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         formatKey: rawFormatKey,
         type: invoiceType,
         invoice_id: invId,
-        url: localUrl,
     };
 }
 
 async function saveInvoicePdfLink(built) {
+    const documentName = String(built.filename || `invoice-${built.invoice_id}.pdf`).replace(
+        /[^\w.\-]+/g,
+        "_"
+    );
+    const uploaded = await uploadBufferToOneSaas({
+        buffer: built.buffer,
+        filename: documentName,
+        mimeType: "application/pdf",
+    });
     return {
-        url: built.url,
-        filename: built.filename,
-        suggested_filename: built.filename,
+        url: uploaded.url,
+        filename: documentName,
+        suggested_filename: documentName,
     };
 }
 

@@ -1,8 +1,6 @@
-import fs from "fs/promises";
-import path from "path";
 import pool from "../db.js";
 import { buildUnifiedInvoicePdfBuffer } from "../helpers/pdfGenerator.js";
-import { BASE_DOMAIN } from "../helpers/Config.js";
+import { uploadBufferToOneSaas } from "./onesaasUploadService.js";
 
 async function getBranchIssuer(branchId) {
     const [rows] = await pool.query(
@@ -91,15 +89,14 @@ export async function generateWalletTransactionInvoice({ branchId, transactionId
         lines,
     });
 
-    const walletFolder = path.join(process.cwd(), "media", "wallet");
-    await fs.mkdir(walletFolder, { recursive: true });
-    const filePath = path.join(walletFolder, filename);
-    await fs.writeFile(filePath, pdfBuffer);
-
-    const localUrl = `${BASE_DOMAIN}/media/wallet/${filename}`;
+    const uploaded = await uploadBufferToOneSaas({
+        buffer: pdfBuffer,
+        filename,
+        mimeType: "application/pdf",
+    });
 
     return {
-        url: localUrl,
+        url: uploaded.url,
         filename,
         transaction_id: tx.transaction_id,
     };
