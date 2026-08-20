@@ -358,9 +358,10 @@ router.post("/share", auth, validateBranch, async (req, res) => {
         }
 
         const [txRows] = await pool.query(
-            `SELECT party1_type, party1_id, party2_type, party2_id, invoice_no
+            `SELECT party1_type, party1_id, party2_type, party2_id, invoice_no, invoice_id, transaction_id
              FROM transactions
-             WHERE transaction_id = ? AND branch_id = ?
+             WHERE invoice_id = ?
+               AND branch_id = ?
              LIMIT 1`,
             [invoiceId, branch_id]
         );
@@ -374,21 +375,25 @@ router.post("/share", auth, validateBranch, async (req, res) => {
 
         const invoiceType = normInvoiceType(bodyType);
         let clientUsername = null;
-        if (invoiceType === "sale" && String(tx.party2_type || "").trim() === "client") {
+        const party2Type = String(tx.party2_type || "").trim().toLowerCase();
+        const party1Type = String(tx.party1_type || "").trim().toLowerCase();
+
+        // Sale invoices store the customer on party2 (party1 is the internal "sale" side).
+        if (invoiceType === "sale" && ["client", "ca"].includes(party2Type)) {
             clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
         } else if (
             invoiceType === "purchase" &&
-            ["client", "ca"].includes(String(tx.party1_type || "").trim().toLowerCase())
+            ["client", "ca"].includes(party1Type)
         ) {
             clientUsername = tx.party1_id != null ? String(tx.party1_id).trim() : null;
         } else if (
             (invoiceType === "receive" || invoiceType === "payment") &&
-            String(tx.party2_type || "").trim() === "client"
+            party2Type === "client"
         ) {
             clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
-        } else if (String(tx.party1_type || "").trim() === "client") {
+        } else if (party1Type === "client" || party1Type === "ca") {
             clientUsername = tx.party1_id != null ? String(tx.party1_id).trim() : null;
-        } else if (String(tx.party2_type || "").trim() === "client") {
+        } else if (party2Type === "client" || party2Type === "ca") {
             clientUsername = tx.party2_id != null ? String(tx.party2_id).trim() : null;
         }
 

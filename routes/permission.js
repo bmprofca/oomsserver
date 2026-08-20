@@ -822,23 +822,39 @@ async function ensurePermissionOptions(pool) {
 async function ensureGlobalDefaultRoles(pool) {
     for (const role of DEFAULT_GLOBAL_ROLES) {
         const [existing] = await poolQuery(
-            "SELECT id FROM permission_role WHERE permission_role_id = ? AND branch_id IS NULL LIMIT 1",
+            "SELECT id, permissions_assigned FROM permission_role WHERE permission_role_id = ? AND branch_id IS NULL LIMIT 1",
             [role.permission_role_id],
             { retries: 3, delayMs: 1000 }
         );
-        if (existing.length) continue;
+        if (!existing.length) {
+            await poolQuery(
+                `INSERT INTO permission_role (
+                    branch_id, permission_role_id, name, permissions_assigned, remark,
+                    create_by, modify_by, create_date, modify_date
+                ) VALUES (NULL, ?, ?, ?, ?, 'system', 'system', NOW(), NOW())`,
+                [
+                    role.permission_role_id,
+                    role.name,
+                    JSON.stringify(role.permissions),
+                    role.remark,
+                ],
+                { retries: 3, delayMs: 1000 }
+            );
+            continue;
+        }
 
+        // Merge any newly added default permissions into existing global roles
+        const current = parsePermissions(existing[0].permissions_assigned);
+        const desired = Array.isArray(role.permissions) ? role.permissions : [];
+        const missing = desired.filter((id) => !current.includes(id));
+        if (!missing.length) continue;
+
+        const merged = [...new Set([...current, ...missing])];
         await poolQuery(
-            `INSERT INTO permission_role (
-                branch_id, permission_role_id, name, permissions_assigned, remark,
-                create_by, modify_by, create_date, modify_date
-            ) VALUES (NULL, ?, ?, ?, ?, 'system', 'system', NOW(), NOW())`,
-            [
-                role.permission_role_id,
-                role.name,
-                JSON.stringify(role.permissions),
-                role.remark,
-            ],
+            `UPDATE permission_role
+             SET permissions_assigned = ?, modify_by = 'system', modify_date = NOW()
+             WHERE permission_role_id = ? AND branch_id IS NULL`,
+            [JSON.stringify(merged), role.permission_role_id],
             { retries: 3, delayMs: 1000 }
         );
     }

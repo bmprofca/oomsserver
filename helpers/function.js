@@ -677,6 +677,164 @@ function FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE(blockers = []) {
     return `This firm cannot be deleted because it is linked to ${parts.join(", ")} and ${last}.`;
 }
 
+/**
+ * Collect activity / dependency blockers that prevent soft-deleting a client.
+ * Empty firms are allowed (they are cascade soft-deleted with the client).
+ */
+async function GET_CLIENT_DELETE_BLOCKERS({ username, branch_id, conn = null }) {
+    const db = conn || pool;
+    const clientUsername = String(username || "").trim();
+    const branchId = String(branch_id || "").trim();
+    if (!clientUsername || !branchId) return [];
+
+    const [firmRows] = await db.query(
+        `SELECT firm_id
+         FROM firms
+         WHERE username = ?
+           AND branch_id = ?
+           AND (is_deleted = '0' OR is_deleted = 0)`,
+        [clientUsername, branchId]
+    );
+    const firmIds = (firmRows || []).map((r) => String(r.firm_id).trim()).filter(Boolean);
+
+    const blockers = [];
+
+    const clientChecks = [
+        {
+            key: "tasks",
+            label: "task(s)",
+            sql: `SELECT COUNT(*) AS c FROM tasks WHERE username = ? AND branch_id = ?`,
+            params: [clientUsername, branchId],
+        },
+        {
+            key: "transactions",
+            label: "transaction(s)",
+            // Auto-created zero opening-balance rows (from client create) do not block delete.
+            sql: `SELECT COUNT(*) AS c FROM transactions
+                  WHERE branch_id = ?
+                    AND (
+                        (party1_type = 'client' AND party1_id = ?)
+                        OR (party2_type = 'client' AND party2_id = ?)
+                    )
+                    AND NOT (
+                        LOWER(TRIM(COALESCE(transaction_type, ''))) = 'opening balance'
+                        AND ABS(COALESCE(amount, 0)) = 0
+                    )`,
+            params: [branchId, clientUsername, clientUsername],
+        },
+        {
+            key: "sales",
+            label: "sale(s)",
+            sql: `SELECT COUNT(*) AS c FROM sale_entries
+                  WHERE branch_id = ?
+                    AND party_type = 'client'
+                    AND party_id = ?`,
+            params: [branchId, clientUsername],
+        },
+        {
+            key: "purchases",
+            label: "purchase(s)",
+            sql: `SELECT COUNT(*) AS c FROM purchase_entries
+                  WHERE branch_id = ?
+                    AND party_type = 'client'
+                    AND party_id = ?`,
+            params: [branchId, clientUsername],
+        },
+        {
+            key: "notes",
+            label: "note(s)",
+            sql: `SELECT COUNT(*) AS c FROM notes
+                  WHERE username = ?
+                    AND branch_id = ?
+                    AND note_type = 'client'
+                    AND (is_deleted = '0' OR is_deleted = 0 OR is_deleted IS NULL)`,
+            params: [clientUsername, branchId],
+        },
+        {
+            key: "documents",
+            label: "document(s)",
+            sql: `SELECT COUNT(*) AS c FROM documents
+                  WHERE branch_id = ?
+                    AND username = ?
+                    AND (is_deleted = '0' OR is_deleted = 0)`,
+            params: [branchId, clientUsername],
+        },
+        {
+            key: "quotations",
+            label: "quotation(s)",
+            sql: `SELECT COUNT(*) AS c FROM quotations
+                  WHERE branch_id = ?
+                    AND username = ?`,
+            params: [branchId, clientUsername],
+        },
+        {
+            key: "service_requests",
+            label: "service request(s)",
+            sql: `SELECT COUNT(*) AS c FROM service_requests
+                  WHERE branch_id = ?
+                    AND username = ?`,
+            params: [branchId, clientUsername],
+        },
+    ];
+
+    for (const check of clientChecks) {
+        try {
+            const [rows] = await db.query(check.sql, check.params);
+            const count = Number(rows?.[0]?.c || 0);
+            if (count > 0) {
+                blockers.push({ key: check.key, label: check.label, count });
+            }
+        } catch (error) {
+            if (error?.code !== "ER_NO_SUCH_TABLE" && error?.code !== "ER_BAD_FIELD_ERROR") {
+                throw error;
+            }
+        }
+    }
+
+    if (firmIds.length > 0) {
+        const firmBlockerTotals = new Map();
+        for (const firmId of firmIds) {
+            const firmBlockers = await GET_FIRM_DELETE_BLOCKERS({
+                firm_id: firmId,
+                branch_id: branchId,
+                conn: db,
+            });
+            for (const item of firmBlockers) {
+                const prev = firmBlockerTotals.get(item.key) || {
+                    key: item.key,
+                    label: item.label,
+                    count: 0,
+                };
+                prev.count += Number(item.count || 0);
+                firmBlockerTotals.set(item.key, prev);
+            }
+        }
+        for (const item of firmBlockerTotals.values()) {
+            if (item.count > 0) {
+                blockers.push({
+                    key: `firm_${item.key}`,
+                    label: `firm ${item.label}`,
+                    count: item.count,
+                });
+            }
+        }
+    }
+
+    return blockers;
+}
+
+function FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE(blockers = []) {
+    if (!Array.isArray(blockers) || blockers.length === 0) {
+        return "This client cannot be deleted because it is linked to other records.";
+    }
+    const parts = blockers.map((b) => `${b.count} ${b.label}`);
+    if (parts.length === 1) {
+        return `This client cannot be deleted because it is linked to ${parts[0]}.`;
+    }
+    const last = parts.pop();
+    return `This client cannot be deleted because it is linked to ${parts.join(", ")} and ${last}.`;
+}
+
 async function SINGLE_FIRM_DATA(firm_id = "") {
     const [row] = await pool.query("SELECT * FROM firms WHERE firm_id = ?", [firm_id]);
     if (row.length > 0) {
@@ -764,6 +922,8 @@ export {
     GET_FIRMS_BY_USERNAME,
     GET_FIRM_DELETE_BLOCKERS,
     FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE,
+    GET_CLIENT_DELETE_BLOCKERS,
+    FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE,
     TIMESTAMP,
     USER_SNIPPED_DATA,
     SINGLE_FIRM_DATA,

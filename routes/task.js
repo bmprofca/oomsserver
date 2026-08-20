@@ -1281,8 +1281,11 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             ca,
             agent,
             due_date,
-            target_date
+            target_date,
+            complete_date
         } = body;
+
+        const username = req.headers["username"] || req.headers["Username"] || "";
 
         const [task_row] = await conn.query("SELECT * FROM tasks WHERE task_id = ? AND branch_id = ?", [task_id, branch_id]);
         if (task_row.length === 0) {
@@ -1318,6 +1321,7 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         let AllowAgentChange = false;
         let AllowDueDateChange = false;
         let AllowTargetDateChange = false;
+        let AllowCompleteDateChange = false;
 
         if (isBillingPending) {
             AllowFirmIdChange = true;
@@ -1329,6 +1333,28 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             AllowTargetDateChange = true;
         } else if (isBillingComplete || isNonBillable) {
             AllowFeesChange = true;
+        }
+
+        const taskStatus = String(task_data.status || "").trim().toLowerCase();
+        if (complete_date !== undefined && taskStatus === "complete") {
+            AllowCompleteDateChange = await checkUserPermission(
+                username,
+                branch_id,
+                "task_complete_date_change"
+            );
+            if (!AllowCompleteDateChange) {
+                conn.release();
+                return res.status(403).json({
+                    success: false,
+                    message: "You do not have permission to change the task complete date",
+                });
+            }
+        } else if (complete_date !== undefined && taskStatus !== "complete") {
+            conn.release();
+            return res.status(400).json({
+                success: false,
+                message: "Complete date can only be changed when the task status is complete",
+            });
         }
 
         await conn.beginTransaction();
@@ -1405,6 +1431,24 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             const prevTarget = normalizeDate(task_data.target_date);
             if (nextTarget && nextTarget !== prevTarget) {
                 await conn.query("UPDATE tasks SET target_date = ? WHERE task_id = ? AND branch_id = ?", [nextTarget, task_id, branch_id]);
+            }
+        }
+        if (complete_date !== undefined && AllowCompleteDateChange) {
+            const nextComplete = normalizeDate(complete_date);
+            const prevComplete = normalizeDate(task_data.complete_date);
+            if (!nextComplete) {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Complete date is required",
+                });
+            }
+            if (nextComplete !== prevComplete) {
+                await conn.query(
+                    "UPDATE tasks SET complete_date = ? WHERE task_id = ? AND branch_id = ?",
+                    [nextComplete, task_id, branch_id]
+                );
             }
         }
 
@@ -3326,6 +3370,11 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             });
         }
 
+        // Cancelled tasks may be reopened / moved to another status (unlike complete).
+        const previouslyCancelledIds = (rows || [])
+            .filter((r) => String(r.status || "").trim().toLowerCase() === "cancel")
+            .map((r) => String(r.task_id));
+
         let targetIds = ids;
         let blockedBySubtasks = [];
 
@@ -3353,7 +3402,7 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
 
         if (statusVal === "complete") {
             await conn.query(
-                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ? WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ?, cancelled_date = NULL, cancelled_by = NULL WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
                 [statusVal, new Date(), username || null, branch_id, ...targetIds]
             );
 
@@ -3392,10 +3441,23 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
                 }
             }
         } else {
-            await conn.query(
-                `UPDATE tasks SET status = ? WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
-                [statusVal, branch_id, ...targetIds]
-            );
+            // Leaving cancel clears cancellation metadata so the task is fully reopened.
+            const reopenIds = targetIds.filter((id) => previouslyCancelledIds.includes(String(id)));
+            if (reopenIds.length > 0) {
+                const reopenPlaceholders = reopenIds.map(() => "?").join(",");
+                await conn.query(
+                    `UPDATE tasks SET status = ?, cancelled_date = NULL, cancelled_by = NULL WHERE branch_id = ? AND task_id IN (${reopenPlaceholders})`,
+                    [statusVal, branch_id, ...reopenIds]
+                );
+            }
+            const otherIds = targetIds.filter((id) => !previouslyCancelledIds.includes(String(id)));
+            if (otherIds.length > 0) {
+                const otherPlaceholders = otherIds.map(() => "?").join(",");
+                await conn.query(
+                    `UPDATE tasks SET status = ? WHERE branch_id = ? AND task_id IN (${otherPlaceholders})`,
+                    [statusVal, branch_id, ...otherIds]
+                );
+            }
         }
 
         // Store new status in history for tasks that actually changed

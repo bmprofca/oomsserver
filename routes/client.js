@@ -8,9 +8,9 @@ import {
     filterSchedulesByRecurringRules
 } from "../helpers/recurringTaskHelper.js";
 import { auth, CheckUserProjectMaping, validateBranch } from "../middleware/auth.js";
-import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA, GET_FIRM_DELETE_BLOCKERS, FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, USER_DATA, SET_OPENING_BALANCE, GET_BALANCE, TODAY_DATE, GET_FIRMS_BY_USERNAME, USER_SNIPPED_DATA, GET_FIRM_DELETE_BLOCKERS, FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE, GET_CLIENT_DELETE_BLOCKERS, FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE, FORMAT_DATE } from "../helpers/function.js";
 import { Decrypt } from "../helpers/Decrypt.js";
-import { BASE_DOMAIN, DOCUMENT_RESERVED_CATEGORIES } from "../helpers/Config.js";
+import { BASE_DOMAIN, DOCUMENT_RESERVED_CATEGORIES, APP_NAME } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
     deleteProfileImage,
@@ -37,6 +37,13 @@ import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentShar
 import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
+import { generateOtp, sendSmsOtp } from "../helpers/smsOtp.js";
+import { normalizeMobileDigits } from "../helpers/clientPhone.js";
+import { SendMail } from "../helpers/Mail.js";
+import { CLIENT_DELETE_OTP_TYPE } from "../helpers/authProfile.js";
+import { fetchPermissionRoleById, parsePermissions } from "../helpers/permissionRole.js";
+
+const CLIENT_DELETE_MOBILE_REGEX = /^\d{10}$/;
 
 const router = express.Router();
 
@@ -5297,6 +5304,870 @@ router.post("/import", auth, validateBranch, (req, res) => {
             });
         }
     });
+});
+
+async function checkClientDeletePermission(username, branchId) {
+    if (!username || !branchId) return false;
+    try {
+        const [mappings] = await pool.query(
+            `SELECT type, permission_role_id, custom_permissions
+             FROM branch_mapping
+             WHERE username = ? AND branch_id = ? AND is_deleted = '0'
+             LIMIT 1`,
+            [username, branchId]
+        );
+        if (!mappings.length) return false;
+        const userMap = mappings[0];
+        if (userMap.type === "admin" || userMap.permission_role_id === "admin") return true;
+
+        const [optCheck] = await pool.query(
+            "SELECT id FROM permission_option WHERE p_option_id = ? AND status = '1' LIMIT 1",
+            ["client_delete"]
+        );
+        if (!optCheck.length) return false;
+
+        if (userMap.custom_permissions) {
+            const customPerms = parsePermissions(userMap.custom_permissions);
+            if (customPerms.includes("client_delete")) return true;
+        }
+        if (userMap.permission_role_id) {
+            const role = await fetchPermissionRoleById(pool, userMap.permission_role_id, branchId);
+            if (role) {
+                const rolePerms = parsePermissions(role.permissions_assigned);
+                if (rolePerms.includes("client_delete")) return true;
+            }
+        }
+        return false;
+    } catch (error) {
+        console.error("checkClientDeletePermission error:", error);
+        return false;
+    }
+}
+
+function clientDeleteOtpRemark(targetUsername) {
+    return `client_delete:${String(targetUsername || "").trim()}`;
+}
+
+function maskEmailAddress(email) {
+    const value = String(email || "").trim();
+    const at = value.indexOf("@");
+    if (at <= 1) return value || null;
+    const name = value.slice(0, at);
+    const domain = value.slice(at);
+    const visible = name.slice(0, Math.min(2, name.length));
+    return `${visible}${"*".repeat(Math.max(name.length - visible.length, 2))}${domain}`;
+}
+
+function maskMobileNumber(mobile) {
+    const digits = normalizeMobileDigits(mobile);
+    if (!digits || digits.length < 4) return null;
+    return `******${digits.slice(-4)}`;
+}
+
+async function assertClientExistsForDelete(conn, { username, branch_id }) {
+    const [rows] = await conn.query(
+        `SELECT username
+         FROM clients
+         WHERE username = ?
+           AND branch_id = ?
+           AND user_type = 'client'
+           AND is_deleted = '0'
+         LIMIT 1`,
+        [username, branch_id]
+    );
+    return rows[0] || null;
+}
+
+/**
+ * POST /client/delete/send-otp
+ * Body: { username, template_id?, config_id? }
+ * Checks delete eligibility, then sends OTP to the requesting staff (email + SMS).
+ */
+router.post("/delete/send-otp", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const targetUsername = String(req.body?.username || "").trim();
+        const { template_id, config_id } = req.body ?? {};
+
+        if (!staffUsername) {
+            return res.status(401).json({ success: false, message: "Authentication required" });
+        }
+        if (!targetUsername) {
+            return res.status(400).json({ success: false, message: "Client username is required" });
+        }
+
+        const allowed = await checkClientDeletePermission(staffUsername, branch_id);
+        if (!allowed) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to delete clients",
+            });
+        }
+
+        conn = await pool.getConnection();
+        const clientRow = await assertClientExistsForDelete(conn, {
+            username: targetUsername,
+            branch_id,
+        });
+        if (!clientRow) {
+            return res.status(404).json({ success: false, message: "Client not found" });
+        }
+
+        const blockers = await GET_CLIENT_DELETE_BLOCKERS({
+            username: targetUsername,
+            branch_id,
+            conn,
+        });
+        if (blockers.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE(blockers),
+                data: { blockers },
+            });
+        }
+
+        // OTP always goes to the deleting staff's own profile (not branch admin).
+        const [staffProfileRows] = await conn.query(
+            `SELECT email, name, mobile, country_code FROM profile WHERE username = ? LIMIT 1`,
+            [staffUsername]
+        );
+        const staffEmail = String(staffProfileRows[0]?.email || "").trim();
+        const staffMobile = normalizeMobileDigits(staffProfileRows[0]?.mobile);
+        const staffCountryCode = String(staffProfileRows[0]?.country_code || "").trim() || null;
+
+        if (!staffEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail)) {
+            return res.status(400).json({
+                success: false,
+                message: "A valid email on your profile is required to receive the delete OTP.",
+            });
+        }
+        if (!staffMobile || !CLIENT_DELETE_MOBILE_REGEX.test(staffMobile)) {
+            return res.status(400).json({
+                success: false,
+                message: "A registered mobile number on your profile is required to receive the delete OTP.",
+            });
+        }
+
+        await conn.beginTransaction();
+
+        await conn.execute(
+            `UPDATE otps
+             SET status = ?
+             WHERE username = ?
+               AND type = ?
+               AND status = ?`,
+            ["1", staffUsername, CLIENT_DELETE_OTP_TYPE, "0"]
+        );
+
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
+        const otp = generateOtp(6);
+        const remark = clientDeleteOtpRemark(targetUsername);
+
+        await conn.execute(
+            `INSERT INTO otps
+             (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
+             VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
+            [
+                otp_id,
+                CLIENT_DELETE_OTP_TYPE,
+                otp,
+                staffUsername,
+                staffCountryCode,
+                staffMobile,
+                "0",
+                remark,
+            ]
+        );
+
+        const [otpMeta] = await conn.query(
+            "SELECT expire_date FROM otps WHERE otp_id = ? ORDER BY id DESC LIMIT 1",
+            [otp_id]
+        );
+
+        await conn.commit();
+
+        try {
+            await SendMail({
+                to: staffEmail,
+                subject: `${APP_NAME || "OOMS"} — confirm client delete`,
+                html: `<p>Your OTP to delete client <strong>${targetUsername}</strong> is <strong>${otp}</strong>.</p><p>This code expires in 5 minutes.</p>`,
+            });
+        } catch (mailErr) {
+            console.error("CLIENT DELETE OTP EMAIL ERROR:", mailErr?.message || mailErr);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to send OTP to your registered email. Please try again.",
+            });
+        }
+
+        try {
+            await sendSmsOtp(staffMobile, otp, { template_id, config_id });
+        } catch (smsErr) {
+            console.error("CLIENT DELETE OTP SMS ERROR:", smsErr?.response?.data || smsErr?.message || smsErr);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to send OTP to your registered mobile number. Please try again.",
+            });
+        }
+
+        const emailMasked = maskEmailAddress(staffEmail);
+        const mobileMasked = maskMobileNumber(staffMobile);
+
+        return res.status(200).json({
+            success: true,
+            message: "OTP sent to your registered email and mobile number.",
+            channel: "email_sms",
+            destination_masked: `${emailMasked} / ${mobileMasked}`,
+            email_masked: emailMasked,
+            mobile_masked: mobileMasked,
+            expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,
+            data: { username: targetUsername },
+        });
+    } catch (error) {
+        if (conn) {
+            try {
+                await conn.rollback();
+            } catch (_) {}
+        }
+        console.error("Client delete send-otp error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to send delete OTP",
+            error: error.message,
+        });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+/**
+ * DELETE /client/delete
+ * Body: { username, otp }
+ * Re-checks eligibility, verifies OTP, soft-deletes client (+ empty firms).
+ */
+router.delete("/delete", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const targetUsername = String(req.body?.username || "").trim();
+        const otp = String(req.body?.otp || "").trim();
+
+        if (!staffUsername) {
+            return res.status(401).json({ success: false, message: "Authentication required" });
+        }
+        if (!targetUsername) {
+            return res.status(400).json({ success: false, message: "Client username is required" });
+        }
+        if (!/^\d{6}$/.test(otp)) {
+            return res.status(400).json({ success: false, message: "A valid 6-digit OTP is required" });
+        }
+
+        const allowed = await checkClientDeletePermission(staffUsername, branch_id);
+        if (!allowed) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to delete clients",
+            });
+        }
+
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        const clientRow = await assertClientExistsForDelete(conn, {
+            username: targetUsername,
+            branch_id,
+        });
+        if (!clientRow) {
+            await conn.rollback();
+            return res.status(404).json({ success: false, message: "Client not found" });
+        }
+
+        const blockers = await GET_CLIENT_DELETE_BLOCKERS({
+            username: targetUsername,
+            branch_id,
+            conn,
+        });
+        if (blockers.length > 0) {
+            await conn.rollback();
+            return res.status(409).json({
+                success: false,
+                message: FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE(blockers),
+                data: { blockers },
+            });
+        }
+
+        const remark = clientDeleteOtpRemark(targetUsername);
+        const [otpRows] = await conn.query(
+            `SELECT id
+             FROM otps
+             WHERE type = ?
+               AND otp = ?
+               AND status = ?
+               AND username = ?
+               AND remark = ?
+               AND expire_date >= CURRENT_TIMESTAMP
+             ORDER BY id DESC
+             LIMIT 1`,
+            [CLIENT_DELETE_OTP_TYPE, otp, "0", staffUsername, remark]
+        );
+        if (!otpRows.length) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "Invalid or expired OTP. Please try again.",
+            });
+        }
+
+        await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
+        await conn.execute(
+            `UPDATE otps
+             SET status = ?
+             WHERE username = ?
+               AND type = ?
+               AND status = ?`,
+            ["1", staffUsername, CLIENT_DELETE_OTP_TYPE, "0"]
+        );
+
+        await conn.query(
+            `UPDATE firms
+             SET is_deleted = '1',
+                 deleted_by = ?,
+                 modify_by = ?,
+                 modify_date = NOW()
+             WHERE username = ?
+               AND branch_id = ?
+               AND is_deleted = '0'`,
+            [staffUsername, staffUsername, targetUsername, branch_id]
+        );
+
+        const [clientResult] = await conn.query(
+            `UPDATE clients
+             SET is_deleted = '1',
+                 deleted_by = ?,
+                 modify_by = ?,
+                 modify_date = NOW()
+             WHERE username = ?
+               AND branch_id = ?
+               AND user_type = 'client'
+               AND is_deleted = '0'`,
+            [staffUsername, staffUsername, targetUsername, branch_id]
+        );
+
+        if (!clientResult?.affectedRows) {
+            await conn.rollback();
+            return res.status(404).json({ success: false, message: "Client not found or already deleted" });
+        }
+
+        await conn.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: "Client deleted successfully",
+            data: { username: targetUsername },
+        });
+    } catch (error) {
+        if (conn) {
+            try {
+                await conn.rollback();
+            } catch (_) {}
+        }
+        console.error("Client delete error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete client",
+            error: error.message,
+        });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+const CLIENT_RESTORE_PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
+
+/**
+ * Same required-field rules as client create (profile, address, firms + PAN uniqueness).
+ */
+async function validateClientForRestore(conn, { username, branch_id }) {
+    const errors = [];
+    const clientUsername = String(username || "").trim();
+    const branchId = String(branch_id || "").trim();
+
+    const [clientRows] = await conn.query(
+        `SELECT username, deleted_by, modify_date
+         FROM clients
+         WHERE username = ?
+           AND branch_id = ?
+           AND user_type = 'client'
+           AND is_deleted = '1'
+         LIMIT 1`,
+        [clientUsername, branchId]
+    );
+    if (!clientRows.length) {
+        return {
+            ok: false,
+            message: "Deleted client not found",
+            errors: ["Deleted client not found"],
+            client: null,
+            profile: null,
+            firms: [],
+        };
+    }
+
+    const [profileRows] = await conn.query(
+        `SELECT *
+         FROM profile
+         WHERE username = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [clientUsername]
+    );
+    const profile = profileRows[0] || null;
+    if (!profile) {
+        return {
+            ok: false,
+            message: "Client profile is missing. Update the profile before restoring.",
+            errors: ["Missing profile"],
+            client: clientRows[0],
+            profile: null,
+            firms: [],
+        };
+    }
+
+    const pan = String(profile.pan_number || "").trim().toUpperCase();
+    const fullName = String(profile.name || "").trim();
+    const careOf = String(profile.care_of || "").trim();
+    const guardianName = String(profile.guardian_name || "").trim();
+    const mobile = String(profile.mobile || "").trim();
+    const email = String(profile.email || "").trim();
+    const dob = profile.date_of_birth;
+    const gender = String(profile.gender || "").trim();
+    const state = String(profile.state || "").trim();
+    const district = String(profile.district || "").trim();
+    const town = String(profile.village_town || profile.city || "").trim();
+    const pincode = String(profile.pincode || "").trim();
+
+    if (!pan || !fullName || !careOf || !guardianName || !mobile || !email || !dob || !gender) {
+        errors.push("Missing required profile details (PAN, name, care of, guardian, mobile, email, date of birth, gender)");
+    }
+    if (!state || !district || !town || !pincode) {
+        errors.push("Missing required address details (state, district, town/village, pincode)");
+    }
+    if (pan && !CLIENT_RESTORE_PAN_REGEX.test(pan)) {
+        errors.push("Invalid PAN number format");
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        errors.push("Invalid email address");
+    }
+    if (mobile && !/^\d{10}$/.test(normalizeMobileDigits(mobile))) {
+        errors.push("Invalid mobile number (10 digits required)");
+    }
+
+    if (pan && CLIENT_RESTORE_PAN_REGEX.test(pan)) {
+        const [existingPan] = await conn.query(
+            `SELECT p.username
+             FROM profile p
+             JOIN clients c ON p.username = c.username
+             WHERE p.pan_number = ?
+               AND c.user_type = 'client'
+               AND c.is_deleted = '0'
+               AND c.branch_id = ?
+               AND p.username != ?
+             LIMIT 1`,
+            [pan, branchId, clientUsername]
+        );
+        if (existingPan.length > 0) {
+            errors.push("A client with this PAN number already exists in this branch");
+        }
+    }
+
+    const deletedBy = String(clientRows[0].deleted_by || "").trim();
+    let firmSql = `
+        SELECT firm_id, firm_name, firm_type, pan_no, gst_no, tan_no, vat_no, cin_no, file_no,
+               state, district, city, pincode, address_line_1, address_line_2, deleted_by
+        FROM firms
+        WHERE username = ?
+          AND branch_id = ?
+          AND is_deleted = '1'`;
+    const firmParams = [clientUsername, branchId];
+    if (deletedBy) {
+        firmSql += ` AND deleted_by = ?`;
+        firmParams.push(deletedBy);
+    }
+    const [firmRows] = await conn.query(firmSql, firmParams);
+
+    if (!firmRows.length) {
+        errors.push("Missing required business details (at least one firm is required to restore)");
+    }
+
+    for (const firm of firmRows) {
+        const firmType = String(firm.firm_type || "").trim();
+        const firmPan = String(firm.pan_no || "").trim().toUpperCase();
+        if (!firmType || !firmPan) {
+            errors.push(`Firm ${firm.firm_id || ""}: missing type or PAN`);
+            continue;
+        }
+        if (firmPan && !CLIENT_RESTORE_PAN_REGEX.test(firmPan)) {
+            errors.push(`Firm ${firm.firm_name || firm.firm_id}: invalid PAN format`);
+        }
+        const isIndividual = firmType.toLowerCase() === "individual";
+        if (!isIndividual) {
+            const firmName = String(firm.firm_name || "").trim();
+            const fState = String(firm.state || "").trim();
+            const fDistrict = String(firm.district || "").trim();
+            const fTown = String(firm.city || "").trim();
+            const fPin = String(firm.pincode || "").trim();
+            if (!firmName || !fState || !fDistrict || !fTown || !fPin) {
+                errors.push(
+                    `Firm ${firmName || firm.firm_id}: missing firm name or address (state, district, town, pincode)`
+                );
+            }
+        }
+    }
+
+    if (errors.length) {
+        return {
+            ok: false,
+            message: errors[0],
+            errors,
+            client: clientRows[0],
+            profile,
+            firms: firmRows,
+        };
+    }
+
+    return {
+        ok: true,
+        message: "OK",
+        errors: [],
+        client: clientRows[0],
+        profile,
+        firms: firmRows,
+    };
+}
+
+/**
+ * GET /client/deleted/list
+ * Lists soft-deleted clients for the current branch.
+ */
+router.get("/deleted/list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const { search, page = 1, limit = 20 } = req.query;
+
+        if (!staffUsername) {
+            return res.status(401).json({ success: false, message: "Authentication required" });
+        }
+
+        const allowed = await checkClientDeletePermission(staffUsername, branch_id);
+        if (!allowed) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to view deleted clients",
+            });
+        }
+
+        const pageNum = Math.max(1, Number(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+        const offset = (pageNum - 1) * limitNum;
+        const searchTerm = search != null ? String(search).trim() : "";
+
+        const whereParts = [
+            "c.user_type = 'client'",
+            "c.is_deleted = '1'",
+            "c.branch_id = ?",
+        ];
+        const queryParams = [branch_id];
+
+        if (searchTerm) {
+            const searchPattern = `%${searchTerm}%`;
+            whereParts.push(`(
+                c.username LIKE ?
+                OR p.name LIKE ?
+                OR p.mobile LIKE ?
+                OR p.email LIKE ?
+                OR p.pan_number LIKE ?
+            )`);
+            queryParams.push(
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern,
+                searchPattern
+            );
+        }
+
+        const whereSql = whereParts.join(" AND ");
+
+        const countSql = `
+            SELECT COUNT(*) AS total
+            FROM clients c
+            LEFT JOIN profile p
+                ON p.username = c.username
+               AND p.id = (
+                    SELECT MAX(p2.id)
+                    FROM profile p2
+                    WHERE p2.username = c.username
+               )
+            WHERE ${whereSql}
+        `;
+        const [countResult] = await pool.query(countSql, queryParams);
+        const total = Number(countResult[0]?.total) || 0;
+
+        const listSql = `
+            SELECT
+                c.id,
+                c.username,
+                c.branch_id,
+                c.create_date,
+                c.modify_date,
+                c.deleted_by,
+                c.status,
+                p.profile_id,
+                p.name,
+                p.care_of,
+                p.guardian_name,
+                p.date_of_birth,
+                p.gender,
+                p.mobile,
+                p.country_code,
+                p.email,
+                p.pan_number,
+                p.state,
+                p.district,
+                p.city,
+                p.village_town,
+                p.address_line_1,
+                p.address_line_2,
+                p.pincode,
+                p.image
+            FROM clients c
+            LEFT JOIN profile p
+                ON p.username = c.username
+               AND p.id = (
+                    SELECT MAX(p2.id)
+                    FROM profile p2
+                    WHERE p2.username = c.username
+               )
+            WHERE ${whereSql}
+            ORDER BY c.modify_date DESC, c.id DESC
+            LIMIT ? OFFSET ?
+        `;
+        const [rows] = await pool.query(listSql, [...queryParams, limitNum, offset]);
+
+        const usernames = rows
+            .map((row) => String(row.username || "").trim())
+            .filter(Boolean);
+
+        const firmsByUsername = new Map();
+        if (usernames.length) {
+            const firmPlaceholders = usernames.map(() => "?").join(",");
+            const [firmRows] = await pool.query(
+                `SELECT
+                    firm_id,
+                    firm_name,
+                    firm_type,
+                    username,
+                    pan_no,
+                    gst_no,
+                    file_no,
+                    is_deleted,
+                    deleted_by
+                 FROM firms
+                 WHERE branch_id = ?
+                   AND username IN (${firmPlaceholders})
+                 ORDER BY id DESC`,
+                [branch_id, ...usernames]
+            );
+            for (const firm of firmRows) {
+                const key = String(firm.username || "").trim();
+                if (!key) continue;
+                if (!firmsByUsername.has(key)) firmsByUsername.set(key, []);
+                firmsByUsername.get(key).push({
+                    firm_id: firm.firm_id,
+                    firm_name: firm.firm_name,
+                    firm_type: firm.firm_type,
+                    pan_no: firm.pan_no,
+                    gst_no: firm.gst_no,
+                    file_no: firm.file_no,
+                    is_deleted: String(firm.is_deleted) === "1" || firm.is_deleted === 1,
+                });
+            }
+        }
+
+        const data = rows.map((row) => {
+            const username = String(row.username || "").trim();
+            return {
+                ...row,
+                image:
+                    row.image && String(row.image).trim() !== ""
+                        ? resolveProfileImageUrl(row.image)
+                        : null,
+                deleted_date: FORMAT_DATE(row.modify_date) ?? null,
+                firms: firmsByUsername.get(username) || [],
+            };
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Deleted clients retrieved successfully",
+            data,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                total_pages: Math.max(1, Math.ceil(total / limitNum)),
+                is_last_page: offset + rows.length >= total,
+            },
+        });
+    } catch (error) {
+        console.error("Deleted clients list error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch deleted clients",
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * POST /client/restore
+ * Body: { username }
+ * Validates like client create, then clears is_deleted on client (+ cascade soft-deleted firms).
+ */
+router.post("/restore", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const targetUsername = String(req.body?.username || "").trim();
+
+        if (!staffUsername) {
+            return res.status(401).json({ success: false, message: "Authentication required" });
+        }
+        if (!targetUsername) {
+            return res.status(400).json({ success: false, message: "Client username is required" });
+        }
+
+        const allowed = await checkClientDeletePermission(staffUsername, branch_id);
+        if (!allowed) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to restore clients",
+            });
+        }
+
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        const validation = await validateClientForRestore(conn, {
+            username: targetUsername,
+            branch_id,
+        });
+        if (!validation.ok) {
+            await conn.rollback();
+            return res.status(409).json({
+                success: false,
+                message: validation.message,
+                errors: validation.errors,
+            });
+        }
+
+        const deletedBy = String(validation.client?.deleted_by || "").trim();
+
+        if (deletedBy) {
+            await conn.query(
+                `UPDATE firms
+                 SET is_deleted = '0',
+                     deleted_by = NULL,
+                     modify_by = ?,
+                     modify_date = NOW()
+                 WHERE username = ?
+                   AND branch_id = ?
+                   AND is_deleted = '1'
+                   AND deleted_by = ?`,
+                [staffUsername, targetUsername, branch_id, deletedBy]
+            );
+        } else {
+            await conn.query(
+                `UPDATE firms
+                 SET is_deleted = '0',
+                     deleted_by = NULL,
+                     modify_by = ?,
+                     modify_date = NOW()
+                 WHERE username = ?
+                   AND branch_id = ?
+                   AND is_deleted = '1'`,
+                [staffUsername, targetUsername, branch_id]
+            );
+        }
+
+        const [clientResult] = await conn.query(
+            `UPDATE clients
+             SET is_deleted = '0',
+                 deleted_by = NULL,
+                 modify_by = ?,
+                 modify_date = NOW()
+             WHERE username = ?
+               AND branch_id = ?
+               AND user_type = 'client'
+               AND is_deleted = '1'`,
+            [staffUsername, targetUsername, branch_id]
+        );
+
+        if (!clientResult?.affectedRows) {
+            await conn.rollback();
+            return res.status(404).json({
+                success: false,
+                message: "Deleted client not found or already restored",
+            });
+        }
+
+        const [verifyRows] = await conn.query(
+            `SELECT is_deleted
+             FROM clients
+             WHERE username = ?
+               AND branch_id = ?
+               AND user_type = 'client'
+             LIMIT 1`,
+            [targetUsername, branch_id]
+        );
+        if (String(verifyRows?.[0]?.is_deleted) !== "0") {
+            await conn.rollback();
+            return res.status(500).json({
+                success: false,
+                message: "Failed to clear client delete flag. Please try again.",
+            });
+        }
+
+        await conn.commit();
+
+        return res.status(200).json({
+            success: true,
+            message: "Client restored successfully",
+            data: {
+                username: targetUsername,
+                is_deleted: "0",
+            },
+        });
+    } catch (error) {
+        if (conn) {
+            try {
+                await conn.rollback();
+            } catch (_) {}
+        }
+        console.error("Client restore error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to restore client",
+            error: error.message,
+        });
+    } finally {
+        if (conn) conn.release();
+    }
 });
 
 export default router;
