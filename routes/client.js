@@ -34,10 +34,9 @@ import {
     sendEmail,
 } from "./payment_reminder.js";
 import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentSharingWhatsapp } from "../helpers/whatsappNotification.js";
-import { sendSingleSmsNotification } from "../services/smsQueueService.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
-import { generateOtp, sendSmsOtp } from "../helpers/smsOtp.js";
+import { generateOtp } from "../helpers/otp.js";
 import { normalizeMobileDigits } from "../helpers/clientPhone.js";
 import { SendMail } from "../helpers/Mail.js";
 import { CLIENT_DELETE_OTP_TYPE } from "../helpers/authProfile.js";
@@ -53,14 +52,6 @@ const BIRTHDAY_EMAIL_TEMPLATE_TYPES = [
     "birthday reminder",
     "birthday_wish",
     "birthday wish",
-];
-
-const BIRTHDAY_SMS_TEMPLATE_NAMES = [
-    "birthday",
-    "birthday reminder",
-    "birthday wish",
-    "birthday_reminder",
-    "birthday_wish",
 ];
 
 function isBirthdayToday(dateOfBirth) {
@@ -143,27 +134,6 @@ async function prepareBirthdayReminderVariables(branch_id, username, user) {
         "{{username}}": String(username),
         username: String(username),
     };
-}
-
-async function sendBirthdaySmsWithFallback({ branch_id, mobile, variables }) {
-    let lastError = null;
-    for (const templateName of BIRTHDAY_SMS_TEMPLATE_NAMES) {
-        try {
-            return await sendSingleSmsNotification({
-                branch_id,
-                mobile,
-                templateName,
-                variables,
-            });
-        } catch (error) {
-            lastError = error;
-            const message = String(error?.message || "").toLowerCase();
-            if (!message.includes("sms template is not configured")) {
-                throw error;
-            }
-        }
-    }
-    throw lastError || new Error("SMS template is not configured for birthday");
 }
 
 // Note file configuration (NOTE_FILE_DIR, NOTE_VOICE_DIR imported from helpers/NoteFile.js)
@@ -448,17 +418,7 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
                                 message_id: sendResult.messageId || null,
                             };
                         } else if (channel === "sms") {
-                            if (!client.mobile) throw new Error("Client does not have a mobile number");
-                            const sendResult = await sendSingleSmsNotification({
-                                branch_id,
-                                mobile: client.mobile,
-                                templateName: "payment reminder",
-                                variables,
-                            });
-                            channelResults.sms = {
-                                status: "sent",
-                                message_id: sendResult.request_id || null,
-                            };
+                            throw new Error("SMS sending is not available");
                         } else if (channel === "whatsapp") {
                             await sendPaymentReminderWhatsapp({
                                 branch_id,
@@ -670,16 +630,7 @@ router.post("/birthday-reminder", auth, validateBranch, async (req, res) => {
                                 message_id: sendResult.messageId || null,
                             };
                         } else if (channel === "sms") {
-                            if (!client.mobile) throw new Error("Client does not have a mobile number");
-                            const sendResult = await sendBirthdaySmsWithFallback({
-                                branch_id,
-                                mobile: client.mobile,
-                                variables,
-                            });
-                            channelResults.sms = {
-                                status: "sent",
-                                message_id: sendResult.request_id || null,
-                            };
+                            throw new Error("SMS sending is not available");
                         } else if (channel === "whatsapp") {
                             await sendBirthdayWishWhatsapp({
                                 branch_id,
@@ -5502,24 +5453,14 @@ router.post("/delete/send-otp", auth, validateBranch, async (req, res) => {
             });
         }
 
-        try {
-            await sendSmsOtp(staffMobile, otp, { template_id, config_id });
-        } catch (smsErr) {
-            console.error("CLIENT DELETE OTP SMS ERROR:", smsErr?.response?.data || smsErr?.message || smsErr);
-            return res.status(500).json({
-                success: false,
-                message: "Failed to send OTP to your registered mobile number. Please try again.",
-            });
-        }
-
         const emailMasked = maskEmailAddress(staffEmail);
         const mobileMasked = maskMobileNumber(staffMobile);
 
         return res.status(200).json({
             success: true,
-            message: "OTP sent to your registered email and mobile number.",
-            channel: "email_sms",
-            destination_masked: `${emailMasked} / ${mobileMasked}`,
+            message: "OTP sent to your registered email.",
+            channel: "email",
+            destination_masked: emailMasked,
             email_masked: emailMasked,
             mobile_masked: mobileMasked,
             expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,

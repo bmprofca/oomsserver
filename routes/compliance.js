@@ -23,6 +23,7 @@ import {
 } from "../helpers/recurringTaskHelper.js";
 import { notifyTaskCompletedEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
+import { parseDueDateOffset } from "../helpers/complianceDueDate.js";
 
 const router = express.Router();
 
@@ -256,17 +257,6 @@ async function applyComplianceTaskStatus(conn, {
     }
 
     return { changed: previousStatus !== statusVal };
-}
-
-function parseDueDate(value) {
-    if (value === undefined || value === null || value === "") {
-        return null;
-    }
-    const dueDate = Number(value);
-    if (!Number.isInteger(dueDate) || dueDate < 1 || dueDate > 31) {
-        return null;
-    }
-    return dueDate;
 }
 
 function parseVisibilityOffset(value) {
@@ -979,14 +969,6 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
         }
         // tax_rate ignored — computed from branch GST settings
 
-        const dueDateVal = parseDueDate(due_date);
-        if (dueDateVal === null) {
-            return res.status(400).json({
-                success: false,
-                message: "due_date is required and must be an integer between 1 and 31",
-            });
-        }
-
         const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
         if (visibilityOffsetVal === null) {
             return res.status(400).json({
@@ -1017,6 +999,17 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 message: "service_id must belong to a compliance service",
             });
         }
+
+        const parsedDue = parseDueDateOffset(due_date, serviceRows[0].frequency, {
+            required: true,
+        });
+        if (parsedDue.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedDue.error,
+            });
+        }
+        const dueDateVal = parsedDue.value;
 
         const parsedEffectiveFrom = parseComplianceEffectiveFrom(
             effective_from,
@@ -1172,14 +1165,6 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "fees is required" });
         }
 
-        const dueDateVal = parseDueDate(due_date);
-        if (dueDateVal === null) {
-            return res.status(400).json({
-                success: false,
-                message: "due_date is required and must be an integer between 1 and 31",
-            });
-        }
-
         const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
         if (visibilityOffsetVal === null) {
             return res.status(400).json({
@@ -1210,6 +1195,17 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
                 message: "service_id must belong to a compliance service",
             });
         }
+
+        const parsedDue = parseDueDateOffset(due_date, serviceRows[0].frequency, {
+            required: true,
+        });
+        if (parsedDue.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedDue.error,
+            });
+        }
+        const dueDateVal = parsedDue.value;
 
         const parsedEffectiveFrom = parseComplianceEffectiveFrom(
             effective_from,
@@ -2179,14 +2175,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
         }
         // tax_rate ignored — computed from branch GST settings
 
-        const dueDateVal = parseDueDate(due_date);
-        if (dueDateVal === null) {
-            return res.status(400).json({
-                success: false,
-                message: "due_date is required and must be an integer between 1 and 31",
-            });
-        }
-
         const visibilityOffsetVal = parseVisibilityOffset(visibility_offset);
         if (visibilityOffsetVal === null) {
             return res.status(400).json({
@@ -2227,6 +2215,17 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                 message: serviceResult.error.message,
             });
         }
+
+        const parsedDue = parseDueDateOffset(due_date, serviceResult.service.frequency, {
+            required: true,
+        });
+        if (parsedDue.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedDue.error,
+            });
+        }
+        const dueDateVal = parsedDue.value;
 
         const parsedEffectiveFrom = parseComplianceEffectiveFrom(
             effective_from,

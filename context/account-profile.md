@@ -104,7 +104,7 @@ OTP rows live in existing `otps` table (5-minute expiry pattern, same as auth lo
 | `helpers/authProfile.js` | `CONTACT_CHANGE_OTP_TYPE` |
 | `helpers/b2Storage.js` | `downloadAndUploadProfileImage` |
 | `helpers/mediaUrl.js` | `buildProfileImageUrl` |
-| `helpers/smsOtp.js` | `generateOtp`, `sendSmsOtp` |
+| `helpers/otp.js` | `generateOtp` |
 | `routes/utils.js` | `GET /care-of-types` |
 | `middleware/auth.js` | `auth` only |
 

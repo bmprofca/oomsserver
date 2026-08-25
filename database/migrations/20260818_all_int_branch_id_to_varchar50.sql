@@ -21,18 +21,3 @@ ALTER TABLE `email_templates`
 
 ALTER TABLE `purchase_entries`
   MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;
-
-ALTER TABLE `sms_broadcasts`
-  MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;
-
-ALTER TABLE `sms_broadcast_recipients`
-  MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;
-
-ALTER TABLE `sms_configs`
-  MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;
-
-ALTER TABLE `sms_send_attempts`
-  MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;
-
-ALTER TABLE `sms_templates`
-  MODIFY COLUMN `branch_id` VARCHAR(50) NULL DEFAULT NULL;

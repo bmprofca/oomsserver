@@ -136,58 +136,25 @@ export function getPeriodStartDate(period, fy) {
     return new Date(startYear, 3, 1, 0, 0, 0);
 }
 
-// Helper to determine the due date of a period in a financial year
+/**
+ * Due date from period end + signed day offset.
+ * +N = N days after period ends; 0 = period end; -N = N days before (within period).
+ * Existing monthly 1–31 values stay compatible (period_end + N ≈ day N of next month).
+ */
 export function getPeriodDueDate(period, fy, dueDay) {
-    if (dueDay == null) {
-        return getPeriodEndDate(period, fy);
+    const periodEnd = getPeriodEndDate(period, fy);
+    if (dueDay == null || dueDay === '') {
+        return periodEnd;
     }
-    const day = parseInt(dueDay);
-    if (isNaN(day) || day < 1 || day > 31) {
-        return getPeriodEndDate(period, fy);
-    }
-
-    const normalizedFy = normalizeFinancialYear(fy);
-    const parts = String(normalizedFy).split('-');
-    let startYear = parseInt(parts[0]);
-    let endYear = parts[1] ? parseInt(parts[1]) : startYear + 1;
-    if (startYear < 100) startYear += 2000;
-    if (endYear < 100) endYear += 2000;
-
-    const p = String(period).trim().toLowerCase();
-
-    function makeSafeDate(year, month, dayVal) {
-        const maxDays = new Date(year, month + 1, 0).getDate();
-        const safeDay = Math.min(dayVal, maxDays);
-        return new Date(year, month, safeDay, 23, 59, 59);
+    const offset = parseInt(dueDay, 10);
+    if (isNaN(offset)) {
+        return periodEnd;
     }
 
-    if (p === 'april') return makeSafeDate(startYear, 4, day);
-    if (p === 'may') return makeSafeDate(startYear, 5, day);
-    if (p === 'june') return makeSafeDate(startYear, 6, day);
-    if (p === 'july') return makeSafeDate(startYear, 7, day);
-    if (p === 'august') return makeSafeDate(startYear, 8, day);
-    if (p === 'september') return makeSafeDate(startYear, 9, day);
-    if (p === 'october') return makeSafeDate(startYear, 10, day);
-    if (p === 'november') return makeSafeDate(startYear, 11, day);
-    if (p === 'december') return makeSafeDate(endYear, 0, day);
-    if (p === 'january') return makeSafeDate(endYear, 1, day);
-    if (p === 'february') return makeSafeDate(endYear, 2, day);
-    if (p === 'march') return makeSafeDate(endYear, 3, day);
-
-    // Quarters
-    if (p.startsWith('q1')) return makeSafeDate(startYear, 6, day);
-    if (p.startsWith('q2')) return makeSafeDate(startYear, 9, day);
-    if (p.startsWith('q3')) return makeSafeDate(endYear, 0, day);
-    if (p.startsWith('q4')) return makeSafeDate(endYear, 3, day);
-
-    // Half-yearly
-    if (p.startsWith('h1')) return makeSafeDate(startYear, 9, day);
-    if (p.startsWith('h2')) return makeSafeDate(endYear, 3, day);
-
-    // Yearly
-    if (p === 'annual') return makeSafeDate(endYear, 3, day);
-
-    return getPeriodEndDate(period, fy);
+    const due = new Date(periodEnd.getTime());
+    due.setDate(due.getDate() + offset);
+    due.setHours(23, 59, 59, 0);
+    return due;
 }
 
 export function getServiceDueDayForPeriod(service, period) {

@@ -2,6 +2,12 @@ import express from "express";
 import { poolQuery } from "../db.js";
 import { readFileSync } from "fs";
 import { auth, validateBranch } from "../middleware/auth.js";
+import {
+    SMS_CHANNEL_DISABLED,
+    SMS_CHANNEL_FAST2SMS,
+    normalizeSmsChannel,
+    smsChannelLabel,
+} from "../helpers/smsChannel.js";
 
 const router = express.Router();
 const statesAndDistricts = JSON.parse(
@@ -140,36 +146,47 @@ function whatsappChannelLabel(channel) {
     return WHATSAPP_CHANNEL_LABELS[key] || key || "";
 }
 
-async function checkSmsAvailability(branch_id, notificationType) {
+async function checkSmsAvailability(branch_id) {
     try {
-        const [[activeConfig]] = await poolQuery(
-            `SELECT config_id
-             FROM sms_configs
-             WHERE branch_id = ? AND status = 'active'
-             ORDER BY is_default DESC, id DESC
+        const [[branchRow]] = await poolQuery(
+            `SELECT sms_channel
+             FROM branch_list
+             WHERE branch_id = ?
+               AND is_deleted = '0'
              LIMIT 1`,
             [branch_id]
         );
-        if (!activeConfig?.config_id) {
-            return channelResult(false, "SMS config is not active");
+        if (!branchRow) {
+            return channelResult(false, "Branch not found");
         }
 
-        const typeCandidates = notificationTypeCandidates(notificationType);
-        const [[activeTemplate]] = await poolQuery(
-            `SELECT template_id
-             FROM sms_templates
-             WHERE branch_id = ?
-               AND status = 'active'
-               AND LOWER(TRIM(template_name)) IN (${typeCandidates.map(() => "?").join(", ")})
-             ORDER BY id DESC
-             LIMIT 1`,
-            [branch_id, ...typeCandidates]
-        );
-        if (!activeTemplate?.template_id) {
-            return channelResult(false, `SMS template is not configured for type '${notificationType}'`);
+        const channel = normalizeSmsChannel(branchRow.sms_channel);
+        if (channel === SMS_CHANNEL_DISABLED) {
+            return channelResult(false, "SMS channel is disabled");
         }
 
-        return channelResult(true);
+        if (channel === SMS_CHANNEL_FAST2SMS) {
+            const [[config]] = await poolQuery(
+                `SELECT config_id
+                 FROM sms_fast2sms_configs
+                 WHERE branch_id = ?
+                   AND status = 'active'
+                   AND auth_token_encrypted IS NOT NULL
+                   AND TRIM(auth_token_encrypted) <> ''
+                 LIMIT 1`,
+                [branch_id]
+            );
+            if (!config?.config_id) {
+                return channelResult(false, "Fast2SMS is not configured");
+            }
+            return channelResult(true, "", {
+                channel,
+                channel_label: smsChannelLabel(channel),
+                detail: smsChannelLabel(channel),
+            });
+        }
+
+        return channelResult(false, "Invalid SMS channel configuration");
     } catch (error) {
         console.error("SMS availability check error:", error);
         return channelResult(false, "Unable to validate SMS availability");

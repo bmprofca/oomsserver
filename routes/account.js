@@ -4,7 +4,8 @@ import { auth } from "../middleware/auth.js";
 import { downloadAndUploadProfileImage } from "../helpers/b2Storage.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { FORMAT_DATE, UNIQUE_RANDOM_STRING } from "../helpers/function.js";
-import { generateOtp, sendSmsOtp } from "../helpers/smsOtp.js";
+import { generateOtp } from "../helpers/otp.js";
+import { sendSmsOtp } from "../helpers/smsOtp.js";
 import { SendMail } from "../helpers/Mail.js";
 import { APP_NAME } from "../helpers/Config.js";
 import {
@@ -292,7 +293,11 @@ router.post("/profile/contact/send-otp", auth, async (req, res) => {
                     html: `<p>Your OTP to change your mobile number is <strong>${otp}</strong>.</p><p>This code expires in 5 minutes.</p>`,
                 });
             } else {
-                await sendSmsOtp(currentMobile, otp);
+                await sendSmsOtp({
+                    country_code: countryCode,
+                    mobile: currentMobile,
+                    otp,
+                });
             }
         } catch (deliveryError) {
             console.error("CONTACT CHANGE OTP SEND ERROR:", deliveryError?.message || deliveryError);

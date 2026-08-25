@@ -4,7 +4,8 @@ import pool from "../db.js";
 import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
-import { generateOtp, sendSmsOtp } from "../helpers/smsOtp.js";
+import { generateOtp } from "../helpers/otp.js";
+import { sendSmsOtp } from "../helpers/smsOtp.js";
 import {
     findSoftwareUserByEmail,
     findSoftwareUserByMobile,
@@ -253,12 +254,18 @@ router.post("/login/send-otp", async (req, res) => {
         await conn.commit();
 
         try {
-            await sendSmsOtp(otpMobile, otp, { template_id, config_id });
-        } catch (smsErr) {
-            console.error("LOGIN SMS OTP SEND ERROR:", smsErr?.response?.data || smsErr.message);
-            return res.status(500).json({
+            await sendSmsOtp({
+                country_code: otpCountryCode,
+                mobile: otpMobile,
+                otp,
+            });
+        } catch (sendError) {
+            console.error("LOGIN OTP SMS ERROR:", sendError?.message || sendError);
+            return res.status(502).json({
                 success: false,
-                message: "Failed to send OTP to your registered mobile number. Please try again.",
+                message:
+                    sendError?.message ||
+                    "Failed to send OTP SMS. Please try again in a moment.",
             });
         }
 
@@ -516,12 +523,18 @@ router.post("/register/send-otp", async (req, res) => {
         await conn.commit();
 
         try {
-            await sendSmsOtp(contact.mobile, otp, { template_id, config_id });
-        } catch (deliveryErr) {
-            console.error("REGISTER OTP SEND ERROR:", deliveryErr?.response?.data || deliveryErr?.message || deliveryErr);
-            return res.status(500).json({
+            await sendSmsOtp({
+                country_code: normalizeCountryCode("+91"),
+                mobile: contact.mobile,
+                otp,
+            });
+        } catch (sendError) {
+            console.error("REGISTER OTP SMS ERROR:", sendError?.message || sendError);
+            return res.status(502).json({
                 success: false,
-                message: "Failed to send OTP to your mobile number. Please try again.",
+                message:
+                    sendError?.message ||
+                    "Failed to send OTP SMS. Please try again in a moment.",
             });
         }
 

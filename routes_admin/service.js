@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { authAdmin } from "../middleware/authAdmin.js";
+import { parseDueDateOffset } from "../helpers/complianceDueDate.js";
 
 const router = express.Router();
 
@@ -180,7 +181,14 @@ router.post("/create", authAdmin, async (req, res) => {
         const amount = default_amount != null ? Number(default_amount) : 0;
         const rem = remark != null ? String(remark).trim() : null;
         const dueDayRaw = default_due_date ?? due_day;
-        const dueDayVal = dueDayRaw != null ? Number(dueDayRaw) : 10;
+        const parsedDue = parseDueDateOffset(dueDayRaw, freq, { defaultValue: 10 });
+        if (parsedDue.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedDue.error,
+            });
+        }
+        const dueDayVal = parsedDue.value;
 
         await pool.query(
             `INSERT INTO services (service_id, name, sac_code, type, frequency, default_amount, remark, default_due_date)

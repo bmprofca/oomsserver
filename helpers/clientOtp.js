@@ -1,5 +1,6 @@
-import { generateOtp, sendSmsOtp } from "./smsOtp.js";
+import { generateOtp } from "./otp.js";
 import { normalizeCountryCode, normalizeMobileDigits } from "./clientPhone.js";
+import { sendSmsOtp } from "./smsOtp.js";
 
 export async function generateClientOtp() {
     return generateOtp(6);
@@ -13,6 +14,9 @@ export async function sendClientOtp({ country_code, mobile, otp }) {
         throw new Error("Mobile number is required to send OTP.");
     }
 
-    await sendSmsOtp(normalizedMobile, String(otp));
-    return { success: true, country_code: normalizedCountryCode, mobile: normalizedMobile };
+    return sendSmsOtp({
+        country_code: normalizedCountryCode,
+        mobile: normalizedMobile,
+        otp,
+    });
 }

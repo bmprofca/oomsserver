@@ -6,21 +6,11 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { RANDOM_STRING, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { createTaskFromServiceRequest } from "../helpers/taskCreateHelper.js";
+import { parseDueDateOffset } from "../helpers/complianceDueDate.js";
 
 function parseServiceId(value) {
     const service_id = value != null ? String(value).trim() : "";
     return service_id || null;
-}
-
-function parseDueDate(value) {
-    if (value === undefined || value === null || value === "") {
-        return 10;
-    }
-    const dueDate = Number(value);
-    if (!Number.isInteger(dueDate) || dueDate < 1 || dueDate > 31) {
-        return null;
-    }
-    return dueDate;
 }
 
 function parseFeesOnly(fees, defaultFees = 0) {
@@ -231,7 +221,7 @@ router.post("/add", auth, validateBranch, async (req, res) => {
         }
 
         const [serviceCheck] = await pool.query(
-            `SELECT service_id, name, type, default_amount
+            `SELECT service_id, name, type, default_amount, frequency
              FROM services
              WHERE service_id = ?
              LIMIT 1`,
@@ -274,13 +264,16 @@ router.post("/add", auth, validateBranch, async (req, res) => {
         let dueDateVal = 10;
 
         if (isCompliance) {
-            dueDateVal = parseDueDate(due_date);
-            if (dueDateVal === null) {
+            const parsedDue = parseDueDateOffset(due_date, service.frequency, {
+                defaultValue: 10,
+            });
+            if (parsedDue.error) {
                 return res.status(400).json({
                     success: false,
-                    message: "due_date must be an integer between 1 and 31",
+                    message: parsedDue.error,
                 });
             }
+            dueDateVal = parsedDue.value;
         } else {
             remarkVal = remark != null && remark !== "" ? String(remark).trim() : null;
         }
@@ -361,7 +354,7 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         }
 
         const [existing] = await pool.query(
-            `SELECT bs.id, s.name, s.type, s.default_amount
+            `SELECT bs.id, s.name, s.type, s.default_amount, s.frequency
              FROM branch_services bs
              INNER JOIN services s ON bs.service_id = s.service_id
              WHERE bs.service_id = ? AND bs.branch_id = ? AND bs.is_deleted = '0'
@@ -391,13 +384,16 @@ router.put("/edit", auth, validateBranch, async (req, res) => {
         let dueDateVal = 10;
 
         if (isCompliance) {
-            dueDateVal = parseDueDate(due_date);
-            if (dueDateVal === null) {
+            const parsedDue = parseDueDateOffset(due_date, service.frequency, {
+                required: true,
+            });
+            if (parsedDue.error) {
                 return res.status(400).json({
                     success: false,
-                    message: "due_date must be an integer between 1 and 31",
+                    message: parsedDue.error,
                 });
             }
+            dueDateVal = parsedDue.value;
 
             await pool.query(
                 `UPDATE branch_services

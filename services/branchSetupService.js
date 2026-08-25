@@ -1,5 +1,6 @@
 import pool from '../db.js';
 import { TODAY_DATE } from '../helpers/function.js';
+import { clampDueDateOffset } from '../helpers/complianceDueDate.js';
 
 const DEFAULT_INVOICE_PREFIXES = [
     { type: 'opening balance', prefix: 'OB/' },
@@ -68,7 +69,7 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
     const runner = connection || pool;
 
     const [services] = await runner.query(
-        `SELECT service_id, name, type, default_amount, default_due_date
+        `SELECT service_id, name, type, frequency, default_amount, default_due_date
          FROM services
          WHERE type = 'general'
          ORDER BY id ASC
@@ -110,10 +111,11 @@ export async function setupDefaultBranchService(branchId, createdBy, connection 
     );
 
     const fees = Number(service.default_amount || 0);
-    const dueDateRaw = Number(service.default_due_date);
-    const dueDate = Number.isInteger(dueDateRaw) && dueDateRaw >= 1 && dueDateRaw <= 31
-        ? dueDateRaw
-        : 10;
+    const dueDate = clampDueDateOffset(
+        service.default_due_date,
+        service.frequency,
+        10
+    );
     const remark = 'Default service added during branch setup';
     const now = TODAY_DATE();
 
