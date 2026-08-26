@@ -8,6 +8,7 @@
  * - Or import and call startWorker() from server.js
  */
 
+import "../utils/timezone.js";
 import EmailBroadcastQueue from '../helpers/EmailBroadcastQueue.js';
 import pool from '../db.js';
 

@@ -1,14 +1,22 @@
 import express from "express";
-import cron from 'node-cron';
+import cron from "node-cron";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE } from "../helpers/function.js";
+import {
+    getActivePaymentTemplate,
+    getActiveSmtpConfig,
+    preparePaymentReminderVariables,
+    renderTemplate,
+    sendEmail,
+} from "./payment_reminder.js";
+import { sendPaymentReminderWhatsapp } from "../helpers/whatsappNotification.js";
 
 const router = express.Router();
 
-const VARIABLE_REGEX = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
+const ALLOWED_CHANNELS = new Set(["email", "sms", "whatsapp"]);
+const VALID_SCHEDULE_TYPES = ["daily", "weekly", "monthly"];
 let schedulerInitialized = false;
 
 function ok(res, message, data = {}, pagination) {
@@ -28,468 +36,14 @@ function newId(prefix) {
 }
 
 function parseJSON(value, fallback) {
-    if (!value) return fallback;
-    try { return JSON.parse(value); } catch { return fallback; }
-}
-
-function isValidEmail(email) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
-}
-
-function getEncKey() {
-    const base = process.env.SMTP_ENCRYPTION_KEY || "ooms-default-smtp-encryption-key-change-me";
-    return crypto.createHash("sha256").update(base).digest();
-}
-
-function encrypt(text) {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv("aes-256-gcm", getEncKey(), iv);
-    const encrypted = Buffer.concat([cipher.update(String(text || ""), "utf8"), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return Buffer.concat([iv, tag, encrypted]).toString("base64");
-}
-
-function decrypt(payload) {
-    if (!payload) return "";
-    const buf = Buffer.from(String(payload), "base64");
-    const iv = buf.subarray(0, 12);
-    const tag = buf.subarray(12, 28);
-    const enc = buf.subarray(28);
-    const decipher = crypto.createDecipheriv("aes-256-gcm", getEncKey(), iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8");
-}
-
-function renderTemplate(text, variables) {
-    return String(text || "").replace(VARIABLE_REGEX, (_, key) => String(variables?.[key] ?? ""));
-}
-
-// ==================== HELPER FUNCTIONS ====================
-
-async function getUserByUsername(branch_id, username) {
-    const [rows] = await pool.query(
-        `SELECT username, name, email, mobile, status FROM profile WHERE username = ? AND status = 1`,
-        [username]
-    );
-    
-    if (!rows.length) {
-        throw new Error(`User not found with username: ${username}`);
-    }
-    return rows[0];
-}
-
-async function getUserBalance(branch_id, username) {
+    if (value == null || value === "") return fallback;
+    if (typeof value === "object") return value;
     try {
-        const balanceData = await GET_BALANCE({
-            branch_id: branch_id,
-            party_id: username,
-            party_type: "client"
-        });
-        return balanceData;
-    } catch (error) {
-        console.error("Error getting balance:", error);
-        return { balance: 0, debit: 0, credit: 0 };
+        return JSON.parse(value);
+    } catch {
+        return fallback;
     }
 }
-
-async function getActivePaymentTemplate(branch_id) {
-    const [rows] = await pool.query(
-        `SELECT template_id, template_type, template_name, subject, html_body, text_body, is_default
-         FROM email_static_templates 
-         WHERE branch_id = ? AND template_type = 'payment_reminder' AND status = 'active'
-         ORDER BY is_default DESC, create_date DESC
-         LIMIT 1`,
-        [branch_id]
-    );
-    
-    if (!rows.length) {
-        throw new Error(`No active payment reminder template found`);
-    }
-    
-    return rows[0];
-}
-
-async function getActiveSmtpConfig(branch_id, config_id = null) {
-    let query = `SELECT * FROM email_configs WHERE branch_id = ? AND status = 'active'`;
-    let params = [branch_id];
-    
-    if (config_id) {
-        query += ` AND config_id = ?`;
-        params.push(config_id);
-    } else {
-        query += ` ORDER BY is_default DESC LIMIT 1`;
-    }
-    
-    const [rows] = await pool.query(query, params);
-    
-    if (!rows.length) {
-        throw new Error("No active SMTP config found");
-    }
-    
-    const config = rows[0];
-    config.password = decrypt(config.password_encrypted);
-    return config;
-}
-
-async function sendEmail(smtpConfig, to, subject, html, text = null) {
-    const transporter = nodemailer.createTransport({
-        host: smtpConfig.host,
-        port: Number(smtpConfig.port),
-        secure: Number(smtpConfig.secure) === 1 || Number(smtpConfig.port) === 465,
-        auth: {
-            user: smtpConfig.username,
-            pass: smtpConfig.password
-        }
-    });
-    
-    const from = smtpConfig.from_name 
-        ? `${smtpConfig.from_name} <${smtpConfig.from_email}>`
-        : smtpConfig.from_email;
-    
-    const mailOptions = { from, to, subject, html, ...(text && { text }) };
-    return await transporter.sendMail(mailOptions);
-}
-
-async function preparePaymentReminderVariables(branch_id, username, user, balanceData) {
-    const [firm] = await pool.query(
-        `SELECT firm_name FROM firms WHERE username = ? AND branch_id = ? AND status = '1' LIMIT 1`,
-        [username, branch_id]
-    );
-    
-    const hasDebitBalance = balanceData.debit > 0;
-    const formattedBalance = `₹${Math.abs(balanceData.balance).toLocaleString('en-IN')}`;
-    
-    return {
-        name: user.name || username,
-        username: user.username,
-        email: user.email,
-        mobile: user.mobile,
-        balance: formattedBalance,
-        balance_amount: Math.abs(balanceData.balance),
-        debit_amount: `₹${balanceData.debit.toLocaleString('en-IN')}`,
-        credit_amount: `₹${balanceData.credit.toLocaleString('en-IN')}`,
-        has_debit: hasDebitBalance,
-        firm_name: firm.length ? firm[0].firm_name : 'Your Firm',
-        current_date: new Date().toLocaleDateString('en-GB'),
-        current_year: new Date().getFullYear(),
-        payment_link: `${process.env.APP_URL || 'https://yourdomain.com'}/payment/${username}`,
-        support_email: process.env.SUPPORT_EMAIL || 'support@yourdomain.com',
-        support_phone: process.env.SUPPORT_PHONE || '+91-XXXXXXXXXX'
-    };
-}
-
-// ==================== SCHEDULER FUNCTIONS ====================
-
-/**
- * Check if group should run at the current time based on schedule config
- */
-function shouldRunNow(schedule_type, scheduleConfig) {
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
-    const currentDayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-    const currentDayOfMonth = now.getDate();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
-    
-    // Check time first
-    const scheduledTime = scheduleConfig.time;
-    if (scheduledTime) {
-        const [hour, minute] = scheduledTime.split(':').map(Number);
-        if (currentHour !== hour || currentMinute !== minute) {
-            return false;
-        }
-    }
-    
-    switch (schedule_type) {
-        case 'daily':
-            // Check specific days of week (if provided)
-            if (scheduleConfig.days && Array.isArray(scheduleConfig.days) && scheduleConfig.days.length > 0) {
-                // Convert day numbers (Monday=1 to Sunday=0 or 7)
-                const normalizedDays = scheduleConfig.days.map(d => {
-                    if (d === 0 || d === 7) return 0; // Sunday
-                    return d;
-                });
-                return normalizedDays.includes(currentDayOfWeek);
-            }
-            return true; // Every day
-            
-        case 'weekly':
-            // Check specific day of week
-            const scheduledDay = scheduleConfig.day_of_week;
-            if (scheduledDay !== undefined) {
-                const normalizedScheduledDay = scheduledDay === 7 ? 0 : scheduledDay;
-                return currentDayOfWeek === normalizedScheduledDay;
-            }
-            return false;
-            
-        case 'monthly':
-            // Check specific date or pattern
-            if (scheduleConfig.day_of_month && scheduleConfig.day_of_month > 0) {
-                return currentDayOfMonth === scheduleConfig.day_of_month;
-            }
-            if (scheduleConfig.week_of_month && scheduleConfig.day_of_week) {
-                // e.g., "first Monday", "second Tuesday", "last Friday"
-                return isMatchingWeekdayOfMonth(currentYear, currentMonth, currentDayOfMonth, scheduleConfig);
-            }
-            if (scheduleConfig.last_day_of_month) {
-                const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
-                return currentDayOfMonth === lastDay;
-            }
-            return false;
-            
-        default:
-            return false;
-    }
-}
-
-/**
- * Check if current day matches a specific weekday pattern in month (e.g., "first Monday")
- */
-function isMatchingWeekdayOfMonth(year, month, day, scheduleConfig) {
-    const date = new Date(year, month, day);
-    const currentDayOfWeek = date.getDay();
-    const weekOfMonth = Math.ceil(day / 7);
-    const isLastWeek = day > new Date(year, month + 1, 0).getDate() - 7;
-    
-    const scheduledDayOfWeek = scheduleConfig.day_of_week;
-    const scheduledWeekOfMonth = scheduleConfig.week_of_month;
-    
-    if (scheduledDayOfWeek !== currentDayOfWeek) return false;
-    
-    if (scheduledWeekOfMonth === 'last') {
-        return isLastWeek;
-    }
-    return weekOfMonth === scheduledWeekOfMonth;
-}
-
-/**
- * Process all groups that are scheduled to run at current time
- */
-async function processScheduledGroups() {
-    try {
-        // Get all active groups
-        const [groups] = await pool.query(
-            `SELECT group_id, branch_id, schedule_type, schedule_config 
-             FROM autopay_groups 
-             WHERE is_active = 1`
-        );
-        
-        for (const group of groups) {
-            const scheduleConfig = parseJSON(group.schedule_config, {});
-            
-            // Check if this group should run now
-            if (shouldRunNow(group.schedule_type, scheduleConfig)) {
-                // Process in background without waiting
-                processAutopayGroup(group.group_id, group.branch_id).catch(err => {
-                    console.error(`[Scheduler] Error processing group ${group.group_id}:`, err);
-                });
-            }
-        }
-    } catch (error) {
-        console.error("[Scheduler] Error:", error);
-    }
-}
-
-// ==================== AUTO PAY GROUP CRUD ====================
-
-/**
- * Create a new autopay group
- * POST /api/autopay/group/create
- * Body: { 
- *   group_name, description, schedule_type, schedule_config, is_active 
- * }
- * 
- * schedule_config examples:
- * Daily: { time: "09:00", days: [1,2,3,4,5] } // Monday-Friday at 9 AM
- * Daily: { time: "10:30" } // Every day at 10:30 AM
- * Weekly: { day_of_week: 1, time: "14:00" } // Every Monday at 2 PM
- * Monthly: { day_of_month: 15, time: "11:00" } // 15th of every month at 11 AM
- * Monthly: { week_of_month: 1, day_of_week: 1, time: "09:00" } // First Monday of month
- * Monthly: { last_day_of_month: true, time: "17:00" } // Last day of month at 5 PM
- */
-router.post("/group/create", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const username = userFromReq(req);
-        const { group_name, description, schedule_type, schedule_config, is_active = 1 } = req.body || {};
-
-        if (!group_name || !schedule_type || !schedule_config) {
-            return fail(res, "group_name, schedule_type and schedule_config are required");
-        }
-
-        const validScheduleTypes = ['daily', 'weekly', 'monthly'];
-        if (!validScheduleTypes.includes(schedule_type)) {
-            return fail(res, "schedule_type must be daily, weekly, or monthly");
-        }
-
-        // Validate schedule_config based on type
-        if (schedule_type === 'daily') {
-            if (!schedule_config.time) {
-                return fail(res, "daily schedule requires time field");
-            }
-        } else if (schedule_type === 'weekly') {
-            if (!schedule_config.day_of_week || !schedule_config.time) {
-                return fail(res, "weekly schedule requires day_of_week and time fields");
-            }
-        } else if (schedule_type === 'monthly') {
-            if (!schedule_config.time) {
-                return fail(res, "monthly schedule requires time field");
-            }
-            if (!schedule_config.day_of_month && !schedule_config.week_of_month && !schedule_config.last_day_of_month) {
-                return fail(res, "monthly schedule requires day_of_month, week_of_month, or last_day_of_month");
-            }
-        }
-
-        const group_id = newId("apg");
-        
-        await pool.query(
-            `INSERT INTO autopay_groups 
-             (group_id, branch_id, group_name, description, schedule_type, schedule_config, is_active, create_by, create_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-            [group_id, branch_id, group_name, description, schedule_type, JSON.stringify(schedule_config), is_active, username]
-        );
-
-        return ok(res, "Autopay group created successfully", { group_id });
-    } catch (error) {
-        console.error("Create group error:", error);
-        return fail(res, error.message);
-    }
-});
-
-/**
- * Update autopay group
- * PUT /api/autopay/group/update
- */
-router.put("/group/update", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const username = userFromReq(req);
-        const { group_id, group_name, description, schedule_type, schedule_config, is_active } = req.body || {};
-
-        if (!group_id) {
-            return fail(res, "group_id is required");
-        }
-
-        const updates = [];
-        const values = [];
-
-        if (group_name) {
-            updates.push("group_name = ?");
-            values.push(group_name);
-        }
-        if (description !== undefined) {
-            updates.push("description = ?");
-            values.push(description);
-        }
-        if (schedule_type) {
-            updates.push("schedule_type = ?");
-            values.push(schedule_type);
-        }
-        if (schedule_config) {
-            updates.push("schedule_config = ?");
-            values.push(JSON.stringify(schedule_config));
-        }
-        if (is_active !== undefined) {
-            updates.push("is_active = ?");
-            values.push(is_active);
-        }
-
-        updates.push("modify_by = ?, modify_date = NOW()");
-        values.push(username);
-        values.push(group_id, branch_id);
-
-        const [result] = await pool.query(
-            `UPDATE autopay_groups SET ${updates.join(", ")} WHERE group_id = ? AND branch_id = ?`,
-            values
-        );
-
-        if (!result.affectedRows) {
-            return fail(res, "Group not found", 404);
-        }
-
-        return ok(res, "Autopay group updated successfully");
-    } catch (error) {
-        console.error("Update group error:", error);
-        return fail(res, error.message);
-    }
-});
-
-/**
- * Get all autopay groups with formatted schedule display
- * GET /api/autopay/group/list
- */
-router.get("/group/list", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const page_no = Math.max(1, Number(req.query.page_no || 1));
-        const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
-        const offset = (page_no - 1) * limit;
-
-        const [groups] = await pool.query(
-            `SELECT g.*, 
-                    COUNT(DISTINCT gm.member_id) as member_count
-             FROM autopay_groups g
-             LEFT JOIN autopay_group_members gm ON gm.group_id = g.group_id AND gm.status = 'active'
-             WHERE g.branch_id = ?
-             GROUP BY g.group_id
-             ORDER BY g.create_date DESC
-             LIMIT ? OFFSET ?`,
-            [branch_id, limit, offset]
-        );
-
-        const [totalRows] = await pool.query(
-            "SELECT COUNT(*) as total FROM autopay_groups WHERE branch_id = ?",
-            [branch_id]
-        );
-
-        // Format schedule display for each group
-        const formattedGroups = groups.map(group => {
-            const config = parseJSON(group.schedule_config, {});
-            let scheduleDisplay = '';
-            
-            if (group.schedule_type === 'daily') {
-                if (config.days && config.days.length > 0 && config.days.length < 7) {
-                    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    const days = config.days.map(d => dayNames[d === 7 ? 0 : d]);
-                    scheduleDisplay = `Every ${days.join(', ')} at ${config.time}`;
-                } else {
-                    scheduleDisplay = `Every day at ${config.time}`;
-                }
-            } else if (group.schedule_type === 'weekly') {
-                const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                const day = dayNames[config.day_of_week === 7 ? 0 : config.day_of_week];
-                scheduleDisplay = `Every ${day} at ${config.time}`;
-            } else if (group.schedule_type === 'monthly') {
-                if (config.day_of_month) {
-                    scheduleDisplay = `Every ${config.day_of_month}${getOrdinalSuffix(config.day_of_month)} of month at ${config.time}`;
-                } else if (config.week_of_month && config.day_of_week) {
-                    const weekNames = ['first', 'second', 'third', 'fourth'];
-                    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    scheduleDisplay = `Every ${weekNames[config.week_of_month - 1]} ${dayNames[config.day_of_week]} of month at ${config.time}`;
-                } else if (config.last_day_of_month) {
-                    scheduleDisplay = `Every last day of month at ${config.time}`;
-                }
-            }
-            
-            return {
-                ...group,
-                schedule_config: config,
-                schedule_display: scheduleDisplay
-            };
-        });
-
-        return ok(res, "Groups retrieved successfully", formattedGroups, {
-            page_no,
-            limit,
-            total: totalRows[0]?.total || 0,
-            total_pages: Math.ceil((totalRows[0]?.total || 0) / limit)
-        });
-    } catch (error) {
-        console.error("Get groups error:", error);
-        return fail(res, error.message);
-    }
-});
 
 function getOrdinalSuffix(n) {
     const s = ["th", "st", "nd", "rd"];
@@ -497,245 +51,820 @@ function getOrdinalSuffix(n) {
     return s[(v - 20) % 10] || s[v] || s[0];
 }
 
-/**
- * Get group details
- * GET /api/autopay/group/details/:group_id
- */
-router.get("/group/details/:group_id", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const { group_id } = req.params;
-
-        const [groups] = await pool.query(
-            `SELECT * FROM autopay_groups WHERE branch_id = ? AND group_id = ?`,
-            [branch_id, group_id]
-        );
-
-        if (!groups.length) {
-            return fail(res, "Group not found", 404);
+function formatScheduleDisplay(schedule_type, scheduleConfig) {
+    const config = scheduleConfig || {};
+    if (schedule_type === "daily") {
+        if (config.days?.length && config.days.length < 7) {
+            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const days = config.days.map((d) => dayNames[d === 7 ? 0 : d]);
+            return `Every ${days.join(", ")} at ${config.time}`;
         }
-
-        groups[0].schedule_config = parseJSON(groups[0].schedule_config, {});
-
-        return ok(res, "Group details retrieved successfully", groups[0]);
-    } catch (error) {
-        console.error("Get group details error:", error);
-        return fail(res, error.message);
+        return `Every day at ${config.time || "—"}`;
     }
-});
-
-/**
- * Delete autopay group (soft delete)
- * DELETE /api/autopay/group/delete/:group_id
- */
-router.delete("/group/delete/:group_id", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const { group_id } = req.params;
-
-        const [result] = await pool.query(
-            `UPDATE autopay_groups SET is_active = 0, modify_date = NOW() WHERE branch_id = ? AND group_id = ?`,
-            [branch_id, group_id]
-        );
-
-        if (!result.affectedRows) {
-            return fail(res, "Group not found", 404);
-        }
-
-        return ok(res, "Group deleted successfully");
-    } catch (error) {
-        console.error("Delete group error:", error);
-        return fail(res, error.message);
+    if (schedule_type === "weekly") {
+        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const day = dayNames[config.day_of_week === 7 ? 0 : config.day_of_week];
+        return `Every ${day || "—"} at ${config.time || "—"}`;
     }
-});
-
-// ==================== GROUP MEMBERS (CLIENTS) ====================
-
-/**
- * Add members to autopay group
- * POST /api/autopay/group/add-members
- */
-router.post("/group/add-members", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const { group_id, usernames } = req.body || {};
-
-        if (!group_id || !usernames || !Array.isArray(usernames) || usernames.length === 0) {
-            return fail(res, "group_id and usernames array are required");
+    if (schedule_type === "monthly") {
+        if (config.day_of_month) {
+            return `Every ${config.day_of_month}${getOrdinalSuffix(config.day_of_month)} of month at ${config.time || "—"}`;
         }
-
-        const [groups] = await pool.query(
-            `SELECT group_id FROM autopay_groups WHERE branch_id = ? AND group_id = ?`,
-            [branch_id, group_id]
-        );
-
-        if (!groups.length) {
-            return fail(res, "Group not found", 404);
+        if (config.week_of_month && config.day_of_week !== undefined) {
+            const weekNames = ["First", "Second", "Third", "Fourth"];
+            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const weekText = config.week_of_month === "last" ? "Last" : weekNames[config.week_of_month - 1];
+            return `${weekText} ${dayNames[config.day_of_week === 7 ? 0 : config.day_of_week]} of month at ${config.time || "—"}`;
         }
+        if (config.last_day_of_month) {
+            return `Last day of month at ${config.time || "—"}`;
+        }
+    }
+    return "";
+}
 
-        let added = 0;
-        let skipped = 0;
+function normalizeChannels(input) {
+    const list = Array.isArray(input) ? input : [];
+    return [...new Set(list.map((c) => String(c || "").trim().toLowerCase()).filter((c) => ALLOWED_CHANNELS.has(c)))];
+}
 
-        for (const username of usernames) {
-            const [users] = await pool.query(
-                `SELECT username FROM profile WHERE username = ? AND status = 1`,
-                [username]
-            );
+function validateScheduleConfig(schedule_type, schedule_config) {
+    if (!VALID_SCHEDULE_TYPES.includes(schedule_type)) {
+        return "schedule_type must be daily, weekly, or monthly";
+    }
+    if (!schedule_config || typeof schedule_config !== "object") {
+        return "schedule_config is required";
+    }
+    if (!schedule_config.time) {
+        return `${schedule_type} schedule requires time (HH:MM)`;
+    }
+    if (schedule_type === "weekly" && (schedule_config.day_of_week === undefined || schedule_config.day_of_week === null || schedule_config.day_of_week === "")) {
+        return "weekly schedule requires day_of_week";
+    }
+    if (schedule_type === "monthly") {
+        if (!schedule_config.day_of_month && !schedule_config.week_of_month && !schedule_config.last_day_of_month) {
+            return "monthly schedule requires day_of_month, week_of_month, or last_day_of_month";
+        }
+    }
+    return null;
+}
 
-            if (!users.length) {
-                skipped++;
-                continue;
+function shouldRunNow(schedule_type, scheduleConfig) {
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+    const currentDayOfWeek = now.getDay();
+    const currentDayOfMonth = now.getDate();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+
+    const scheduledTime = scheduleConfig.time;
+    if (scheduledTime) {
+        const [hour, minute] = scheduledTime.split(":").map(Number);
+        if (currentHour !== hour || currentMinute !== minute) {
+            return false;
+        }
+    }
+
+    switch (schedule_type) {
+        case "daily":
+            if (scheduleConfig.days && Array.isArray(scheduleConfig.days) && scheduleConfig.days.length > 0) {
+                const normalizedDays = scheduleConfig.days.map((d) => (d === 0 || d === 7 ? 0 : d));
+                return normalizedDays.includes(currentDayOfWeek);
             }
-
-            const [existing] = await pool.query(
-                `SELECT member_id FROM autopay_group_members WHERE group_id = ? AND username = ?`,
-                [group_id, username]
-            );
-
-            if (existing.length) {
-                await pool.query(
-                    `UPDATE autopay_group_members SET status = 'active', modify_date = NOW() WHERE group_id = ? AND username = ?`,
-                    [group_id, username]
-                );
-            } else {
-                await pool.query(
-                    `INSERT INTO autopay_group_members (member_id, group_id, branch_id, username, status, added_by, added_date)
-                     VALUES (?, ?, ?, ?, 'active', ?, NOW())`,
-                    [newId("apm"), group_id, branch_id, username, userFromReq(req)]
-                );
+            return true;
+        case "weekly": {
+            const scheduledDay = scheduleConfig.day_of_week;
+            if (scheduledDay !== undefined && scheduledDay !== null) {
+                const normalizedScheduledDay = scheduledDay === 7 ? 0 : Number(scheduledDay);
+                return currentDayOfWeek === normalizedScheduledDay;
             }
-            added++;
+            return false;
         }
-
-        return ok(res, "Members added successfully", { added, skipped });
-    } catch (error) {
-        console.error("Add members error:", error);
-        return fail(res, error.message);
+        case "monthly":
+            if (scheduleConfig.day_of_month && scheduleConfig.day_of_month > 0) {
+                return currentDayOfMonth === Number(scheduleConfig.day_of_month);
+            }
+            if (scheduleConfig.week_of_month && scheduleConfig.day_of_week !== undefined) {
+                return isMatchingWeekdayOfMonth(currentYear, currentMonth, currentDayOfMonth, scheduleConfig);
+            }
+            if (scheduleConfig.last_day_of_month) {
+                const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
+                return currentDayOfMonth === lastDay;
+            }
+            return false;
+        default:
+            return false;
     }
-});
+}
+
+function isMatchingWeekdayOfMonth(year, month, day, scheduleConfig) {
+    const date = new Date(year, month, day);
+    const currentDayOfWeek = date.getDay();
+    const weekOfMonth = Math.ceil(day / 7);
+    const isLastWeek = day > new Date(year, month + 1, 0).getDate() - 7;
+    const scheduledDayOfWeek = Number(scheduleConfig.day_of_week) === 7 ? 0 : Number(scheduleConfig.day_of_week);
+    const scheduledWeekOfMonth = scheduleConfig.week_of_month;
+
+    if (scheduledDayOfWeek !== currentDayOfWeek) return false;
+    if (scheduledWeekOfMonth === "last") return isLastWeek;
+    return weekOfMonth === Number(scheduledWeekOfMonth);
+}
+
+async function getUserBalance(branch_id, username) {
+    try {
+        return await GET_BALANCE({
+            branch_id,
+            party_id: username,
+            party_type: "client",
+        });
+    } catch (error) {
+        console.error("Error getting balance:", error);
+        return { balance: 0, debit: 0, credit: 0 };
+    }
+}
+
+async function getClientProfile(branch_id, username) {
+    const [rows] = await pool.query(
+        `SELECT p.username, p.name, p.email, p.mobile, p.country_code, p.status
+         FROM profile p
+         INNER JOIN clients c
+            ON c.username = p.username
+           AND c.branch_id = ?
+           AND c.user_type = 'client'
+           AND (c.is_deleted = '0' OR c.is_deleted = 0 OR c.is_deleted IS NULL)
+         WHERE p.username = ? AND (p.status = 1 OR p.status = '1')
+         LIMIT 1`,
+        [branch_id, username]
+    );
+    return rows[0] || null;
+}
 
 /**
- * Remove members from autopay group
- * POST /api/autopay/group/remove-members
+ * Enrollment must never depend on balance.
+ * Accept username from search-party even if profile/client joins are imperfect.
  */
-router.post("/group/remove-members", auth, validateBranch, async (req, res) => {
+async function resolveEnrollmentUsername(branch_id, username) {
+    const uname = String(username || "").trim();
+    if (!uname) return null;
+
+    const profile = await getClientProfile(branch_id, uname);
+    if (profile?.username) return String(profile.username).trim();
+
+    const [clientRows] = await pool.query(
+        `SELECT username
+         FROM clients
+         WHERE branch_id = ?
+           AND username = ?
+           AND user_type = 'client'
+           AND (is_deleted = '0' OR is_deleted = 0 OR is_deleted IS NULL)
+         LIMIT 1`,
+        [branch_id, uname]
+    );
+    if (clientRows[0]?.username) return String(clientRows[0].username).trim();
+
+    const [profileRows] = await pool.query(
+        `SELECT username FROM profile WHERE username = ? LIMIT 1`,
+        [uname]
+    );
+    if (profileRows[0]?.username) return String(profileRows[0].username).trim();
+
+    // Still enroll the provided username (caller already selected a client).
+    return uname;
+}
+
+function mapClientRow(row) {
+    const schedule_config = parseJSON(row.schedule_config, {});
+    const channels = normalizeChannels(parseJSON(row.channels, []));
+    return {
+        ...row,
+        schedule_config,
+        channels,
+        schedule_display: formatScheduleDisplay(row.schedule_type, schedule_config),
+        is_active: Number(row.is_active) === 1 ? 1 : 0,
+    };
+}
+
+async function processScheduledClients() {
     try {
-        const branch_id = req.branch_id;
-        const { group_id, usernames } = req.body || {};
-
-        if (!group_id || !usernames || !Array.isArray(usernames) || usernames.length === 0) {
-            return fail(res, "group_id and usernames array are required");
-        }
-
-        const placeholders = usernames.map(() => '?').join(',');
-        const [result] = await pool.query(
-            `UPDATE autopay_group_members 
-             SET status = 'inactive', modify_date = NOW() 
-             WHERE group_id = ? AND username IN (${placeholders})`,
-            [group_id, ...usernames]
+        const [rows] = await pool.query(
+            `SELECT reminder_id, branch_id, username, schedule_type, schedule_config, channels
+             FROM autopay_clients
+             WHERE is_active = 1`
         );
 
-        return ok(res, "Members removed successfully", { removed: result.affectedRows });
+        for (const row of rows) {
+            const scheduleConfig = parseJSON(row.schedule_config, {});
+            if (!shouldRunNow(row.schedule_type, scheduleConfig)) continue;
+            processAutopayClient(row, { force: false }).catch((err) => {
+                console.error(`[Autopay Scheduler] Error for ${row.reminder_id}:`, err);
+            });
+        }
     } catch (error) {
-        console.error("Remove members error:", error);
+        console.error("[Autopay Scheduler] Error:", error);
+    }
+}
+
+/**
+ * Core send for one enrolled client
+ */
+async function processAutopayClient(reminderRow, { force = false, sent_by = null } = {}) {
+    const log_id = newId("apl");
+    const branch_id = reminderRow.branch_id;
+    const reminder_id = reminderRow.reminder_id;
+    const username = reminderRow.username;
+    const channels = normalizeChannels(parseJSON(reminderRow.channels, ["email"]));
+
+    try {
+        if (!channels.length) {
+            throw new Error("No channels configured");
+        }
+
+        const client = await getClientProfile(branch_id, username);
+        if (!client) {
+            throw new Error("Client not found or inactive");
+        }
+
+        const balanceData = await getUserBalance(branch_id, username);
+        // Only send when outstanding balance is positive (> 0).
+        if (Number(balanceData?.balance || 0) <= 0) {
+            await pool.query(
+                `INSERT INTO autopay_logs
+                 (log_id, reminder_id, username, branch_id, status, message, details, sent_count, skipped_count, failed_count, run_date, completed_at)
+                 VALUES (?, ?, ?, ?, 'skipped', 'Balance is not positive', ?, 0, 1, 0, NOW(), NOW())`,
+                [
+                    log_id,
+                    reminder_id,
+                    username,
+                    branch_id,
+                    JSON.stringify([{
+                        username,
+                        status: "skipped",
+                        reason: "Balance is not positive",
+                        balance: balanceData.balance,
+                        debit: balanceData.debit,
+                        credit: balanceData.credit,
+                    }]),
+                ]
+            );
+            return {
+                processed: 1,
+                sent: 0,
+                skipped: 1,
+                failed: 0,
+                status: "skipped",
+                reason: "Balance is not positive",
+            };
+        }
+
+        const variables = await preparePaymentReminderVariables(branch_id, username, client, balanceData);
+        const channelResults = {};
+        let sent = 0;
+        let failed = 0;
+
+        for (const channel of channels) {
+            try {
+                if (channel === "email") {
+                    if (!client.email) throw new Error("Client does not have an email address");
+                    const template = await getActivePaymentTemplate(branch_id, "payment_reminder");
+                    const smtpConfig = await getActiveSmtpConfig(branch_id);
+                    const sendResult = await sendEmail(
+                        smtpConfig,
+                        client.email,
+                        renderTemplate(template.subject, variables),
+                        renderTemplate(template.html_body, variables),
+                        template.text_body ? renderTemplate(template.text_body, variables) : null
+                    );
+                    channelResults.email = { status: "sent", message_id: sendResult.messageId || null };
+                    sent += 1;
+                } else if (channel === "whatsapp") {
+                    await sendPaymentReminderWhatsapp({
+                        branch_id,
+                        username,
+                        balanceData,
+                        sent_by: sent_by || "system",
+                    });
+                    channelResults.whatsapp = { status: "sent" };
+                    sent += 1;
+                } else if (channel === "sms") {
+                    throw new Error("SMS sending is not available");
+                }
+            } catch (channelError) {
+                failed += 1;
+                channelResults[channel] = {
+                    status: "failed",
+                    reason: channelError?.response?.data?.message || channelError?.message || `Failed via ${channel}`,
+                };
+                console.error(`Autopay ${channel} failed for ${username}:`, channelError);
+            }
+        }
+
+        const overall =
+            sent === channels.length ? "completed" : sent > 0 ? "completed" : "failed";
+        const skipped = 0;
+
+        await pool.query(
+            `INSERT INTO autopay_logs
+             (log_id, reminder_id, username, branch_id, status, message, details, sent_count, skipped_count, failed_count, run_date, completed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+                log_id,
+                reminder_id,
+                username,
+                branch_id,
+                overall,
+                force ? "Manual autopay processed" : "Scheduled autopay processed",
+                JSON.stringify([{ username, status: overall, channels: channelResults, debit: balanceData.debit }]),
+                sent,
+                skipped,
+                failed,
+            ]
+        );
+
+        return { processed: 1, sent, skipped, failed, status: overall, channels: channelResults };
+    } catch (error) {
+        console.error("Process autopay client error:", error);
+        await pool.query(
+            `INSERT INTO autopay_logs
+             (log_id, reminder_id, username, branch_id, status, message, error_message, sent_count, skipped_count, failed_count, run_date, completed_at)
+             VALUES (?, ?, ?, ?, 'failed', 'Autopay processing failed', ?, 0, 0, 1, NOW(), NOW())`,
+            [log_id, reminder_id, username, branch_id, error.message]
+        );
+        return { processed: 1, sent: 0, skipped: 0, failed: 1, status: "failed", reason: error.message };
+    }
+}
+
+// ==================== CLIENT ENROLLMENT ====================
+
+/**
+ * Resolve all active client usernames for a branch (server-side select-all).
+ */
+async function resolveAllClientUsernames(branch_id) {
+    const [rows] = await pool.query(
+        `SELECT DISTINCT c.username
+         FROM clients c
+         INNER JOIN profile p
+            ON p.username = c.username
+           AND (p.status = 1 OR p.status = '1')
+         WHERE c.branch_id = ?
+           AND c.user_type = 'client'
+           AND (c.is_deleted = '0' OR c.is_deleted = 0 OR c.is_deleted IS NULL)
+           AND c.username IS NOT NULL
+           AND TRIM(c.username) <> ''`,
+        [branch_id]
+    );
+    return rows.map((r) => String(r.username).trim()).filter(Boolean);
+}
+
+/**
+ * Resolve unique client usernames from group firm memberships (one username even if many firms).
+ */
+async function resolveUsernamesFromGroup(branch_id, group_id) {
+    const [rows] = await pool.query(
+        `SELECT DISTINCT f.username
+         FROM group_firms gf
+         INNER JOIN firms f
+            ON f.firm_id = gf.firm_id
+           AND f.branch_id = ?
+           AND f.is_deleted = '0'
+         INNER JOIN clients c
+            ON c.username = f.username
+           AND c.branch_id = ?
+           AND c.user_type = 'client'
+           AND c.is_deleted = '0'
+         INNER JOIN profile p
+            ON p.username = f.username
+           AND p.status = 1
+         WHERE gf.group_id = ?
+           AND gf.is_deleted = '0'
+           AND f.username IS NOT NULL
+           AND TRIM(f.username) <> ''`,
+        [branch_id, branch_id, group_id]
+    );
+    return rows.map((r) => String(r.username).trim()).filter(Boolean);
+}
+
+async function upsertAutopayClients({
+    branch_id,
+    actor,
+    usernames,
+    schedule_type,
+    schedule_config,
+    channels,
+    is_active = 1,
+}) {
+    let added = 0;
+    let updated = 0;
+    let skipped = 0;
+    const details = [];
+    const uniqueUsernames = [...new Set(usernames.map((u) => String(u || "").trim()).filter(Boolean))];
+
+    for (const rawUsername of uniqueUsernames) {
+        // No balance validation on enroll — any debit/credit/zero is allowed.
+        const username = await resolveEnrollmentUsername(branch_id, rawUsername);
+        if (!username) {
+            skipped += 1;
+            details.push({ username: rawUsername, status: "skipped", reason: "Invalid username" });
+            continue;
+        }
+
+        const [existing] = await pool.query(
+            `SELECT reminder_id FROM autopay_clients WHERE branch_id = ? AND username = ? LIMIT 1`,
+            [branch_id, username]
+        );
+
+        if (existing.length) {
+            await pool.query(
+                `UPDATE autopay_clients
+                 SET schedule_type = ?, schedule_config = ?, channels = ?, is_active = ?,
+                     modify_by = ?, modify_date = NOW()
+                 WHERE reminder_id = ? AND branch_id = ?`,
+                [
+                    schedule_type,
+                    JSON.stringify(schedule_config),
+                    JSON.stringify(channels),
+                    is_active ? 1 : 0,
+                    actor,
+                    existing[0].reminder_id,
+                    branch_id,
+                ]
+            );
+            updated += 1;
+            details.push({ username, status: "updated", reminder_id: existing[0].reminder_id });
+        } else {
+            const reminder_id = newId("apr");
+            await pool.query(
+                `INSERT INTO autopay_clients
+                 (reminder_id, branch_id, username, schedule_type, schedule_config, channels, is_active, create_by, create_date)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                [
+                    reminder_id,
+                    branch_id,
+                    username,
+                    schedule_type,
+                    JSON.stringify(schedule_config),
+                    JSON.stringify(channels),
+                    is_active ? 1 : 0,
+                    actor,
+                ]
+            );
+            added += 1;
+            details.push({ username, status: "added", reminder_id });
+        }
+    }
+
+    return { added, updated, skipped, unique_clients: uniqueUsernames.length, details };
+}
+
+/**
+ * Add clients with schedule + channels
+ * POST /api/autopay/client/add
+ * Body: {
+ *   usernames?: string[],
+ *   select_all_clients?: boolean,
+ *   group_id?: string,
+ *   group_ids?: string[],
+ *   schedule_type, schedule_config, channels, is_active?
+ * }
+ * Existing clients are overwritten with the latest config.
+ * Group / select-all expands usernames server-side.
+ */
+router.post("/client/add", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const actor = userFromReq(req);
+        const {
+            usernames,
+            select_all_clients = false,
+            group_id,
+            group_ids,
+            schedule_type,
+            schedule_config,
+            channels,
+            is_active = 1,
+        } = req.body || {};
+
+        const scheduleError = validateScheduleConfig(schedule_type, schedule_config);
+        if (scheduleError) return fail(res, scheduleError);
+
+        const normalizedChannels = normalizeChannels(channels);
+        if (!normalizedChannels.length) {
+            return fail(res, "Select at least one channel: whatsapp, email, or sms");
+        }
+
+        const selectAllClients = Boolean(select_all_clients);
+        const groupIdList = [
+            ...(Array.isArray(group_ids) ? group_ids : []),
+            ...(group_id ? [group_id] : []),
+        ]
+            .map((id) => String(id || "").trim())
+            .filter(Boolean);
+
+        let resolvedUsernames = [];
+        let source = "client";
+        if (groupIdList.length) {
+            source = "group";
+            const seen = new Set();
+            for (const gid of groupIdList) {
+                const fromGroup = await resolveUsernamesFromGroup(branch_id, gid);
+                for (const username of fromGroup) {
+                    if (seen.has(username)) continue;
+                    seen.add(username);
+                    resolvedUsernames.push(username);
+                }
+            }
+            if (!resolvedUsernames.length) {
+                return fail(res, "No clients found in the selected group(s)");
+            }
+        } else if (selectAllClients) {
+            source = "all_clients";
+            resolvedUsernames = await resolveAllClientUsernames(branch_id);
+            if (!resolvedUsernames.length) {
+                return fail(res, "No clients found in this branch");
+            }
+        } else {
+            resolvedUsernames = Array.isArray(usernames) ? usernames : [];
+            if (!resolvedUsernames.length) {
+                return fail(res, "usernames, select_all_clients, or group_id is required");
+            }
+        }
+
+        const result = await upsertAutopayClients({
+            branch_id,
+            actor,
+            usernames: resolvedUsernames,
+            schedule_type,
+            schedule_config,
+            channels: normalizedChannels,
+            is_active,
+        });
+
+        if ((result.added || 0) + (result.updated || 0) === 0) {
+            return fail(
+                res,
+                result.details?.[0]?.reason || "No clients were enrolled",
+                400
+            );
+        }
+
+        return ok(res, "Clients enrolled successfully", {
+            ...result,
+            source,
+            select_all_clients: selectAllClients,
+            group_ids: groupIdList,
+        });
+    } catch (error) {
+        console.error("Add autopay clients error:", error);
         return fail(res, error.message);
     }
 });
 
 /**
- * Get group members with their debit status
- * GET /api/autopay/group/members/:group_id
+ * Update one enrolled client config
+ * PUT /api/autopay/client/update
  */
-router.get("/group/members/:group_id", auth, validateBranch, async (req, res) => {
+router.put("/client/update", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { group_id } = req.params;
+        const actor = userFromReq(req);
+        const { reminder_id, schedule_type, schedule_config, channels, is_active } = req.body || {};
+
+        if (!reminder_id) return fail(res, "reminder_id is required");
+
+        const [rows] = await pool.query(
+            `SELECT * FROM autopay_clients WHERE reminder_id = ? AND branch_id = ? LIMIT 1`,
+            [reminder_id, branch_id]
+        );
+        if (!rows.length) return fail(res, "Reminder not found", 404);
+
+        const updates = [];
+        const values = [];
+
+        if (schedule_type || schedule_config) {
+            const nextType = schedule_type || rows[0].schedule_type;
+            const nextConfig = schedule_config || parseJSON(rows[0].schedule_config, {});
+            const scheduleError = validateScheduleConfig(nextType, nextConfig);
+            if (scheduleError) return fail(res, scheduleError);
+            updates.push("schedule_type = ?", "schedule_config = ?");
+            values.push(nextType, JSON.stringify(nextConfig));
+        }
+
+        if (channels !== undefined) {
+            const normalizedChannels = normalizeChannels(channels);
+            if (!normalizedChannels.length) {
+                return fail(res, "Select at least one channel: whatsapp, email, or sms");
+            }
+            updates.push("channels = ?");
+            values.push(JSON.stringify(normalizedChannels));
+        }
+
+        if (is_active !== undefined) {
+            updates.push("is_active = ?");
+            values.push(is_active ? 1 : 0);
+        }
+
+        if (!updates.length) return fail(res, "No fields to update");
+
+        updates.push("modify_by = ?", "modify_date = NOW()");
+        values.push(actor, reminder_id, branch_id);
+
+        await pool.query(
+            `UPDATE autopay_clients SET ${updates.join(", ")} WHERE reminder_id = ? AND branch_id = ?`,
+            values
+        );
+
+        return ok(res, "Reminder updated successfully");
+    } catch (error) {
+        console.error("Update autopay client error:", error);
+        return fail(res, error.message);
+    }
+});
+
+/**
+ * Remove (deactivate) enrolled clients
+ * POST /api/autopay/client/remove
+ */
+router.post("/client/remove", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const actor = userFromReq(req);
+        const reminderIds = Array.isArray(req.body?.reminder_ids)
+            ? req.body.reminder_ids.map((id) => String(id || "").trim()).filter(Boolean)
+            : req.body?.reminder_id
+                ? [String(req.body.reminder_id).trim()]
+                : [];
+        const usernames = Array.isArray(req.body?.usernames)
+            ? req.body.usernames.map((u) => String(u || "").trim()).filter(Boolean)
+            : [];
+
+        if (!reminderIds.length && !usernames.length) {
+            return fail(res, "reminder_ids or usernames required");
+        }
+
+        let removed = 0;
+        if (reminderIds.length) {
+            const placeholders = reminderIds.map(() => "?").join(",");
+            const [result] = await pool.query(
+                `UPDATE autopay_clients
+                 SET is_active = 0, modify_by = ?, modify_date = NOW()
+                 WHERE branch_id = ? AND reminder_id IN (${placeholders})`,
+                [actor, branch_id, ...reminderIds]
+            );
+            removed += result.affectedRows || 0;
+        }
+        if (usernames.length) {
+            const placeholders = usernames.map(() => "?").join(",");
+            const [result] = await pool.query(
+                `UPDATE autopay_clients
+                 SET is_active = 0, modify_by = ?, modify_date = NOW()
+                 WHERE branch_id = ? AND username IN (${placeholders})`,
+                [actor, branch_id, ...usernames]
+            );
+            removed += result.affectedRows || 0;
+        }
+
+        return ok(res, "Clients removed from auto reminder", { removed });
+    } catch (error) {
+        console.error("Remove autopay clients error:", error);
+        return fail(res, error.message);
+    }
+});
+
+/**
+ * Hard-delete one reminder row
+ * DELETE /api/autopay/client/:reminder_id
+ */
+router.delete("/client/:reminder_id", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { reminder_id } = req.params;
+        const [result] = await pool.query(
+            `DELETE FROM autopay_clients WHERE reminder_id = ? AND branch_id = ?`,
+            [reminder_id, branch_id]
+        );
+        if (!result.affectedRows) return fail(res, "Reminder not found", 404);
+        return ok(res, "Client removed from auto reminder");
+    } catch (error) {
+        console.error("Delete autopay client error:", error);
+        return fail(res, error.message);
+    }
+});
+
+/**
+ * List enrolled clients
+ * GET /api/autopay/client/list
+ */
+router.get("/client/list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
         const page_no = Math.max(1, Number(req.query.page_no || 1));
         const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
         const offset = (page_no - 1) * limit;
+        const query = String(req.query.query || "").trim();
+        const activeOnly = String(req.query.active_only || "1") !== "0";
 
-        const [members] = await pool.query(
-            `SELECT gm.*, p.name, p.email, p.mobile
-             FROM autopay_group_members gm
-             JOIN profile p ON p.username = gm.username
-             WHERE gm.group_id = ? AND gm.branch_id = ? AND gm.status = 'active'
-             LIMIT ? OFFSET ?`,
-            [group_id, branch_id, limit, offset]
-        );
-
-        for (const member of members) {
-            const balanceData = await getUserBalance(branch_id, member.username);
-            member.balance = balanceData.balance;
-            member.debit = balanceData.debit;
-            member.credit = balanceData.credit;
-            member.has_debit = balanceData.debit > 0;
+        const where = ["ac.branch_id = ?"];
+        const params = [branch_id];
+        if (activeOnly) {
+            where.push("ac.is_active = 1");
+        }
+        if (query) {
+            where.push("(ac.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ?)");
+            const like = `%${query}%`;
+            params.push(like, like, like);
         }
 
-        const [totalRows] = await pool.query(
-            `SELECT COUNT(*) as total FROM autopay_group_members WHERE group_id = ? AND branch_id = ? AND status = 'active'`,
-            [group_id, branch_id]
+        const whereSql = where.join(" AND ");
+
+        const [rows] = await pool.query(
+            `SELECT ac.*, p.name, p.email, p.mobile, p.country_code
+             FROM autopay_clients ac
+             LEFT JOIN profile p ON p.username = ac.username
+             WHERE ${whereSql}
+             ORDER BY ac.create_date DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
         );
 
-        return ok(res, "Group members retrieved successfully", members, {
+        const [totalRows] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM autopay_clients ac
+             LEFT JOIN profile p ON p.username = ac.username
+             WHERE ${whereSql}`,
+            params
+        );
+
+        const mapped = [];
+        for (const row of rows) {
+            const item = mapClientRow(row);
+            const balanceData = await getUserBalance(branch_id, item.username);
+            item.balance = balanceData.balance;
+            item.debit = balanceData.debit;
+            item.credit = balanceData.credit;
+            item.has_debit = Number(balanceData.debit || 0) > 0;
+            item.has_positive_balance = Number(balanceData.balance || 0) > 0;
+            mapped.push(item);
+        }
+
+        return ok(res, "Enrolled clients retrieved", mapped, {
             page_no,
             limit,
             total: totalRows[0]?.total || 0,
-            total_pages: Math.ceil((totalRows[0]?.total || 0) / limit)
+            total_pages: Math.ceil((totalRows[0]?.total || 0) / limit),
         });
     } catch (error) {
-        console.error("Get members error:", error);
+        console.error("List autopay clients error:", error);
         return fail(res, error.message);
     }
 });
 
-// ==================== AUTO PAY PROCESSING ====================
-
 /**
- * Process autopay for a specific group (manual trigger)
- * POST /api/autopay/process/group/:group_id
+ * Manual process one client
+ * POST /api/autopay/process/client/:reminder_id
  */
-router.post("/process/group/:group_id", auth, validateBranch, async (req, res) => {
+router.post("/process/client/:reminder_id", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { group_id } = req.params;
-
-        const [groups] = await pool.query(
-            `SELECT * FROM autopay_groups WHERE branch_id = ? AND group_id = ? AND is_active = 1`,
-            [branch_id, group_id]
+        const { reminder_id } = req.params;
+        const [rows] = await pool.query(
+            `SELECT * FROM autopay_clients WHERE reminder_id = ? AND branch_id = ? AND is_active = 1 LIMIT 1`,
+            [reminder_id, branch_id]
         );
+        if (!rows.length) return fail(res, "Active reminder not found", 404);
 
-        if (!groups.length) {
-            return fail(res, "Active group not found", 404);
-        }
-
-        const result = await processAutopayGroup(group_id, branch_id);
+        const result = await processAutopayClient(rows[0], {
+            force: true,
+            sent_by: userFromReq(req),
+        });
         return ok(res, "Autopay processed successfully", result);
     } catch (error) {
-        console.error("Process group error:", error);
+        console.error("Process client error:", error);
         return fail(res, error.message);
     }
 });
 
 /**
- * Process all active autopay groups (for scheduler)
- * GET /api/autopay/process/all
+ * Manual process all active enrolled clients for branch
+ * POST /api/autopay/process/all
  */
-router.get("/process/all", auth, validateBranch, async (req, res) => {
+router.post("/process/all", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        
-        const [groups] = await pool.query(
-            `SELECT group_id FROM autopay_groups WHERE branch_id = ? AND is_active = 1`,
+        const [rows] = await pool.query(
+            `SELECT * FROM autopay_clients WHERE branch_id = ? AND is_active = 1`,
             [branch_id]
         );
 
         const results = [];
-        for (const group of groups) {
-            const result = await processAutopayGroup(group.group_id, branch_id);
-            results.push({ group_id: group.group_id, ...result });
+        for (const row of rows) {
+            const result = await processAutopayClient(row, {
+                force: true,
+                sent_by: userFromReq(req),
+            });
+            results.push({ reminder_id: row.reminder_id, username: row.username, ...result });
         }
 
-        return ok(res, "All autopay groups processed", results);
+        return ok(res, "All enrolled clients processed", results);
     } catch (error) {
         console.error("Process all error:", error);
         return fail(res, error.message);
@@ -743,106 +872,57 @@ router.get("/process/all", auth, validateBranch, async (req, res) => {
 });
 
 /**
- * Core function to process autopay for a group
+ * Manual process selected enrolled clients
+ * POST /api/autopay/process/selected
+ * Body: { reminder_ids: string[] }
  */
-async function processAutopayGroup(group_id, branch_id) {
-    const log_id = newId("apl");
-    
+router.post("/process/selected", auth, validateBranch, async (req, res) => {
     try {
-        const [groups] = await pool.query(
-            `SELECT * FROM autopay_groups WHERE group_id = ?`,
-            [group_id]
-        );
-
-        if (!groups.length) {
-            throw new Error("Group not found");
+        const branch_id = req.branch_id;
+        const reminderIds = [
+            ...new Set(
+                (Array.isArray(req.body?.reminder_ids) ? req.body.reminder_ids : [])
+                    .map((id) => String(id || "").trim())
+                    .filter(Boolean)
+            ),
+        ];
+        if (!reminderIds.length) {
+            return fail(res, "Select at least one client");
         }
 
-        const group = groups[0];
-        const scheduleConfig = parseJSON(group.schedule_config, {});
-        
-        // Get active members
-        const [members] = await pool.query(
-            `SELECT username FROM autopay_group_members WHERE group_id = ? AND status = 'active'`,
-            [group_id]
+        const placeholders = reminderIds.map(() => "?").join(",");
+        const [rows] = await pool.query(
+            `SELECT * FROM autopay_clients
+             WHERE branch_id = ? AND is_active = 1 AND reminder_id IN (${placeholders})`,
+            [branch_id, ...reminderIds]
         );
 
-        if (!members.length) {
-            await pool.query(
-                `INSERT INTO autopay_logs (log_id, group_id, branch_id, status, message, run_date, completed_at)
-                 VALUES (?, ?, ?, 'failed', 'No active members in group', NOW(), NOW())`,
-                [log_id, group_id, branch_id]
-            );
-            return { processed: 0, sent: 0, skipped: 0, failed: 0, status: "failed", reason: "No active members" };
+        if (!rows.length) {
+            return fail(res, "No active selected reminders found", 404);
         }
 
-        // Get template and SMTP config
-        const template = await getActivePaymentTemplate(branch_id);
-        const smtpConfig = await getActiveSmtpConfig(branch_id);
-
-        let sent = 0;
-        let skipped = 0;
-        let failed = 0;
-        const details = [];
-
-        for (const member of members) {
-            try {
-                const user = await getUserByUsername(branch_id, member.username);
-                
-                if (!user.email) {
-                    skipped++;
-                    details.push({ username: member.username, status: "skipped", reason: "No email address" });
-                    continue;
-                }
-
-                const balanceData = await getUserBalance(branch_id, member.username);
-                
-                if (balanceData.debit <= 0) {
-                    skipped++;
-                    details.push({ username: member.username, status: "skipped", reason: "No debit balance", debit: balanceData.debit });
-                    continue;
-                }
-
-                const variables = await preparePaymentReminderVariables(branch_id, member.username, user, balanceData);
-                const subject = renderTemplate(template.subject, variables);
-                const htmlBody = renderTemplate(template.html_body, variables);
-                
-                await sendEmail(smtpConfig, user.email, subject, htmlBody);
-                sent++;
-                details.push({ username: member.username, status: "sent", email: user.email, debit: balanceData.debit });
-
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-            } catch (error) {
-                failed++;
-                details.push({ username: member.username, status: "failed", reason: error.message });
-                console.error(`Error processing ${member.username}:`, error);
-            }
+        const results = [];
+        for (const row of rows) {
+            const result = await processAutopayClient(row, {
+                force: true,
+                sent_by: userFromReq(req),
+            });
+            results.push({ reminder_id: row.reminder_id, username: row.username, ...result });
         }
 
-        await pool.query(
-            `INSERT INTO autopay_logs (log_id, group_id, branch_id, status, message, details, sent_count, skipped_count, failed_count, run_date, completed_at)
-             VALUES (?, ?, ?, 'completed', 'Autopay processed successfully', ?, ?, ?, ?, NOW(), NOW())`,
-            [log_id, group_id, branch_id, JSON.stringify(details), sent, skipped, failed]
-        );
-
-        return { processed: members.length, sent, skipped, failed, status: "completed", details };
-        
+        return ok(res, "Selected clients processed", {
+            requested: reminderIds.length,
+            processed: results.length,
+            results,
+        });
     } catch (error) {
-        console.error("Process autopay error:", error);
-        await pool.query(
-            `INSERT INTO autopay_logs (log_id, group_id, branch_id, status, message, error_message, run_date, completed_at)
-             VALUES (?, ?, ?, 'failed', 'Autopay processing failed', ?, NOW(), NOW())`,
-            [log_id, group_id, branch_id, error.message]
-        );
-        return { processed: 0, sent: 0, skipped: 0, failed: 0, status: "failed", reason: error.message };
+        console.error("Process selected error:", error);
+        return fail(res, error.message);
     }
-}
-
-// ==================== AUTO PAY LOGS ====================
+});
 
 /**
- * Get autopay logs
+ * Logs
  * GET /api/autopay/logs
  */
 router.get("/logs", auth, validateBranch, async (req, res) => {
@@ -851,40 +931,45 @@ router.get("/logs", auth, validateBranch, async (req, res) => {
         const page_no = Math.max(1, Number(req.query.page_no || 1));
         const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
         const offset = (page_no - 1) * limit;
-        const group_id = req.query.group_id;
+        const username = String(req.query.username || "").trim();
+        const startDate = String(req.query.start_date || "").trim();
+        const endDate = String(req.query.end_date || "").trim();
 
-        let query = `
-            SELECT l.*, g.group_name
-            FROM autopay_logs l
-            JOIN autopay_groups g ON g.group_id = l.group_id
-            WHERE l.branch_id = ?
-        `;
+        const where = ["l.branch_id = ?"];
         const params = [branch_id];
-
-        if (group_id) {
-            query += ` AND l.group_id = ?`;
-            params.push(group_id);
+        if (username) {
+            where.push("l.username = ?");
+            params.push(username);
+        }
+        if (startDate && endDate) {
+            where.push("DATE(l.run_date) BETWEEN ? AND ?");
+            params.push(startDate, endDate);
         }
 
-        query += ` ORDER BY l.run_date DESC LIMIT ? OFFSET ?`;
-        params.push(limit, offset);
+        const [logs] = await pool.query(
+            `SELECT l.*, p.name AS client_name
+             FROM autopay_logs l
+             LEFT JOIN profile p ON p.username = l.username
+             WHERE ${where.join(" AND ")}
+             ORDER BY l.run_date DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
+        );
 
-        const [logs] = await pool.query(query, params);
-
-        logs.forEach(log => {
+        logs.forEach((log) => {
             log.details = parseJSON(log.details, []);
         });
 
         const [totalRows] = await pool.query(
-            `SELECT COUNT(*) as total FROM autopay_logs WHERE branch_id = ?${group_id ? ' AND group_id = ?' : ''}`,
-            group_id ? [branch_id, group_id] : [branch_id]
+            `SELECT COUNT(*) as total FROM autopay_logs l WHERE ${where.join(" AND ")}`,
+            params
         );
 
         return ok(res, "Logs retrieved successfully", logs, {
             page_no,
             limit,
             total: totalRows[0]?.total || 0,
-            total_pages: Math.ceil((totalRows[0]?.total || 0) / limit)
+            total_pages: Math.ceil((totalRows[0]?.total || 0) / limit),
         });
     } catch (error) {
         console.error("Get logs error:", error);
@@ -893,66 +978,26 @@ router.get("/logs", auth, validateBranch, async (req, res) => {
 });
 
 /**
- * Get autopay log details
- * GET /api/autopay/logs/:log_id
- */
-router.get("/logs/:log_id", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const { log_id } = req.params;
-
-        const [logs] = await pool.query(
-            `SELECT l.*, g.group_name, g.schedule_type
-             FROM autopay_logs l
-             JOIN autopay_groups g ON g.group_id = l.group_id
-             WHERE l.branch_id = ? AND l.log_id = ?`,
-            [branch_id, log_id]
-        );
-
-        if (!logs.length) {
-            return fail(res, "Log not found", 404);
-        }
-
-        logs[0].details = parseJSON(logs[0].details, []);
-
-        return ok(res, "Log details retrieved successfully", logs[0]);
-    } catch (error) {
-        console.error("Get log details error:", error);
-        return fail(res, error.message);
-    }
-});
-
-// ==================== DASHBOARD STATS ====================
-
-/**
- * Get autopay dashboard statistics
+ * Stats
  * GET /api/autopay/stats
  */
 router.get("/stats", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
 
-        const [groupStats] = await pool.query(
-            `SELECT 
-                COUNT(*) as total_groups,
-                SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_groups,
-                SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as inactive_groups
-             FROM autopay_groups WHERE branch_id = ?`,
-            [branch_id]
-        );
-
-        const [memberStats] = await pool.query(
-            `SELECT 
-                COUNT(*) as total_members,
-                COUNT(DISTINCT group_id) as groups_with_members
-             FROM autopay_group_members WHERE branch_id = ? AND status = 'active'`,
+        const [clientStats] = await pool.query(
+            `SELECT
+                COUNT(*) as total_clients,
+                SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_clients,
+                SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as inactive_clients
+             FROM autopay_clients WHERE branch_id = ?`,
             [branch_id]
         );
 
         const [lastRun] = await pool.query(
-            `SELECT 
+            `SELECT
                 COUNT(*) as total_runs,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as successful_runs,
+                SUM(CASE WHEN status IN ('completed','skipped') THEN 1 ELSE 0 END) as successful_runs,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_runs,
                 SUM(sent_count) as total_sent,
                 SUM(skipped_count) as total_skipped,
@@ -962,14 +1007,10 @@ router.get("/stats", auth, validateBranch, async (req, res) => {
         );
 
         return ok(res, "Autopay statistics", {
-            groups: {
-                total: groupStats[0]?.total_groups || 0,
-                active: groupStats[0]?.active_groups || 0,
-                inactive: groupStats[0]?.inactive_groups || 0
-            },
-            members: {
-                total: memberStats[0]?.total_members || 0,
-                groups_with_members: memberStats[0]?.groups_with_members || 0
+            clients: {
+                total: clientStats[0]?.total_clients || 0,
+                active: clientStats[0]?.active_clients || 0,
+                inactive: clientStats[0]?.inactive_clients || 0,
             },
             today_runs: {
                 total_runs: lastRun[0]?.total_runs || 0,
@@ -977,8 +1018,8 @@ router.get("/stats", auth, validateBranch, async (req, res) => {
                 failed: lastRun[0]?.failed_runs || 0,
                 total_sent: lastRun[0]?.total_sent || 0,
                 total_skipped: lastRun[0]?.total_skipped || 0,
-                total_failed: lastRun[0]?.total_failed || 0
-            }
+                total_failed: lastRun[0]?.total_failed || 0,
+            },
         });
     } catch (error) {
         console.error("Get stats error:", error);
@@ -986,30 +1027,17 @@ router.get("/stats", auth, validateBranch, async (req, res) => {
     }
 });
 
-// ==================== INITIALIZE SCHEDULER ====================
-
-/**
- * Initialize the autopay scheduler - runs every minute to check for due schedules
- */
 function initScheduler() {
-    if (schedulerInitialized) {
-        return;
-    }
-    
-    // Run every minute to check for schedules
-    cron.schedule('* * * * *', async () => {
-        await processScheduledGroups();
+    if (schedulerInitialized) return;
+    cron.schedule("* * * * *", async () => {
+        await processScheduledClients();
     });
-    
     schedulerInitialized = true;
-    
-    // Run once on startup to catch any missed schedules
     setTimeout(async () => {
-        await processScheduledGroups();
+        await processScheduledClients();
     }, 5000);
 }
 
-// Auto-initialize scheduler when the route is loaded
 initScheduler();
 
 export default router;

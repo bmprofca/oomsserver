@@ -25,6 +25,45 @@ function newId(prefix) {
     return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
+/**
+ * Write a payment-reminder run into the shared autopay_logs table
+ * (manual email send + auto reminder share one log store).
+ */
+async function insertReminderLog({
+    branch_id,
+    username,
+    status,
+    message,
+    error_message = null,
+    details = null,
+    sent_count = 0,
+    skipped_count = 0,
+    failed_count = 0,
+    reminder_id = null,
+}) {
+    const log_id = newId("apl");
+    await pool.query(
+        `INSERT INTO autopay_logs
+         (log_id, reminder_id, username, branch_id, status, message, error_message, details,
+          sent_count, skipped_count, failed_count, run_date, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+            log_id,
+            reminder_id,
+            username || null,
+            branch_id,
+            status,
+            message || null,
+            error_message,
+            details != null ? JSON.stringify(details) : null,
+            sent_count,
+            skipped_count,
+            failed_count,
+        ]
+    );
+    return log_id;
+}
+
 function parseJSON(value, fallback) {
     if (!value) return fallback;
     try { return JSON.parse(value); } catch { return fallback; }
@@ -113,12 +152,12 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
         const [reminderStats] = await pool.query(
             `SELECT 
                 COUNT(*) as total_reminders,
-                SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as total_sent,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as total_sent,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as total_failed,
-                DATE_FORMAT(sent_at, '%Y-%m') as month
-             FROM payment_reminder_logs
+                DATE_FORMAT(run_date, '%Y-%m') as month
+             FROM autopay_logs
              WHERE branch_id = ?
-             GROUP BY DATE_FORMAT(sent_at, '%Y-%m')
+             GROUP BY DATE_FORMAT(run_date, '%Y-%m')
              ORDER BY month DESC
              LIMIT 6`,
             [branch_id]
@@ -126,10 +165,10 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
 
         const [todayReminders] = await pool.query(
             `SELECT COUNT(*) as total, 
-                    SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as sent,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-             FROM payment_reminder_logs
-             WHERE branch_id = ? AND DATE(sent_at) = CURDATE()`,
+             FROM autopay_logs
+             WHERE branch_id = ? AND DATE(run_date) = CURDATE()`,
             [branch_id]
         );
 
@@ -157,8 +196,8 @@ router.get("/payment-reminder/stats", auth, validateBranch, async (req, res) => 
 
         return ok(res, "Payment reminder statistics", {
             overview: {
-                total_reminders_sent: reminderStats.reduce((sum, r) => sum + r.total_sent, 0),
-                total_reminders_failed: reminderStats.reduce((sum, r) => sum + r.total_failed, 0),
+                total_reminders_sent: reminderStats.reduce((sum, r) => sum + Number(r.total_sent || 0), 0),
+                total_reminders_failed: reminderStats.reduce((sum, r) => sum + Number(r.total_failed || 0), 0),
                 today_sent: todayReminders[0]?.sent || 0,
                 today_failed: todayReminders[0]?.failed || 0
             },
@@ -521,29 +560,21 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
 
         const sendResult = await sendEmail(smtpConfig, user.email, subject, htmlBody, textBody);
 
-        // Create payment_reminder_logs table if not exists
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS payment_reminder_logs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                log_id VARCHAR(50) NOT NULL UNIQUE,
-                branch_id VARCHAR(50),
-                username VARCHAR(100),
-                email VARCHAR(255),
-                balance_debit DECIMAL(15,2),
-                template_id VARCHAR(50),
-                status VARCHAR(20),
-                message_id VARCHAR(255),
-                error_message TEXT,
-                sent_at DATETIME
-            )
-        `);
-
-        await pool.query(
-            `INSERT INTO payment_reminder_logs 
-             (log_id, branch_id, username, email, balance_debit, template_id, status, message_id, sent_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, NOW())`,
-            [newId("prl"), branch_id, username, user.email, balanceData.debit, template.template_id, sendResult.messageId]
-        );
+        await insertReminderLog({
+            branch_id,
+            username,
+            status: "completed",
+            message: "Manual email payment reminder sent",
+            details: {
+                source: "email_payment_reminder_send",
+                email: user.email,
+                balance_debit: balanceData.debit,
+                template_id: template.template_id,
+                message_id: sendResult.messageId || null,
+                channels: { email: { status: "sent", message_id: sendResult.messageId || null } },
+            },
+            sent_count: 1,
+        });
 
         return ok(res, "Payment reminder sent successfully", {
             username,
@@ -615,6 +646,22 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
 
                 const sendResult = await sendEmail(smtpConfig, user.email, subject, htmlBody, textBody);
 
+                await insertReminderLog({
+                    branch_id,
+                    username,
+                    status: "completed",
+                    message: "Manual bulk email payment reminder sent",
+                    details: {
+                        source: "email_payment_reminder_bulk_send",
+                        email: user.email,
+                        balance_debit: balanceData.debit,
+                        template_id: template.template_id,
+                        message_id: sendResult.messageId || null,
+                        channels: { email: { status: "sent", message_id: sendResult.messageId || null } },
+                    },
+                    sent_count: 1,
+                });
+
                 results.sent++;
                 results.details.push({
                     username,
@@ -630,6 +677,17 @@ router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res
                 console.error(`Error sending to ${username}:`, error);
                 results.failed++;
                 results.details.push({ username, status: "failed", reason: error.message });
+                try {
+                    await insertReminderLog({
+                        branch_id,
+                        username,
+                        status: "failed",
+                        message: "Manual bulk email payment reminder failed",
+                        error_message: error.message,
+                        details: { source: "email_payment_reminder_bulk_send" },
+                        failed_count: 1,
+                    });
+                } catch (_) { /* ignore logging errors */ }
             }
         }
 
@@ -732,7 +790,7 @@ router.get("/payment-reminder/users-list", auth, validateBranch, async (req, res
 });
 
 /**
- * Get payment reminder logs
+ * Get payment reminder logs (shared store: autopay_logs)
  * GET /api/email/payment-reminder/logs
  */
 router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
@@ -745,8 +803,9 @@ router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
         const status = req.query.status;
 
         let query = `
-            SELECT log_id, username, email, balance_debit, status, message_id, error_message, sent_at
-            FROM payment_reminder_logs
+            SELECT log_id, username, status, message, error_message, details,
+                   sent_count, skipped_count, failed_count, run_date AS sent_at, completed_at
+            FROM autopay_logs
             WHERE branch_id = ?
         `;
         const params = [branch_id];
@@ -756,25 +815,45 @@ router.get("/payment-reminder/logs", auth, validateBranch, async (req, res) => {
             params.push(username);
         }
 
-        if (status && ['sent', 'failed'].includes(status)) {
-            query += ` AND status = ?`;
-            params.push(status);
+        if (status) {
+            const normalized =
+                status === "sent" ? "completed" : String(status).trim().toLowerCase();
+            if (["completed", "failed", "skipped", "pending", "processing"].includes(normalized)) {
+                query += ` AND status = ?`;
+                params.push(normalized);
+            }
         }
 
-        query += ` ORDER BY sent_at DESC LIMIT ? OFFSET ?`;
+        query += ` ORDER BY run_date DESC LIMIT ? OFFSET ?`;
         params.push(limit, offset);
 
         const [logs] = await pool.query(query, params);
+        logs.forEach((log) => {
+            try {
+                log.details = typeof log.details === "string" ? JSON.parse(log.details) : (log.details || []);
+            } catch {
+                log.details = [];
+            }
+            // Compatibility aliases for older email-log consumers
+            log.email = log.details?.email || log.details?.[0]?.email || null;
+            log.balance_debit = log.details?.balance_debit ?? log.details?.[0]?.debit ?? null;
+            log.message_id = log.details?.message_id || log.details?.channels?.email?.message_id || null;
+            if (log.status === "completed") log.status = "sent";
+        });
 
-        let countQuery = `SELECT COUNT(*) as total FROM payment_reminder_logs WHERE branch_id = ?`;
+        let countQuery = `SELECT COUNT(*) as total FROM autopay_logs WHERE branch_id = ?`;
         const countParams = [branch_id];
         if (username) {
             countQuery += ` AND username = ?`;
             countParams.push(username);
         }
-        if (status && ['sent', 'failed'].includes(status)) {
-            countQuery += ` AND status = ?`;
-            countParams.push(status);
+        if (status) {
+            const normalized =
+                status === "sent" ? "completed" : String(status).trim().toLowerCase();
+            if (["completed", "failed", "skipped", "pending", "processing"].includes(normalized)) {
+                countQuery += ` AND status = ?`;
+                countParams.push(normalized);
+            }
         }
         const [countRows] = await pool.query(countQuery, countParams);
         const total = countRows[0]?.total || 0;

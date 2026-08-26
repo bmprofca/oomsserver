@@ -1,9 +1,72 @@
 import moment from "moment";
 import pool from "../db.js";
+import { APP_TIMEZONE } from "../utils/timezone.js";
+
+function formatInTimeZone(date, options) {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: APP_TIMEZONE,
+        ...options,
+    }).formatToParts(date instanceof Date ? date : new Date(date));
+    const get = (type) => parts.find((p) => p.type === type)?.value || "00";
+    return { get, parts };
+}
+
+/** Current calendar date in Asia/Kolkata as YYYY-MM-DD */
+const TODAY_DATE = () => {
+    const { get } = formatInTimeZone(new Date(), {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    });
+    return `${get("year")}-${get("month")}-${get("day")}`;
+};
+
+function GENERATE_PASSWORD(length = 8) {
+    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    const numbers = "0123456789";
+    const special = "@#%";
+    const allChars = upper + lower + numbers + special;
+
+    let password = "";
+
+    // Ensure at least one of each type
+    password += upper[Math.floor(Math.random() * upper.length)];
+    password += lower[Math.floor(Math.random() * lower.length)];
+    password += numbers[Math.floor(Math.random() * numbers.length)];
+    password += special[Math.floor(Math.random() * special.length)];
+
+    while (password.length < length) {
+        password += allChars[Math.floor(Math.random() * allChars.length)];
+    }
+
+    password = password.split("").sort(() => Math.random() - 0.5).join("");
+
+    return password;
+}
+
+function IS_STRONG_PASSWORD(password) {
+    const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    return regex.test(password);
+}
+
+/** Current timestamp in Asia/Kolkata as YYYY-MM-DD HH:mm:ss */
+function TIMESTAMP() {
+    const { get } = formatInTimeZone(new Date(), {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+    });
+    return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}
 
 const RANDOM_STRING = (length = 30) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
     if (!length || length < 1) {
         return letters.charAt(Math.floor(Math.random() * letters.length));
@@ -89,43 +152,6 @@ const FORMAT_DATE = (date) => {
 }
 
 
-const TODAY_DATE = () => {
-    return moment().format("YYYY-MM-DD")
-}
-
-function GENERATE_PASSWORD(length = 8) {
-    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const lower = "abcdefghijklmnopqrstuvwxyz";
-    const numbers = "0123456789";
-    const special = "@#%";
-    const allChars = upper + lower + numbers + special;
-
-    let password = "";
-
-    // Ensure at least one of each type
-    password += upper[Math.floor(Math.random() * upper.length)];
-    password += lower[Math.floor(Math.random() * lower.length)];
-    password += numbers[Math.floor(Math.random() * numbers.length)];
-    password += special[Math.floor(Math.random() * special.length)];
-
-    while (password.length < length) {
-        password += allChars[Math.floor(Math.random() * allChars.length)];
-    }
-
-    password = password.split("").sort(() => Math.random() - 0.5).join("");
-
-    return password;
-}
-
-function IS_STRONG_PASSWORD(password) {
-    const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-    return regex.test(password);
-}
-
-function TIMESTAMP() {
-    return moment().format("YYYY-MM-DD HH:mm:ss");
-}
-
 async function USER_DATA(username = '') {
     const [row] = await pool.query("SELECT * FROM profile WHERE username = ? AND status = '1' ORDER BY id DESC LIMIT 1", [username]);
     if (row.length == 1) {
@@ -142,7 +168,7 @@ async function SET_OPENING_BALANCE({
     party_id = "",
     amount = 0,
     remark = "",
-    transaction_date = moment().format("YYYY-MM-DD")
+    transaction_date = TODAY_DATE()
 }) {
     const username = req?.headers["username"] || "";
     const branch_id = req?.branch_id || "";
@@ -214,7 +240,7 @@ async function EDIT_OPENING_BALANCE({
     party_id = "",
     amount = 0,
     remark = "",
-    transaction_date = moment().format("YYYY-MM-DD")
+    transaction_date = TODAY_DATE()
 }) {
     const username = req?.headers["username"] || req?.headers["Username"] || "";
     const branch_id = req?.branch_id || "";

@@ -246,8 +246,189 @@ function formatFinancialYearShortLabel(fyLabel) {
     return `FY ${start}-${String(end).slice(-2)}`;
 }
 
+function parseMonthQuery(monthQuery) {
+    if (monthQuery == null || String(monthQuery).trim() === "") return null;
+    const month = Number(monthQuery);
+    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+    return month;
+}
+
+/**
+ * Resolve a calendar month inside an Indian FY (Apr–Mar).
+ * month: 1–12. Apr–Dec → start year; Jan–Mar → end year.
+ */
+function resolveMonthRangeWithinFinancialYear(fyLabel, month) {
+    const fy = parseFinancialYearLabel(fyLabel);
+    if (!fy || !month) return null;
+
+    const startYear = Number(fy.label.split("-")[0]);
+    const endYear = startYear + 1;
+    const calendarYear = month >= 4 ? startYear : endYear;
+    const paddedMonth = String(month).padStart(2, "0");
+    const startDate = `${calendarYear}-${paddedMonth}-01`;
+    const lastDay = new Date(calendarYear, month, 0).getDate();
+    const endDate = `${calendarYear}-${paddedMonth}-${String(lastDay).padStart(2, "0")}`;
+
+    return {
+        month,
+        calendarYear,
+        startDate,
+        endDate,
+        label: formatMonthYearLabel(calendarYear, month),
+        key: `${calendarYear}-${paddedMonth}`,
+    };
+}
+
+function getPreviousCalendarMonthRange(calendarYear, month) {
+    let prevYear = calendarYear;
+    let prevMonth = month - 1;
+    if (prevMonth < 1) {
+        prevMonth = 12;
+        prevYear -= 1;
+    }
+    const paddedMonth = String(prevMonth).padStart(2, "0");
+    const startDate = `${prevYear}-${paddedMonth}-01`;
+    const lastDay = new Date(prevYear, prevMonth, 0).getDate();
+    const endDate = `${prevYear}-${paddedMonth}-${String(lastDay).padStart(2, "0")}`;
+    return {
+        month: prevMonth,
+        calendarYear: prevYear,
+        startDate,
+        endDate,
+        label: formatMonthYearLabel(prevYear, prevMonth),
+        key: `${prevYear}-${paddedMonth}`,
+    };
+}
+
+function formatMonthYearLabel(year, month) {
+    const names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    return `${names[month - 1]} ${year}`;
+}
+
+async function fetchSalesOverviewForDateRange(branch_id, startDate, endDate) {
+    const [salesRows] = await pool.query(
+        `SELECT
+            COUNT(DISTINCT i.invoice_id) AS invoice_count,
+            COALESCE(SUM(i.grand_total), 0) AS sale_amount,
+            COALESCE(SUM(
+                GREATEST(
+                    0,
+                    i.total
+                    - GREATEST(0, i.subtotal - COALESCE(i.discount_value, 0))
+                    - COALESCE(i.additional_charge, 0)
+                )
+            ), 0) AS gst_amount,
+            COUNT(DISTINCT CASE
+                WHEN CAST(se.is_task AS CHAR) = '1'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                THEN se.sale_id
+                ELSE NULL
+            END) AS task_sale_count,
+            COUNT(DISTINCT CASE
+                WHEN CAST(se.is_task AS CHAR) = '1'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                THEN se.sale_id
+                ELSE NULL
+            END) AS breakdown_task_count,
+            COALESCE(SUM(CASE
+                WHEN CAST(se.is_task AS CHAR) = '1'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                THEN COALESCE(se.total, 0)
+                ELSE 0
+            END), 0) AS breakdown_task_amount,
+            COUNT(DISTINCT CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                THEN se.sale_id
+                ELSE NULL
+            END) AS breakdown_client_count,
+            COALESCE(SUM(CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'client'
+                THEN COALESCE(se.total, 0)
+                ELSE 0
+            END), 0) AS breakdown_client_amount,
+            COUNT(DISTINCT CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'bank'
+                THEN se.sale_id
+                ELSE NULL
+            END) AS breakdown_bank_count,
+            COALESCE(SUM(CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) = 'bank'
+                THEN COALESCE(se.total, 0)
+                ELSE 0
+            END), 0) AS breakdown_bank_amount,
+            COUNT(DISTINCT CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
+                THEN se.sale_id
+                ELSE NULL
+            END) AS breakdown_other_count,
+            COALESCE(SUM(CASE
+                WHEN CAST(se.is_task AS CHAR) = '0'
+                     AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
+                THEN COALESCE(se.total, 0)
+                ELSE 0
+            END), 0) AS breakdown_other_amount
+         FROM invoice i
+         INNER JOIN sale_entries se
+            ON se.invoice_id = i.invoice_id
+            AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+         WHERE i.branch_id = ?
+           AND i.type = 'sale'
+           AND DATE(se.sale_date) BETWEEN ? AND ?`,
+        [branch_id, startDate, endDate]
+    );
+
+    const row = salesRows[0] || {};
+    return {
+        invoice_count: parseInt(row.invoice_count || 0, 10),
+        sale_amount: parseFloat(row.sale_amount || 0),
+        gst_amount: parseFloat(row.gst_amount || 0),
+        task_sale_count: parseInt(row.task_sale_count || 0, 10),
+        sale_breakdown: {
+            task: {
+                count: parseInt(row.breakdown_task_count || 0, 10),
+                amount: parseFloat(row.breakdown_task_amount || 0),
+            },
+            client: {
+                count: parseInt(row.breakdown_client_count || 0, 10),
+                amount: parseFloat(row.breakdown_client_amount || 0),
+            },
+            bank: {
+                count: parseInt(row.breakdown_bank_count || 0, 10),
+                amount: parseFloat(row.breakdown_bank_amount || 0),
+            },
+            other: {
+                count: parseInt(row.breakdown_other_count || 0, 10),
+                amount: parseFloat(row.breakdown_other_amount || 0),
+            },
+        },
+    };
+}
+
+async function fetchSaleAmountForDateRange(branch_id, startDate, endDate) {
+    const [rows] = await pool.query(
+        `SELECT COALESCE(SUM(i.grand_total), 0) AS sale_amount
+         FROM invoice i
+         INNER JOIN sale_entries se
+            ON se.invoice_id = i.invoice_id
+            AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
+         WHERE i.branch_id = ?
+           AND i.type = 'sale'
+           AND DATE(se.sale_date) BETWEEN ? AND ?`,
+        [branch_id, startDate, endDate]
+    );
+    return parseFloat(rows[0]?.sale_amount || 0);
+}
 
 // Dashboard Summary API - Sales Overview metrics for selected financial year
+// Optional month (1-12) scopes to that month within the FY and compares vs previous month.
 router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
@@ -269,131 +450,73 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
         }
 
         const { label: financialYear, fyStartDate, fyEndDate } = fyRange;
+        const selectedMonth = parseMonthQuery(req.query.month);
 
-        const [salesRows] = await pool.query(
-            `SELECT
-                COUNT(DISTINCT i.invoice_id) AS invoice_count,
-                COALESCE(SUM(i.grand_total), 0) AS sale_amount,
-                COALESCE(SUM(
-                    GREATEST(
-                        0,
-                        i.total
-                        - GREATEST(0, i.subtotal - COALESCE(i.discount_value, 0))
-                        - COALESCE(i.additional_charge, 0)
-                    )
-                ), 0) AS gst_amount,
-                COUNT(DISTINCT CASE
-                    WHEN CAST(se.is_task AS CHAR) = '1'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
-                    THEN se.sale_id
-                    ELSE NULL
-                END) AS task_sale_count,
-                COUNT(DISTINCT CASE
-                    WHEN CAST(se.is_task AS CHAR) = '1'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
-                    THEN se.sale_id
-                    ELSE NULL
-                END) AS breakdown_task_count,
-                COALESCE(SUM(CASE
-                    WHEN CAST(se.is_task AS CHAR) = '1'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
-                    THEN COALESCE(se.total, 0)
-                    ELSE 0
-                END), 0) AS breakdown_task_amount,
-                COUNT(DISTINCT CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
-                    THEN se.sale_id
-                    ELSE NULL
-                END) AS breakdown_client_count,
-                COALESCE(SUM(CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'client'
-                    THEN COALESCE(se.total, 0)
-                    ELSE 0
-                END), 0) AS breakdown_client_amount,
-                COUNT(DISTINCT CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'bank'
-                    THEN se.sale_id
-                    ELSE NULL
-                END) AS breakdown_bank_count,
-                COALESCE(SUM(CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) = 'bank'
-                    THEN COALESCE(se.total, 0)
-                    ELSE 0
-                END), 0) AS breakdown_bank_amount,
-                COUNT(DISTINCT CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
-                    THEN se.sale_id
-                    ELSE NULL
-                END) AS breakdown_other_count,
-                COALESCE(SUM(CASE
-                    WHEN CAST(se.is_task AS CHAR) = '0'
-                         AND LOWER(COALESCE(se.party_type, '')) NOT IN ('client', 'bank')
-                    THEN COALESCE(se.total, 0)
-                    ELSE 0
-                END), 0) AS breakdown_other_amount
-             FROM invoice i
-             INNER JOIN sale_entries se
-                ON se.invoice_id = i.invoice_id
-                AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
-             WHERE i.branch_id = ?
-               AND i.type = 'sale'
-               AND DATE(se.sale_date) BETWEEN ? AND ?`,
-            [branch_id, fyStartDate, fyEndDate]
+        if (req.query.month != null && String(req.query.month).trim() !== "" && !selectedMonth) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid month. Expected 1–12",
+            });
+        }
+
+        let periodType = "financial_year";
+        let rangeStart = fyStartDate;
+        let rangeEnd = fyEndDate;
+        let periodLabel = formatFinancialYearShortLabel(financialYear);
+        let monthMeta = null;
+
+        if (selectedMonth) {
+            monthMeta = resolveMonthRangeWithinFinancialYear(financialYear, selectedMonth);
+            if (!monthMeta) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Unable to resolve month within financial year",
+                });
+            }
+            periodType = "month";
+            rangeStart = monthMeta.startDate;
+            rangeEnd = monthMeta.endDate;
+            periodLabel = monthMeta.label;
+        }
+
+        const currentStats = await fetchSalesOverviewForDateRange(
+            branch_id,
+            rangeStart,
+            rangeEnd
         );
 
-        const row = salesRows[0] || {};
-        const invoiceCount = parseInt(row.invoice_count || 0, 10);
-        const saleAmount = parseFloat(row.sale_amount || 0);
-        const gstAmount = parseFloat(row.gst_amount || 0);
-        const taskSaleCount = parseInt(row.task_sale_count || 0, 10);
+        let previousPeriodKey = null;
+        let previousPeriodLabel = null;
+        let previousPeriodSaleAmount = 0;
 
-        const saleBreakdown = {
-            task: {
-                count: parseInt(row.breakdown_task_count || 0, 10),
-                amount: parseFloat(row.breakdown_task_amount || 0),
-            },
-            client: {
-                count: parseInt(row.breakdown_client_count || 0, 10),
-                amount: parseFloat(row.breakdown_client_amount || 0),
-            },
-            bank: {
-                count: parseInt(row.breakdown_bank_count || 0, 10),
-                amount: parseFloat(row.breakdown_bank_amount || 0),
-            },
-            other: {
-                count: parseInt(row.breakdown_other_count || 0, 10),
-                amount: parseFloat(row.breakdown_other_amount || 0),
-            },
-        };
-
-        const previousFyRange = getPreviousFinancialYearRange(financialYear);
-        let previousFySaleAmount = 0;
-        let previousFinancialYear = null;
-
-        if (previousFyRange) {
-            previousFinancialYear = previousFyRange.label;
-            const [previousRows] = await pool.query(
-                `SELECT COALESCE(SUM(i.grand_total), 0) AS sale_amount
-                 FROM invoice i
-                 INNER JOIN sale_entries se
-                    ON se.invoice_id = i.invoice_id
-                    AND CAST(se.branch_id AS CHAR) = CAST(i.branch_id AS CHAR)
-                 WHERE i.branch_id = ?
-                   AND i.type = 'sale'
-                   AND DATE(se.sale_date) BETWEEN ? AND ?`,
-                [branch_id, previousFyRange.fyStartDate, previousFyRange.fyEndDate]
+        if (periodType === "month" && monthMeta) {
+            const previousMonth = getPreviousCalendarMonthRange(
+                monthMeta.calendarYear,
+                monthMeta.month
             );
-            previousFySaleAmount = parseFloat(previousRows[0]?.sale_amount || 0);
+            previousPeriodKey = previousMonth.key;
+            previousPeriodLabel = previousMonth.label;
+            previousPeriodSaleAmount = await fetchSaleAmountForDateRange(
+                branch_id,
+                previousMonth.startDate,
+                previousMonth.endDate
+            );
+        } else {
+            const previousFyRange = getPreviousFinancialYearRange(financialYear);
+            if (previousFyRange) {
+                previousPeriodKey = previousFyRange.label;
+                previousPeriodLabel = formatFinancialYearShortLabel(previousFyRange.label);
+                previousPeriodSaleAmount = await fetchSaleAmountForDateRange(
+                    branch_id,
+                    previousFyRange.fyStartDate,
+                    previousFyRange.fyEndDate
+                );
+            }
         }
 
         const saleAmountGrowthPercent = computeSaleAmountGrowthPercent(
-            saleAmount,
-            previousFySaleAmount
+            currentStats.sale_amount,
+            previousPeriodSaleAmount
         );
 
         const formatCurrency = (amount) => {
@@ -409,31 +532,39 @@ router.get("/dashboard-summary-core", auth, validateBranch, async (req, res) => 
             success: true,
             message: "Sales overview retrieved successfully",
             data: {
+                period_type: periodType,
+                period_label: periodLabel,
                 financial_year: financialYear,
+                month: selectedMonth,
                 fy_start_date: fyStartDate,
                 fy_end_date: fyEndDate,
-                invoice_count: invoiceCount,
-                sale_amount: saleAmount,
-                gst_amount: gstAmount,
-                task_sale_count: taskSaleCount,
-                sale_breakdown: saleBreakdown,
-                previous_financial_year: previousFinancialYear,
-                previous_fy_sale_amount: previousFySaleAmount,
+                period_start_date: rangeStart,
+                period_end_date: rangeEnd,
+                invoice_count: currentStats.invoice_count,
+                sale_amount: currentStats.sale_amount,
+                gst_amount: currentStats.gst_amount,
+                task_sale_count: currentStats.task_sale_count,
+                sale_breakdown: currentStats.sale_breakdown,
+                // FY-compat fields (also used for monthly comparison labels)
+                previous_financial_year: previousPeriodKey,
+                previous_fy_sale_amount: previousPeriodSaleAmount,
+                previous_period_key: previousPeriodKey,
+                previous_period_sale_amount: previousPeriodSaleAmount,
                 sale_amount_growth_percent: saleAmountGrowthPercent,
                 formatted: {
-                    invoice_count: invoiceCount.toLocaleString('en-IN'),
-                    sale_amount: formatCurrency(saleAmount),
-                    gst_amount: formatCurrency(gstAmount),
-                    task_sale_count: taskSaleCount.toLocaleString('en-IN'),
-                    previous_fy_sale_amount: formatCurrency(previousFySaleAmount),
-                    previous_fy_label: previousFinancialYear
-                        ? formatFinancialYearShortLabel(previousFinancialYear)
-                        : null,
+                    invoice_count: currentStats.invoice_count.toLocaleString('en-IN'),
+                    sale_amount: formatCurrency(currentStats.sale_amount),
+                    gst_amount: formatCurrency(currentStats.gst_amount),
+                    task_sale_count: currentStats.task_sale_count.toLocaleString('en-IN'),
+                    previous_fy_sale_amount: formatCurrency(previousPeriodSaleAmount),
+                    previous_fy_label: previousPeriodLabel,
+                    previous_period_label: previousPeriodLabel,
+                    period_label: periodLabel,
                     sale_amount_growth_percent: saleAmountGrowthPercent == null
                         ? null
                         : `${saleAmountGrowthPercent > 0 ? '+' : ''}${saleAmountGrowthPercent}%`,
                     sale_breakdown: Object.fromEntries(
-                        Object.entries(saleBreakdown).map(([key, value]) => [
+                        Object.entries(currentStats.sale_breakdown).map(([key, value]) => [
                             key,
                             {
                                 count: value.count.toLocaleString('en-IN'),

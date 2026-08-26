@@ -1,5 +1,7 @@
+import "./utils/timezone.js";
 import "dotenv/config";
 import mysql from "mysql2/promise";
+import { MYSQL_SESSION_TIME_ZONE } from "./utils/timezone.js";
 
 const TRANSIENT_DB_ERRORS = new Set([
     "ETIMEDOUT",
@@ -24,6 +26,8 @@ const pool = mysql.createPool({
     queueLimit: 0,
     charset: "utf8mb4",
     dateStrings: true,
+    // Align JS Date <-> MySQL conversion with IST wall clock.
+    timezone: MYSQL_SESSION_TIME_ZONE,
     connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT) || 20000,
     enableKeepAlive: true,
     keepAliveInitialDelay: Number(process.env.DB_KEEPALIVE_DELAY_MS) || 10000,
@@ -54,23 +58,36 @@ export function releasePoolConnection(conn, error) {
     }
 }
 
+async function applySessionTimezone(conn) {
+    if (!conn || conn.__oomsIstTz) return;
+    await conn.query(`SET time_zone = '${MYSQL_SESSION_TIME_ZONE}'`);
+    conn.__oomsIstTz = true;
+}
+
 function wrapPoolWithRetry(basePool, { retries, delayMs } = {}) {
     const maxRetries = retries ?? (Number(process.env.DB_QUERY_RETRIES) || 3);
     const retryDelayMs = delayMs ?? (Number(process.env.DB_QUERY_RETRY_DELAY_MS) || 1500);
 
-    const originalQuery = basePool.query.bind(basePool);
     const originalExecute = basePool.execute?.bind(basePool);
     const originalGetConnection = basePool.getConnection.bind(basePool);
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+    // Always checkout a connection and force IST session timezone so NOW() /
+    // CURRENT_TIMESTAMP match Indian wall clock without changing host DB TZ.
     basePool.query = async function queryWithRetry(sql, params) {
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            let conn;
             try {
-                return await originalQuery(sql, params);
+                conn = await originalGetConnection();
+                await applySessionTimezone(conn);
+                const result = await conn.query(sql, params);
+                releasePoolConnection(conn);
+                return result;
             } catch (error) {
                 lastError = error;
+                releasePoolConnection(conn, error);
                 if (!isTransientDbError(error) || attempt === maxRetries) {
                     throw error;
                 }
@@ -84,10 +101,16 @@ function wrapPoolWithRetry(basePool, { retries, delayMs } = {}) {
         basePool.execute = async function executeWithRetry(sql, params) {
             let lastError;
             for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                let conn;
                 try {
-                    return await originalExecute(sql, params);
+                    conn = await originalGetConnection();
+                    await applySessionTimezone(conn);
+                    const result = await conn.execute(sql, params);
+                    releasePoolConnection(conn);
+                    return result;
                 } catch (error) {
                     lastError = error;
+                    releasePoolConnection(conn, error);
                     if (!isTransientDbError(error) || attempt === maxRetries) {
                         throw error;
                     }
@@ -106,6 +129,7 @@ function wrapPoolWithRetry(basePool, { retries, delayMs } = {}) {
             try {
                 conn = await originalGetConnection();
                 await conn.ping();
+                await applySessionTimezone(conn);
                 return conn;
             } catch (error) {
                 lastError = error;
@@ -125,6 +149,10 @@ function wrapPoolWithRetry(basePool, { retries, delayMs } = {}) {
 wrapPoolWithRetry(pool);
 
 pool.on("connection", (connection) => {
+    // Best-effort early set; query/getConnection wrappers also enforce IST.
+    connection.query(`SET time_zone = '${MYSQL_SESSION_TIME_ZONE}'`, (err) => {
+        if (!err) connection.__oomsIstTz = true;
+    });
     connection.on("error", (err) => {
         console.warn("MySQL pooled connection error:", err?.code || err?.message || err);
     });

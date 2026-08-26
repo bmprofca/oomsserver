@@ -1,3 +1,4 @@
+import "./utils/timezone.js";
 import "dotenv/config";
 import express from "express";
 import path from "path";
