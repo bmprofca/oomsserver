@@ -39,7 +39,8 @@ async function fetchLatestProfilesWithMobile(branchId, { usernames = null } = {}
             c.username,
             p.id AS profile_id,
             p.name,
-            p.mobile
+            p.mobile,
+            p.email
          FROM clients c
          INNER JOIN profile p
             ON p.username = c.username
@@ -95,6 +96,7 @@ export async function resolveSmsCampaignRecipients(branchId, audience = {}) {
                 mobile,
                 name: String(row.name || "").trim() || mobile,
                 username: String(row.username || "").trim(),
+                email: String(row.email || "").trim(),
                 profile_id: Number(row.profile_id) || 0,
             },
             meta
@@ -142,7 +144,8 @@ export async function resolveSmsCampaignRecipients(branchId, audience = {}) {
                 p.username,
                 p.id AS profile_id,
                 p.name,
-                p.mobile
+                p.mobile,
+                p.email
              FROM groups g
              INNER JOIN group_firms gf
                 ON gf.group_id = g.group_id
@@ -216,7 +219,8 @@ export async function resolveSmsCampaignRecipients(branchId, audience = {}) {
                 p.username,
                 p.id AS profile_id,
                 p.name,
-                p.mobile
+                p.mobile,
+                p.email
             FROM tasks t
             INNER JOIN firms f
                ON f.firm_id = t.firm_id

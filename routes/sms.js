@@ -413,7 +413,9 @@ router.get("/fast2sms/campaign/details", auth, validateBranch, async (req, res) 
         if (!campaign_id) {
             return res.status(400).json({ success: false, message: "campaign_id is required" });
         }
-        const data = await fast2smsService.getCampaignDetails(req.branch_id, campaign_id);
+        const data = await fast2smsService.getCampaignDetails(req.branch_id, campaign_id, {
+            includePreview: true,
+        });
         return res.status(200).json({
             success: true,
             message: "Campaign details retrieved successfully",
@@ -422,6 +424,58 @@ router.get("/fast2sms/campaign/details", auth, validateBranch, async (req, res) 
     } catch (error) {
         console.error("GET FAST2SMS CAMPAIGN DETAILS ERROR:", error);
         return httpError(res, error, "Failed to fetch campaign details");
+    }
+});
+
+router.get("/fast2sms/campaign/message-detail", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.query.campaign_id || "").trim();
+        const message_id = String(req.query.message_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        if (!message_id) {
+            return res.status(400).json({ success: false, message: "message_id is required" });
+        }
+        const data = await fast2smsService.getCampaignMessageDetail(
+            req.branch_id,
+            campaign_id,
+            message_id
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Message details retrieved successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("GET FAST2SMS CAMPAIGN MESSAGE DETAIL ERROR:", error);
+        return httpError(res, error, "Failed to fetch message details");
+    }
+});
+
+router.post("/fast2sms/campaign/message-retry", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.body?.campaign_id || "").trim();
+        const message_id = String(req.body?.message_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        if (!message_id) {
+            return res.status(400).json({ success: false, message: "message_id is required" });
+        }
+        const data = await fast2smsService.retryCampaignMessage(
+            req.branch_id,
+            campaign_id,
+            message_id
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Message resent successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("POST FAST2SMS CAMPAIGN MESSAGE RETRY ERROR:", error);
+        return httpError(res, error, "Failed to retry message");
     }
 });
 

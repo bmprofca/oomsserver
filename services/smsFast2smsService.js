@@ -6,6 +6,11 @@ import { TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
 import { normalizeFast2SmsRoute } from "../helpers/fast2sms.js";
 import { sendFast2Sms } from "../helpers/fast2smsSend.js";
 import { resolveSmsCampaignRecipients } from "../helpers/smsCampaignRecipients.js";
+import {
+    resolveSmsVariablesValuesForRecipient,
+    variablesTemplateHasPlaceholders,
+    buildSmsPreviewForRecipient,
+} from "../helpers/smsCampaignVariables.js";
 
 function newShortId(prefix) {
     return `${prefix}${crypto.randomBytes(8).toString("hex")}`;
@@ -28,6 +33,22 @@ function parseVariableKeys(raw) {
         .filter(Boolean);
 }
 
+/**
+ * Count Fast2SMS / DLT `{#var#}` placeholders in message body and
+ * return ordered keys: variable_1, variable_2, ...
+ */
+export function deriveVariableKeysFromMessageBody(messageBody) {
+    const text = String(messageBody || "");
+    const matches = text.match(/\{#\s*var\s*#\}/gi) || [];
+    return matches.map((_, index) => `variable_${index + 1}`);
+}
+
+function resolveTemplateVariableKeys(row) {
+    const fromBody = deriveVariableKeysFromMessageBody(row?.message_body);
+    if (fromBody.length) return fromBody;
+    return parseVariableKeys(row?.variable_keys);
+}
+
 function serializeTemplate(row) {
     if (!row) return null;
     return {
@@ -36,7 +57,7 @@ function serializeTemplate(row) {
         name: row.name,
         dlt_message_id: row.dlt_message_id || "",
         message_body: row.message_body || "",
-        variable_keys: parseVariableKeys(row.variable_keys),
+        variable_keys: resolveTemplateVariableKeys(row),
         sender_id: row.sender_id || "",
         route: normalizeFast2SmsRoute(row.route),
         status: row.status || "active",
@@ -112,7 +133,7 @@ export async function createTemplate(branch_id, username, body = {}) {
     const dlt_message_id = String(body.dlt_message_id || "").trim();
     const message_body = String(body.message_body || "").trim();
     const sender_id = String(body.sender_id || "").trim().toUpperCase();
-    const variable_keys = parseVariableKeys(body.variable_keys);
+    const variable_keys = deriveVariableKeysFromMessageBody(message_body);
 
     if ((route === "dlt" || route === "otp") && !dlt_message_id) {
         throw Object.assign(new Error("dlt_message_id is required for DLT/OTP routes"), {
@@ -179,10 +200,7 @@ export async function updateTemplate(branch_id, username, body = {}) {
     const sender_id = String(body.sender_id ?? existingRows[0].sender_id ?? "")
         .trim()
         .toUpperCase();
-    const variable_keys =
-        body.variable_keys != null
-            ? parseVariableKeys(body.variable_keys)
-            : parseVariableKeys(existingRows[0].variable_keys);
+    const variable_keys = deriveVariableKeysFromMessageBody(message_body);
     const status = body.status != null ? String(body.status).trim() : existingRows[0].status;
 
     await pool.query(
@@ -355,7 +373,11 @@ export async function listCampaigns(branch_id, { page_no = 1, limit = 20, status
     };
 }
 
-export async function getCampaignDetails(branch_id, campaign_id) {
+export async function getCampaignDetails(
+    branch_id,
+    campaign_id,
+    { includePreview = false } = {}
+) {
     const [rows] = await pool.query(
         `SELECT * FROM sms_fast2sms_campaigns
          WHERE campaign_id = ? AND branch_id = ?
@@ -372,7 +394,245 @@ export async function getCampaignDetails(branch_id, campaign_id) {
     } catch {
         audience = null;
     }
-    return { ...campaign, audience };
+
+    if (!includePreview) {
+        return { ...campaign, audience };
+    }
+
+    const [firstRows] = await pool.query(
+        `SELECT message_id, mobile, name, username, status, sent_at, create_date
+         FROM sms_fast2sms_campaign_messages
+         WHERE campaign_id = ? AND branch_id = ?
+         ORDER BY id ASC
+         LIMIT 1`,
+        [campaign_id, branch_id]
+    );
+    const first = firstRows[0] || null;
+    let preview = null;
+    if (first) {
+        try {
+            const built = await buildSmsPreviewForRecipient(
+                branch_id,
+                {
+                    message_body: campaign.message_body,
+                    variables_values: campaign.variables_values,
+                },
+                {
+                    username: first.username,
+                    name: first.name,
+                    mobile: first.mobile,
+                }
+            );
+            preview = {
+                message_id: first.message_id,
+                mobile: first.mobile,
+                name: first.name,
+                username: first.username,
+                ...built,
+            };
+        } catch {
+            preview = {
+                message_id: first.message_id,
+                mobile: first.mobile,
+                name: first.name,
+                username: first.username,
+                preview_text: campaign.message_body || "",
+                resolved_variables_values: campaign.variables_values || "",
+                variable_parts: String(campaign.variables_values || "").split("|"),
+            };
+        }
+    }
+
+    return { ...campaign, audience, preview };
+}
+
+export async function getCampaignMessageDetail(branch_id, campaign_id, message_id) {
+    const campaign = await getCampaignDetails(branch_id, campaign_id);
+    const msgId = String(message_id || "").trim();
+    if (!msgId) {
+        throw Object.assign(new Error("message_id is required"), { status: 400 });
+    }
+
+    const [rows] = await pool.query(
+        `SELECT message_id, mobile, name, username, status, provider_request_id,
+                error_message, sent_at, create_date, modify_date
+         FROM sms_fast2sms_campaign_messages
+         WHERE campaign_id = ? AND branch_id = ? AND message_id = ?
+         LIMIT 1`,
+        [campaign_id, branch_id, msgId]
+    );
+    if (!rows.length) {
+        throw Object.assign(new Error("Message not found"), { status: 404 });
+    }
+    const message = rows[0];
+    const built = await buildSmsPreviewForRecipient(
+        branch_id,
+        {
+            message_body: campaign.message_body,
+            variables_values: campaign.variables_values,
+        },
+        {
+            username: message.username,
+            name: message.name,
+            mobile: message.mobile,
+        }
+    );
+
+    return {
+        campaign: {
+            campaign_id: campaign.campaign_id,
+            name: campaign.name,
+            template_name: campaign.template_name,
+            message_body: campaign.message_body,
+            dlt_message_id: campaign.dlt_message_id,
+            variables_values: campaign.variables_values,
+            route: campaign.route,
+            sender_id: campaign.sender_id,
+        },
+        message,
+        ...built,
+        can_retry: ["failed", "pending"].includes(
+            String(message.status || "").toLowerCase()
+        ),
+    };
+}
+
+async function refreshCampaignCounts(branch_id, campaign_id) {
+    const [[counts]] = await pool.query(
+        `SELECT
+            COUNT(*) AS total_count,
+            SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_count,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count
+         FROM sms_fast2sms_campaign_messages
+         WHERE campaign_id = ? AND branch_id = ?`,
+        [campaign_id, branch_id]
+    );
+    const total = Number(counts?.total_count) || 0;
+    const sent = Number(counts?.sent_count) || 0;
+    const failed = Number(counts?.failed_count) || 0;
+    const pending = Number(counts?.pending_count) || 0;
+    let status = "complete";
+    if (pending > 0 && sent === 0 && failed === 0) status = "pending";
+    else if (pending > 0) status = "processing";
+    else if (failed > 0 && sent === 0) status = "failed";
+    else status = "complete";
+
+    await pool.query(
+        `UPDATE sms_fast2sms_campaigns
+         SET total_count = ?, sent_count = ?, failed_count = ?, status = ?,
+             modify_date = CURRENT_TIMESTAMP
+         WHERE campaign_id = ? AND branch_id = ?`,
+        [total, sent, failed, status, campaign_id, branch_id]
+    );
+    return { total_count: total, sent_count: sent, failed_count: failed, pending_count: pending, status };
+}
+
+/**
+ * Re-send a single failed/pending campaign message.
+ */
+export async function retryCampaignMessage(branch_id, campaign_id, message_id) {
+    const campaign = await getCampaignDetails(branch_id, campaign_id);
+    const msgId = String(message_id || "").trim();
+    if (!msgId) {
+        throw Object.assign(new Error("message_id is required"), { status: 400 });
+    }
+
+    const [rows] = await pool.query(
+        `SELECT message_id, mobile, name, username, status
+         FROM sms_fast2sms_campaign_messages
+         WHERE campaign_id = ? AND branch_id = ? AND message_id = ?
+         LIMIT 1`,
+        [campaign_id, branch_id, msgId]
+    );
+    if (!rows.length) {
+        throw Object.assign(new Error("Message not found"), { status: 404 });
+    }
+    const message = rows[0];
+    const status = String(message.status || "").toLowerCase();
+    if (!["failed", "pending"].includes(status)) {
+        throw Object.assign(
+            new Error("Only failed or pending messages can be retried"),
+            { status: 400 }
+        );
+    }
+
+    const config = await getFast2SmsConfigForSend(branch_id);
+    if (!config) {
+        throw Object.assign(new Error("Fast2SMS is not configured for this branch"), {
+            status: 400,
+        });
+    }
+
+    const route = normalizeFast2SmsRoute(campaign.route || config.route);
+    const senderId = campaign.sender_id || config.sender_id;
+    const messagePayload =
+        route === "dlt" || route === "otp"
+            ? campaign.dlt_message_id
+            : campaign.message_body;
+    const variablesTemplate = campaign.variables_values || "";
+
+    let variablesValues = variablesTemplate;
+    if (variablesTemplateHasPlaceholders(variablesTemplate)) {
+        variablesValues = await resolveSmsVariablesValuesForRecipient(
+            branch_id,
+            variablesTemplate,
+            {
+                username: message.username,
+                name: message.name,
+                mobile: message.mobile,
+            }
+        );
+    }
+
+    await pool.query(
+        `UPDATE sms_fast2sms_campaign_messages
+         SET status = 'pending',
+             error_message = NULL,
+             provider_request_id = NULL,
+             sent_at = NULL,
+             modify_date = CURRENT_TIMESTAMP
+         WHERE message_id = ? AND campaign_id = ? AND branch_id = ?`,
+        [msgId, campaign_id, branch_id]
+    );
+
+    try {
+        const result = await sendFast2Sms({
+            authToken: config.auth_token,
+            route,
+            numbers: [message.mobile],
+            senderId,
+            message: messagePayload,
+            variablesValues,
+            entityId: config.entity_id,
+        });
+        await pool.query(
+            `UPDATE sms_fast2sms_campaign_messages
+             SET status = 'sent',
+                 provider_request_id = ?,
+                 error_message = NULL,
+                 sent_at = CURRENT_TIMESTAMP,
+                 modify_date = CURRENT_TIMESTAMP
+             WHERE message_id = ? AND campaign_id = ? AND branch_id = ?`,
+            [result.request_id || null, msgId, campaign_id, branch_id]
+        );
+    } catch (error) {
+        await pool.query(
+            `UPDATE sms_fast2sms_campaign_messages
+             SET status = 'failed',
+                 error_message = ?,
+                 modify_date = CURRENT_TIMESTAMP
+             WHERE message_id = ? AND campaign_id = ? AND branch_id = ?`,
+            [error.message || "Send failed", msgId, campaign_id, branch_id]
+        );
+        await refreshCampaignCounts(branch_id, campaign_id);
+        throw Object.assign(new Error(error.message || "Retry failed"), {
+            status: 502,
+        });
+    }
+
+    await refreshCampaignCounts(branch_id, campaign_id);
+    return getCampaignMessageDetail(branch_id, campaign_id, msgId);
 }
 
 export async function listCampaignMessages(
@@ -615,7 +875,8 @@ export async function processCampaign(branch_id, campaign_id) {
     );
 
     const [pending] = await pool.query(
-        `SELECT message_id, mobile FROM sms_fast2sms_campaign_messages
+        `SELECT message_id, mobile, name, username
+         FROM sms_fast2sms_campaign_messages
          WHERE campaign_id = ? AND branch_id = ? AND status = 'pending'
          ORDER BY id ASC`,
         [campaign_id, branch_id]
@@ -629,52 +890,109 @@ export async function processCampaign(branch_id, campaign_id) {
         route === "dlt" || route === "otp"
             ? campaign.dlt_message_id
             : campaign.message_body;
+    const variablesTemplate = campaign.variables_values || "";
+    const hasDynamicVars = variablesTemplateHasPlaceholders(variablesTemplate);
 
-    for (let i = 0; i < pending.length; i += SEND_BATCH_SIZE) {
-        const batch = pending.slice(i, i + SEND_BATCH_SIZE);
-        const numbers = batch.map((r) => r.mobile);
-        try {
-            const result = await sendFast2Sms({
-                authToken: config.auth_token,
-                route,
-                numbers,
-                senderId,
-                message: messagePayload,
-                variablesValues: campaign.variables_values,
-                entityId: config.entity_id,
-            });
+    const markBatchSent = async (batch, requestId) => {
+        const ids = batch.map((r) => r.message_id);
+        await pool.query(
+            `UPDATE sms_fast2sms_campaign_messages
+             SET status = 'sent',
+                 provider_request_id = ?,
+                 sent_at = CURRENT_TIMESTAMP,
+                 modify_date = CURRENT_TIMESTAMP
+             WHERE message_id IN (${ids.map(() => "?").join(",")})`,
+            [requestId || null, ...ids]
+        );
+        sent += batch.length;
+    };
 
-            const ids = batch.map((r) => r.message_id);
-            await pool.query(
-                `UPDATE sms_fast2sms_campaign_messages
-                 SET status = 'sent',
-                     provider_request_id = ?,
-                     sent_at = CURRENT_TIMESTAMP,
-                     modify_date = CURRENT_TIMESTAMP
-                 WHERE message_id IN (${ids.map(() => "?").join(",")})`,
-                [result.request_id || null, ...ids]
-            );
-            sent += batch.length;
-        } catch (error) {
-            const ids = batch.map((r) => r.message_id);
-            const errMsg = error.message || "Send failed";
-            await pool.query(
-                `UPDATE sms_fast2sms_campaign_messages
-                 SET status = 'failed',
-                     error_message = ?,
-                     modify_date = CURRENT_TIMESTAMP
-                 WHERE message_id IN (${ids.map(() => "?").join(",")})`,
-                [errMsg, ...ids]
-            );
-            failed += batch.length;
-        }
+    const markBatchFailed = async (batch, errMsg) => {
+        const ids = batch.map((r) => r.message_id);
+        await pool.query(
+            `UPDATE sms_fast2sms_campaign_messages
+             SET status = 'failed',
+                 error_message = ?,
+                 modify_date = CURRENT_TIMESTAMP
+             WHERE message_id IN (${ids.map(() => "?").join(",")})`,
+            [errMsg || "Send failed", ...ids]
+        );
+        failed += batch.length;
+    };
 
+    const persistCounts = async () => {
         await pool.query(
             `UPDATE sms_fast2sms_campaigns
              SET sent_count = ?, failed_count = ?, modify_date = CURRENT_TIMESTAMP
              WHERE campaign_id = ? AND branch_id = ?`,
             [sent, failed, campaign_id, branch_id]
         );
+    };
+
+    if (!hasDynamicVars) {
+        for (let i = 0; i < pending.length; i += SEND_BATCH_SIZE) {
+            const batch = pending.slice(i, i + SEND_BATCH_SIZE);
+            try {
+                const result = await sendFast2Sms({
+                    authToken: config.auth_token,
+                    route,
+                    numbers: batch.map((r) => r.mobile),
+                    senderId,
+                    message: messagePayload,
+                    variablesValues: variablesTemplate,
+                    entityId: config.entity_id,
+                });
+                await markBatchSent(batch, result.request_id);
+            } catch (error) {
+                await markBatchFailed(batch, error.message || "Send failed");
+            }
+            await persistCounts();
+        }
+    } else {
+        // Resolve per recipient, then batch by identical resolved values.
+        const groups = new Map();
+        for (const row of pending) {
+            let resolved = "";
+            try {
+                resolved = await resolveSmsVariablesValuesForRecipient(
+                    branch_id,
+                    variablesTemplate,
+                    {
+                        username: row.username,
+                        name: row.name,
+                        mobile: row.mobile,
+                    }
+                );
+            } catch (error) {
+                await markBatchFailed([row], error.message || "Variable resolve failed");
+                continue;
+            }
+            const key = resolved;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(row);
+        }
+        await persistCounts();
+
+        for (const [resolvedValues, rows] of groups.entries()) {
+            for (let i = 0; i < rows.length; i += SEND_BATCH_SIZE) {
+                const batch = rows.slice(i, i + SEND_BATCH_SIZE);
+                try {
+                    const result = await sendFast2Sms({
+                        authToken: config.auth_token,
+                        route,
+                        numbers: batch.map((r) => r.mobile),
+                        senderId,
+                        message: messagePayload,
+                        variablesValues: resolvedValues,
+                        entityId: config.entity_id,
+                    });
+                    await markBatchSent(batch, result.request_id);
+                } catch (error) {
+                    await markBatchFailed(batch, error.message || "Send failed");
+                }
+                await persistCounts();
+            }
+        }
     }
 
     await pool.query(
