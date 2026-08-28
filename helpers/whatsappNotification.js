@@ -149,6 +149,35 @@ async function getUserOnechattingToken(username, branch_id) {
     return String(row.onechatting_token).trim();
 }
 
+/**
+ * Prefer the acting user when they have an enabled OneChatting token;
+ * otherwise fall back to the branch admin's token (scheduled/autopay sends).
+ */
+async function resolveOnechattingSenderUsername(branch_id, preferredUsername = null) {
+    const preferred = String(preferredUsername || "").trim();
+    if (preferred && preferred !== "system") {
+        const preferredToken = await getUserOnechattingToken(preferred, branch_id);
+        if (preferredToken) return preferred;
+    }
+
+    const [rows] = await pool.query(
+        `SELECT username
+         FROM branch_mapping
+         WHERE branch_id = ?
+           AND type = 'admin'
+           AND is_deleted = '0'
+           AND onechatting_enabled = '1'
+           AND onechatting_token IS NOT NULL
+           AND TRIM(onechatting_token) <> ''
+         ORDER BY id ASC
+         LIMIT 1`,
+        [branch_id]
+    );
+
+    const adminUsername = rows[0]?.username ? String(rows[0].username).trim() : "";
+    return adminUsername || null;
+}
+
 async function loadActiveTemplateMapping(branch_id, systemTemplateName) {
     const [rows] = await pool.query(
         `SELECT map_id, template, onechatting_template_name, component, status
@@ -556,7 +585,13 @@ async function sendOnechattingByChannel({
         );
     }
 
-    const senderToken = await getUserOnechattingToken(senderUsername, branch_id);
+    const resolvedSenderUsername = await resolveOnechattingSenderUsername(
+        branch_id,
+        senderUsername
+    );
+    const senderToken = resolvedSenderUsername
+        ? await getUserOnechattingToken(resolvedSenderUsername, branch_id)
+        : null;
     if (!senderToken) {
         throw new Error("Your OneChatting user token is not enabled");
     }
@@ -842,7 +877,7 @@ async function sendPaymentReminderWhatsapp({
         if (!await getBranchDeveloperToken(branch_id)) {
             throw new Error("OneChatting developer token is not configured");
         }
-        if (!await getUserOnechattingToken(sent_by, branch_id)) {
+        if (!(await resolveOnechattingSenderUsername(branch_id, sent_by))) {
             throw new Error("Your OneChatting user token is not enabled");
         }
     } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
@@ -925,7 +960,7 @@ async function sendBirthdayWishWhatsapp({
         if (!await getBranchDeveloperToken(branch_id)) {
             throw new Error("OneChatting developer token is not configured");
         }
-        if (!await getUserOnechattingToken(sent_by, branch_id)) {
+        if (!(await resolveOnechattingSenderUsername(branch_id, sent_by))) {
             throw new Error("Your OneChatting user token is not enabled");
         }
     } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
@@ -1029,7 +1064,7 @@ async function sendDocumentSharingWhatsapp({
         if (!(await getBranchDeveloperToken(branch_id))) {
             throw new Error("OneChatting developer token is not configured");
         }
-        if (!(await getUserOnechattingToken(sent_by, branch_id))) {
+        if (!(await resolveOnechattingSenderUsername(branch_id, sent_by))) {
             throw new Error("Your OneChatting user token is not enabled");
         }
     } else if (channel === WHATSAPP_CHANNEL_OOMS_WEB) {
