@@ -96,3 +96,8 @@ export const TEMPLATELIST = [
         ],
     },
 ];
+
+/** SMS cannot send documents — exclude document sharing from Fast2SMS mapping types. */
+export const SMS_TEMPLATELIST = TEMPLATELIST.filter(
+    (item) => item.name !== "document sharing"
+);

@@ -12,6 +12,7 @@ import {
     sendEmail,
 } from "./payment_reminder.js";
 import { sendPaymentReminderWhatsapp } from "../helpers/whatsappNotification.js";
+import { sendPaymentReminderSms } from "../helpers/smsNotification.js";
 
 const router = express.Router();
 
@@ -347,7 +348,13 @@ async function processAutopayClient(reminderRow, { force = false, sent_by = null
                     channelResults.whatsapp = { status: "sent" };
                     sent += 1;
                 } else if (channel === "sms") {
-                    throw new Error("SMS sending is not available");
+                    await sendPaymentReminderSms({
+                        branch_id,
+                        username,
+                        reminderVariables: variables,
+                    });
+                    channelResults.sms = { status: "sent" };
+                    sent += 1;
                 }
             } catch (channelError) {
                 failed += 1;

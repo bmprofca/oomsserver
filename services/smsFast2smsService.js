@@ -2,7 +2,7 @@ import pool from "../db.js";
 import crypto from "crypto";
 import { UNIQUE_RANDOM_STRING } from "../helpers/function.js";
 import { decrypt } from "../utils/smtpEncryption.js";
-import { TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
+import { SMS_TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
 import { normalizeFast2SmsRoute } from "../helpers/fast2sms.js";
 import { sendFast2Sms } from "../helpers/fast2smsSend.js";
 import { resolveSmsCampaignRecipients } from "../helpers/smsCampaignRecipients.js";
@@ -229,10 +229,47 @@ export async function updateTemplate(branch_id, username, body = {}) {
     return serializeTemplate(rows[0]);
 }
 
+export function buildVariablesValuesFromMap(variableKeys, valuesMap = {}) {
+    const keys = Array.isArray(variableKeys) ? variableKeys : [];
+    return keys.map((key) => String(valuesMap[key] ?? "").trim()).join("|");
+}
+
+export function parseVariablesValuesToMap(variablesValues, variableKeys) {
+    const keys = Array.isArray(variableKeys) ? variableKeys : [];
+    const parts = String(variablesValues ?? "").split("|");
+    const map = {};
+    keys.forEach((key, index) => {
+        map[key] = parts[index] != null ? String(parts[index]).trim() : "";
+    });
+    return map;
+}
+
+function validateMappingVariablesValues(variableKeys, variablesValues) {
+    const keys = Array.isArray(variableKeys) ? variableKeys : [];
+    if (!keys.length) {
+        return "";
+    }
+
+    const parts = String(variablesValues ?? "")
+        .split("|")
+        .map((part) => part.trim());
+
+    if (parts.length !== keys.length || parts.some((part) => !part)) {
+        throw Object.assign(
+            new Error(
+                `Map all ${keys.length} template variable${keys.length === 1 ? "" : "s"} using OOMS placeholders`
+            ),
+            { status: 400 }
+        );
+    }
+
+    return parts.join("|");
+}
+
 export async function listTemplateMaps(branch_id) {
     const [maps] = await pool.query(
-        `SELECT m.map_id, m.template_type, m.sms_template_id, m.status,
-                t.name AS sms_template_name, t.dlt_message_id, t.route, t.message_body
+        `SELECT m.map_id, m.template_type, m.sms_template_id, m.variables_values, m.status,
+                t.name AS sms_template_name, t.dlt_message_id, t.route, t.message_body, t.variable_keys
          FROM sms_fast2sms_template_mapping m
          LEFT JOIN sms_fast2sms_templates t
            ON t.template_id = m.sms_template_id
@@ -246,9 +283,10 @@ export async function listTemplateMaps(branch_id) {
         byType.set(String(row.template_type).trim(), row);
     }
 
-    return TEMPLATELIST.map((item) => {
+    return SMS_TEMPLATELIST.map((item) => {
         const mapped = byType.get(item.name);
         const is_set = Boolean(mapped && Number(mapped.status) === 1 && mapped.sms_template_id);
+        const variable_keys = is_set ? resolveTemplateVariableKeys(mapped) : [];
         return {
             type: item.name,
             description: item.description || "",
@@ -260,18 +298,24 @@ export async function listTemplateMaps(branch_id) {
             dlt_message_id: is_set ? mapped.dlt_message_id : null,
             route: is_set ? normalizeFast2SmsRoute(mapped.route) : null,
             message_preview: is_set ? mapped.message_body : null,
+            variable_keys,
+            variables_values: is_set ? mapped.variables_values || "" : "",
             status: is_set ? 1 : 0,
         };
     });
 }
 
-export async function setTemplateMap(branch_id, username, { type, sms_template_id } = {}) {
+export async function setTemplateMap(
+    branch_id,
+    username,
+    { type, sms_template_id, variables_values } = {}
+) {
     const template_type = String(type || "").trim();
     const templateId = String(sms_template_id || "").trim();
     if (!template_type) {
         throw Object.assign(new Error("type is required"), { status: 400 });
     }
-    if (!TEMPLATELIST.some((item) => item.name === template_type)) {
+    if (!SMS_TEMPLATELIST.some((item) => item.name === template_type)) {
         throw Object.assign(new Error("Invalid system template type"), { status: 400 });
     }
     if (!templateId) {
@@ -279,13 +323,19 @@ export async function setTemplateMap(branch_id, username, { type, sms_template_i
     }
 
     const [tplRows] = await pool.query(
-        `SELECT template_id FROM sms_fast2sms_templates
+        `SELECT template_id, message_body, variable_keys FROM sms_fast2sms_templates
          WHERE template_id = ? AND branch_id = ? AND status = 'active' LIMIT 1`,
         [templateId, branch_id]
     );
     if (!tplRows.length) {
         throw Object.assign(new Error("SMS template not found or inactive"), { status: 404 });
     }
+
+    const variableKeys = resolveTemplateVariableKeys(tplRows[0]);
+    const normalizedVariablesValues = validateMappingVariablesValues(
+        variableKeys,
+        variables_values
+    );
 
     const [existing] = await pool.query(
         `SELECT map_id FROM sms_fast2sms_template_mapping
@@ -296,11 +346,18 @@ export async function setTemplateMap(branch_id, username, { type, sms_template_i
     if (existing.length) {
         await pool.query(
             `UPDATE sms_fast2sms_template_mapping
-             SET sms_template_id = ?, status = 1, modify_by = ?, modify_date = CURRENT_TIMESTAMP
+             SET sms_template_id = ?, variables_values = ?, status = 1,
+                 modify_by = ?, modify_date = CURRENT_TIMESTAMP
              WHERE map_id = ?`,
-            [templateId, username, existing[0].map_id]
+            [templateId, normalizedVariablesValues || null, username, existing[0].map_id]
         );
-        return { map_id: existing[0].map_id, type: template_type, sms_template_id: templateId, status: 1 };
+        return {
+            map_id: existing[0].map_id,
+            type: template_type,
+            sms_template_id: templateId,
+            variables_values: normalizedVariablesValues,
+            status: 1,
+        };
     }
 
     const map_id = await UNIQUE_RANDOM_STRING("sms_fast2sms_template_mapping", "map_id", {
@@ -308,11 +365,25 @@ export async function setTemplateMap(branch_id, username, { type, sms_template_i
     });
     await pool.query(
         `INSERT INTO sms_fast2sms_template_mapping
-         (map_id, branch_id, template_type, sms_template_id, status, create_by, modify_by)
-         VALUES (?, ?, ?, ?, 1, ?, ?)`,
-        [map_id, branch_id, template_type, templateId, username, username]
+         (map_id, branch_id, template_type, sms_template_id, variables_values, status, create_by, modify_by)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+        [
+            map_id,
+            branch_id,
+            template_type,
+            templateId,
+            normalizedVariablesValues || null,
+            username,
+            username,
+        ]
     );
-    return { map_id, type: template_type, sms_template_id: templateId, status: 1 };
+    return {
+        map_id,
+        type: template_type,
+        sms_template_id: templateId,
+        variables_values: normalizedVariablesValues,
+        status: 1,
+    };
 }
 
 export async function unsetTemplateMap(branch_id, username, { type } = {}) {

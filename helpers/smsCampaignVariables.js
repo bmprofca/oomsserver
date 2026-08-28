@@ -101,6 +101,33 @@ export async function buildSmsClientVariables(
     return vars;
 }
 
+/**
+ * Fast2SMS DLT English templates reject Unicode (e.g. ₹) in variable slots.
+ * Normalizes money-like values to plain "1234.56" and strips ₹ / thousand separators.
+ */
+export function sanitizeValueForFast2SmsDlt(value) {
+    let s = String(value ?? "").trim();
+    if (!s) return s;
+
+    s = s.replace(/\u20B9/g, "").replace(/,/g, "").trim();
+
+    const numeric = s.replace(/[^\d.]/g, "");
+    if (numeric && /^-?\d+(\.\d+)?$/.test(numeric)) {
+        return Math.abs(parseFloat(numeric)).toFixed(2);
+    }
+
+    return s;
+}
+
+export function sanitizeVariablesValuesForDlt(variablesValues) {
+    const raw = String(variablesValues ?? "").trim();
+    if (!raw) return raw;
+    return raw
+        .split("|")
+        .map((part) => sanitizeValueForFast2SmsDlt(part))
+        .join("|");
+}
+
 function replacePlaceholdersInPart(part, variables) {
     if (typeof part !== "string") return "";
     let out = part;

@@ -1,5 +1,6 @@
 import axios from "axios";
 import { normalizeFast2SmsRoute } from "./fast2sms.js";
+import { sanitizeVariablesValuesForDlt } from "./smsCampaignVariables.js";
 
 export const FAST2SMS_API_URL =
     process.env.FAST2SMS_API_URL || "https://www.fast2sms.com/dev/bulkV2";
@@ -53,7 +54,11 @@ export async function sendFast2Sms({
         params.message = String(message).trim();
     }
     if (variablesValues != null && String(variablesValues).trim() !== "") {
-        params.variables_values = String(variablesValues).trim();
+        let resolved = String(variablesValues).trim();
+        if (resolvedRoute === "dlt" || resolvedRoute === "otp") {
+            resolved = sanitizeVariablesValuesForDlt(resolved);
+        }
+        params.variables_values = resolved;
     }
     if (entityId && resolvedRoute === "dlt_manual") {
         params.entity_id = String(entityId).trim();

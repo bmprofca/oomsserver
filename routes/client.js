@@ -34,6 +34,7 @@ import {
     sendEmail,
 } from "./payment_reminder.js";
 import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentSharingWhatsapp } from "../helpers/whatsappNotification.js";
+import { sendPaymentReminderSms } from "../helpers/smsNotification.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
 import { generateOtp } from "../helpers/otp.js";
@@ -418,7 +419,15 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
                                 message_id: sendResult.messageId || null,
                             };
                         } else if (channel === "sms") {
-                            throw new Error("SMS sending is not available");
+                            const smsResult = await sendPaymentReminderSms({
+                                branch_id,
+                                username,
+                                reminderVariables: variables,
+                            });
+                            channelResults.sms = {
+                                status: "sent",
+                                request_id: smsResult.request_id || null,
+                            };
                         } else if (channel === "whatsapp") {
                             await sendPaymentReminderWhatsapp({
                                 branch_id,
