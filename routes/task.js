@@ -1314,8 +1314,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             PrevTaskBillingStatus === "non billable" ||
             PrevTaskBillingStatus === "non_billable";
 
-        let AllowFirmIdChange = false;
-        let AllowServiceIdChange = false;
         let AllowFeesChange = false;
         let AllowCaChange = false;
         let AllowAgentChange = false;
@@ -1323,9 +1321,33 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         let AllowTargetDateChange = false;
         let AllowCompleteDateChange = false;
 
+        // Firm is immutable after task creation — reject any change attempt
+        if (firm_id !== undefined && firm_id !== null && String(firm_id).trim() !== "") {
+            const requestedFirmId = String(firm_id).trim();
+            const currentFirmId = String(task_data.firm_id || "").trim();
+            if (requestedFirmId !== currentFirmId) {
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Firm cannot be changed for an existing task",
+                });
+            }
+        }
+
+        // Service is immutable after task creation — reject any change attempt
+        if (service_id !== undefined && service_id !== null && String(service_id).trim() !== "") {
+            const requestedServiceId = String(service_id).trim();
+            const currentServiceId = String(task_data.service_id || "").trim();
+            if (requestedServiceId !== currentServiceId) {
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Service cannot be changed for an existing task",
+                });
+            }
+        }
+
         if (isBillingPending) {
-            AllowFirmIdChange = true;
-            AllowServiceIdChange = true;
             AllowFeesChange = true;
             AllowCaChange = true;
             AllowAgentChange = true;
@@ -1358,13 +1380,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         }
 
         await conn.beginTransaction();
-
-        if (firm_id && firm_id !== task_data.firm_id && AllowFirmIdChange) {
-            await conn.query("UPDATE tasks SET firm_id = ? WHERE task_id = ? AND branch_id = ?", [firm_id, task_id, branch_id]);
-        }
-        if (service_id && service_id !== task_data.service_id && AllowServiceIdChange) {
-            await conn.query("UPDATE tasks SET service_id = ? WHERE task_id = ? AND branch_id = ?", [service_id, task_id, branch_id]);
-        }
 
         // Keep has_ca / ca_id in sync (profile + lists gate CA on has_ca = '1')
         if (ca && AllowCaChange) {
