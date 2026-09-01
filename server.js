@@ -12,6 +12,7 @@ import http from "http";
 import { setupSocketIO } from "./helpers/Socket.js";
 import { generateDatabaseContext } from "./helpers/DatabaseContext.js";
 import { startEmailBroadcastCron } from "./cron/emailBroadcastCron.js";
+import { startAttendanceWeeklyOffCron } from "./cron/attendanceWeeklyOffCron.js";
 import publicRoutes from "./routes/public.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
 
@@ -92,6 +93,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`Access: ${accessUrl}`);
     generateDatabaseContext();
     startEmailBroadcastCron();
+    startAttendanceWeeklyOffCron();
 });
 
 export { WsIo };

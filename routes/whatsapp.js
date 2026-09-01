@@ -59,6 +59,7 @@ const ONECHATTING_CHAT_HISTORY_URL = `${ONECHATTING_BASE_URL}/developer/message/
 const ONECHATTING_CHAT_ASSIGN_PERMISSION_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign-permission`;
 const ONECHATTING_CHAT_ASSIGN_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign`;
 const ONECHATTING_MARK_AS_READ_URL = `${ONECHATTING_BASE_URL}/developer/message/mark-as-read`;
+const ONECHATTING_MEDIA_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/media-list`;
 const ONECHATTING_SEND_TEXT_URL = `${ONECHATTING_BASE_URL}/developer/message/send-text-message`;
 const ONECHATTING_SEND_IMAGE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-image-message`;
 const ONECHATTING_SEND_VIDEO_URL = `${ONECHATTING_BASE_URL}/developer/message/send-video-message`;
@@ -1825,6 +1826,38 @@ router.post("/onechatting/mark-as-read", auth, validateBranch, async (req, res) 
         );
     } catch (error) {
         return handleOneChattingAxiosError(error, res, "Failed to mark as read");
+    }
+});
+
+/**
+ * POST /onechatting/media-list
+ * Proxies OneChatting developer message media-list (paginated chat media).
+ */
+router.post("/onechatting/media-list", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.headers["username"] || req.headers["Username"] || "";
+        const resolved = await resolveOneChattingToken(username, branch_id);
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+
+        const body = { ...(req.body || {}) };
+        if (body.page_no != null) {
+            body.page_no = Math.max(1, Number(body.page_no) || 1);
+        }
+        if (body.limit != null) {
+            body.limit = Math.min(50, Math.max(1, Number(body.limit) || 10));
+        }
+
+        return await proxyOneChattingPost(
+            ONECHATTING_MEDIA_LIST_URL,
+            resolved.token,
+            body,
+            res
+        );
+    } catch (error) {
+        return handleOneChattingAxiosError(error, res, "Failed to fetch media list");
     }
 });
 

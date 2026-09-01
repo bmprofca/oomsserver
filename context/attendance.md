@@ -32,7 +32,7 @@ One row per `(branch_id, username, date)`.
 | `branch_id` / `username` / `date`                                      | Day key (date from `ATTENDANCE_TIMEZONE`)                                                |
 | `in_time` / `out_time`                                                 | MySQL **TIME** (`HH:mm:ss`) via `getAttendanceNowTimeString` — not DATETIME              |
 | `status`                                                               | enum: `absent`, `present`, `leave`, `half day` (default `absent`; unused `idle` removed) |
-| `in_method` / `out_method`                                             | Default `manual`                                                                         |
+| `in_method` / `out_method`                                             | Default `manual`; weekly-off auto-mark uses `system`                                     |
 | `is_approved`                                                          | Manage mark always sets `1`; personal punch stays `0` until approved                     |
 | `expected_hours` / `worked_minutes` / `extra_minutes` / `less_minutes` | Snapshot vs punch duration for OT/fine                                                   |
 | `overtime_enabled` / `fine_enabled`                                    | Whether OT/fine amounts were applied for the day                                         |
@@ -143,6 +143,24 @@ Body: `{ username, date?, status: 'absent'|'present'|'leave'|'half day', in_time
 - When active salary has `expected_minutes` **and** salary `overtime_enabled` / `fine_enabled`: compare worked vs expected; store OT/fine amounts only when those salary flags allow it (request apply flags are ANDed with salary settings)
 - **Grace** (`grace_period_minutes`): if extra/less minutes are **≤ grace**, billable OT/fine minutes are **0**. If they **exceed** grace, the **full** extra/less minutes count (not variance − grace). Example: expected 8h, grace 15m → work 8h15 = no OT; work 8h16 = 16m OT
 - Other statuses clear `in_time` / `out_time` and OT/fine fields; **half day** stores half wage; **leave** stores full day wage when salary exists; absent clears wage amounts
+
+### Weekly day-off auto-mark (paid leave)
+
+For staff with **fixed** salary (`staff_salaries.salary_type = 'fixed'`) and active rows in `employee_weekly_off` (UI: “Day off (paid leave)” on salary assignment):
+
+| Trigger | Action |
+| ------- | ------ |
+| `POST /salary/admin/set-weekly-off` (after save) | Auto-insert `leave` for matching weekdays from **today** through **end of current month** |
+| Daily cron (`attendanceWeeklyOffCron`, 00:10 `ATTENDANCE_TIMEZONE`) | Auto-insert `leave` for **today** when weekday matches configured day-off |
+
+Rules:
+
+- Status `leave`, `is_approved = 1`, `in_method` / `out_method` = `system`, full day wage (`amount ÷ daysInMonth`)
+- **Fixed salary only** — flexible staff are skipped
+- **Today and future only** on config save (no backfill for past dates in the month)
+- **Never overwrites** an existing attendance row (present punch, manual absent/leave, etc.)
+- Clearing weekly offs does **not** delete existing attendance rows
+- Helpers: [`SERVER/helpers/attendanceWeeklyOffAutoMark.js`](../helpers/attendanceWeeklyOffAutoMark.js), shared leave insert in [`SERVER/helpers/attendanceMarkHelpers.js`](../helpers/attendanceMarkHelpers.js)
 
 ### Bulk approve (`POST /manage/bulk-approve`)
 

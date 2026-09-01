@@ -5,6 +5,7 @@ import { auth, validateBranch, checkSubscription, requireFeature } from "../midd
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, USER_DATA, ID_LENGTH, TODAY_DATE } from "../helpers/function.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { buildPayslipPdfBuffer } from "../helpers/payslipPdf.js";
+import { autoMarkWeeklyOffAfterConfigChange } from "../helpers/attendanceWeeklyOffAutoMark.js";
 
 router.use(checkSubscription, requireFeature('salary-management'));
 
@@ -1210,6 +1211,19 @@ router.post('/admin/set-weekly-off', auth, validateBranch, async (req, res) => {
             });
         }
 
+        let autoMark = { marked: 0, skipped: 0 };
+        if (selectedDays.length > 0) {
+            try {
+                autoMark = await autoMarkWeeklyOffAfterConfigChange({
+                    branch_id,
+                    username,
+                    actor: admin_username,
+                });
+            } catch (autoMarkError) {
+                console.error("Weekly off auto-mark after config:", autoMarkError);
+            }
+        }
+
         const profile = await getStaffProfile(username, branch_id);
 
         return res.status(200).json({
@@ -1230,6 +1244,7 @@ router.post('/admin/set-weekly-off', auth, validateBranch, async (req, res) => {
                 weekly_off_days: selectedDays,
                 weekly_off_day: selectedDays[0] || null,
                 is_active: selectedDays.length ? '1' : '0',
+                auto_mark: autoMark,
             }
         });
 
