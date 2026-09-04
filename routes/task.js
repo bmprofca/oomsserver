@@ -3526,8 +3526,16 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             .map((r) => r.task_id);
 
         if (statusVal === "complete") {
+            // Closing the task also closes CA approval/UDIN (feature is for open tasks only)
             await conn.query(
-                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ?, cancelled_date = NULL, cancelled_by = NULL WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                `UPDATE tasks
+                 SET status = ?,
+                     complete_date = ?,
+                     complete_by = ?,
+                     cancelled_date = NULL,
+                     cancelled_by = NULL,
+                     ca_approval = CASE WHEN has_ca = '1' THEN 'complete' ELSE ca_approval END
+                 WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
                 [statusVal, new Date(), username || null, branch_id, ...targetIds]
             );
 
