@@ -104,11 +104,11 @@ async function listCaProfilesByPhone(country_code, mobile) {
          FROM profile p
          INNER JOIN clients c ON c.username = p.username
             AND c.user_type = 'ca'
+            AND c.status = '1'
             AND (c.is_deleted = '0' OR c.is_deleted = 0)
          LEFT JOIN branch_list bl ON bl.branch_id = c.branch_id
             AND (bl.is_deleted = '0' OR bl.is_deleted = 0)
          WHERE p.status = '1'
-           AND c.user_type = 'ca'
            AND ${PROFILE_MOBILE_SQL} = ?
            AND ${PROFILE_COUNTRY_CODE_SQL} = ?
          ORDER BY bl.name ASC, p.name ASC, c.branch_id ASC`,
@@ -122,10 +122,11 @@ async function listCaProfilesByPhone(country_code, mobile) {
         mobile: row.mobile,
         country_code: normalizeCountryCode(row.country_code),
         branch: {
-            branch_id: row.branch_id,
-            name: row.branch_name,
+            branch_id: row.branch_id != null ? String(row.branch_id).trim() : null,
+            name: row.branch_name || null,
+            logo: row.branch_logo || null,
         },
-    }));
+    })).filter((row) => row.branch?.branch_id);
 }
 
 async function authCa(req, res, next) {
