@@ -1018,15 +1018,20 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             page_no = 1,
             limit = 20,
             search,
-            status_filter,
+            status_filter: statusFilterQuery,
             staff_username
         } = req.query;
 
+        const IN_PROCESS_ONLY_CATEGORIES = ['OD', 'DT', 'D7', 'FT'];
+        const status_filter = IN_PROCESS_ONLY_CATEGORIES.includes(category)
+            ? 'in process'
+            : statusFilterQuery;
+
         const categoryDescriptions = {
-            "OD": "Overdue - Active tasks with due date passed",
-            "DT": "Due Today - Active tasks due today",
-            "D7": "Due within 7 Days - Active tasks due in next 7 days",
-            "FT": "Future - Active tasks with due date beyond 7 days",
+            "OD": "Overdue - In process tasks with due date passed",
+            "DT": "Due Today - In process tasks due today",
+            "D7": "Due within 7 Days - In process tasks due in next 7 days",
+            "FT": "Future - In process tasks with due date beyond 7 days",
             "WIP": "In Progress - Tasks with status 'in process'",
             "PFC": "Pending From Client",
             "PFD": "Pending From Department",
@@ -1127,7 +1132,8 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
         }
 
-        // Apply status filter if provided
+        // Apply status filter if provided.
+        // OD / DT / D7 / FT always lock to "in process" (status_filter is forced above).
         if (status_filter && String(status_filter).trim() !== "") {
             const validStatuses = ['in process', 'pending from client', 'pending from department', 'complete', 'cancel'];
             if (validStatuses.includes(status_filter)) {
@@ -1330,17 +1336,29 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
         let combinedTasks = [];
 
         if (['OD', 'DT', 'D7', 'FT'].includes(category)) {
+            const matchesDueCategoryStatus = (status) => {
+                if (IN_PROCESS_ONLY_CATEGORIES.includes(category)) {
+                    return status === 'in process';
+                }
+                return isTaskActive(status);
+            };
+
             // Filter normal tasks
             for (const task of allTasks) {
-                if (isTaskActive(task.status)) {
+                if (matchesDueCategoryStatus(task.status)) {
                     if (getDueDateCategory(task.due_date) === category) {
                         combinedTasks.push(task);
                     }
                 }
             }
-            // Filter compliance tasks
+            // Filter compliance tasks (Outsource maps to in process; others stay normalized)
             for (const task of normalizedComplianceTasks) {
-                if (isTaskActive(task.status)) {
+                const complianceInProcess =
+                    task.status === 'in process' || task.status === 'pending';
+                const statusOk = IN_PROCESS_ONLY_CATEGORIES.includes(category)
+                    ? complianceInProcess
+                    : isTaskActive(task.status);
+                if (statusOk) {
                     if (getDueDateCategory(task.due_date) === category) {
                         combinedTasks.push(task);
                     }
@@ -1676,10 +1694,10 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 status_filter: status_filter || null
             },
             category_legend: {
-                "OD": "Overdue - Active tasks with due date passed",
-                "DT": "Due Today - Active tasks due today",
-                "D7": "Due within 7 Days - Active tasks due in next 7 days",
-                "FT": "Future - Active tasks with due date beyond 7 days",
+                "OD": "Overdue - In process tasks with due date passed",
+                "DT": "Due Today - In process tasks due today",
+                "D7": "Due within 7 Days - In process tasks due in next 7 days",
+                "FT": "Future - In process tasks with due date beyond 7 days",
                 "WIP": "In Progress - Tasks with status 'in process'",
                 "PFC": "Pending From Client",
                 "PFD": "Pending From Department",
