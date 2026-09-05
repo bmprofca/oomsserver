@@ -104,19 +104,28 @@ export async function buildSmsClientVariables(
 /**
  * Fast2SMS DLT English templates reject Unicode (e.g. ₹) in variable slots.
  * Normalizes money-like values to plain "1234.56" and strips ₹ / thousand separators.
+ * Plain integers (e.g. OTP codes) and static text (e.g. dates) pass through unchanged.
  */
 export function sanitizeValueForFast2SmsDlt(value) {
     let s = String(value ?? "").trim();
     if (!s) return s;
 
-    s = s.replace(/\u20B9/g, "").replace(/,/g, "").trim();
+    const hadRupee = s.includes("\u20B9");
+    const normalized = s.replace(/\u20B9/g, "").replace(/,/g, "").trim();
+    if (!normalized) return s;
 
-    const numeric = s.replace(/[^\d.]/g, "");
-    if (numeric && /^-?\d+(\.\d+)?$/.test(numeric)) {
-        return Math.abs(parseFloat(numeric)).toFixed(2);
+    // Only normalize when the value is purely numeric (optional decimal point).
+    // Do not strip dashes/slashes — dates like "30-09-2026" must stay as entered.
+    if (/^-?\d+(\.\d+)?$/.test(normalized)) {
+        const num = Math.abs(parseFloat(normalized));
+        const isMoneyLike = hadRupee || normalized.includes(".");
+        if (isMoneyLike) {
+            return num.toFixed(2);
+        }
+        return String(Math.trunc(num));
     }
 
-    return s;
+    return normalized;
 }
 
 export function sanitizeVariablesValuesForDlt(variablesValues) {

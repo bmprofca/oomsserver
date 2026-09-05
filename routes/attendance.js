@@ -2,6 +2,11 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
+import {
+    buildLeaveWageForDate,
+    clearWageColumns,
+    daysInMonthFromDate,
+} from "../helpers/attendanceMarkHelpers.js";
 
 const router = express.Router();
 
@@ -204,13 +209,6 @@ function timeStringToMinutes(value) {
     return h * 60 + m + Math.floor((s || 0) / 60);
 }
 
-function daysInMonthFromDate(dateStr) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || ""))) return null;
-    const [y, m] = String(dateStr).split("-").map(Number);
-    if (!y || !m) return null;
-    return new Date(y, m, 0).getDate();
-}
-
 function parseBoolFlag(value) {
     return value === true || value === "true" || value === 1 || value === "1";
 }
@@ -313,21 +311,6 @@ function computePresentWageBreakdown({
         overtime_amount: Number(overtimeAmount.toFixed(4)),
         fine_amount: Number(fineAmount.toFixed(4)),
         net_day_amount: Number(net.toFixed(4)),
-    };
-}
-
-function clearWageColumns() {
-    return {
-        expected_hours: null,
-        worked_minutes: null,
-        extra_minutes: 0,
-        less_minutes: 0,
-        overtime_enabled: 0,
-        fine_enabled: 0,
-        daily_wage: null,
-        overtime_amount: 0,
-        fine_amount: 0,
-        net_day_amount: null,
     };
 }
 
@@ -2172,22 +2155,12 @@ router.post("/manage/mark", auth, validateBranch, async (req, res) => {
                 };
             }
         } else if (markStatus === "leave") {
-            // Leave: full calendar-day wage (same base as present, no OT/fine)
             const salary = await getActiveSalaryForDate(connection, {
                 branch_id,
                 username: targetUsername,
                 date,
             });
-            const amount = Number(salary?.amount);
-            const days = daysInMonthFromDate(date);
-            if (Number.isFinite(amount) && amount > 0 && days) {
-                const daily = amount / days;
-                wage = {
-                    ...clearWageColumns(),
-                    daily_wage: Number(daily.toFixed(4)),
-                    net_day_amount: Number(daily.toFixed(4)),
-                };
-            }
+            wage = buildLeaveWageForDate(salary, date);
         }
 
         await connection.beginTransaction();

@@ -1314,8 +1314,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             PrevTaskBillingStatus === "non billable" ||
             PrevTaskBillingStatus === "non_billable";
 
-        let AllowFirmIdChange = false;
-        let AllowServiceIdChange = false;
         let AllowFeesChange = false;
         let AllowCaChange = false;
         let AllowAgentChange = false;
@@ -1323,9 +1321,33 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         let AllowTargetDateChange = false;
         let AllowCompleteDateChange = false;
 
+        // Firm is immutable after task creation — reject any change attempt
+        if (firm_id !== undefined && firm_id !== null && String(firm_id).trim() !== "") {
+            const requestedFirmId = String(firm_id).trim();
+            const currentFirmId = String(task_data.firm_id || "").trim();
+            if (requestedFirmId !== currentFirmId) {
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Firm cannot be changed for an existing task",
+                });
+            }
+        }
+
+        // Service is immutable after task creation — reject any change attempt
+        if (service_id !== undefined && service_id !== null && String(service_id).trim() !== "") {
+            const requestedServiceId = String(service_id).trim();
+            const currentServiceId = String(task_data.service_id || "").trim();
+            if (requestedServiceId !== currentServiceId) {
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Service cannot be changed for an existing task",
+                });
+            }
+        }
+
         if (isBillingPending) {
-            AllowFirmIdChange = true;
-            AllowServiceIdChange = true;
             AllowFeesChange = true;
             AllowCaChange = true;
             AllowAgentChange = true;
@@ -1359,13 +1381,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         await conn.beginTransaction();
 
-        if (firm_id && firm_id !== task_data.firm_id && AllowFirmIdChange) {
-            await conn.query("UPDATE tasks SET firm_id = ? WHERE task_id = ? AND branch_id = ?", [firm_id, task_id, branch_id]);
-        }
-        if (service_id && service_id !== task_data.service_id && AllowServiceIdChange) {
-            await conn.query("UPDATE tasks SET service_id = ? WHERE task_id = ? AND branch_id = ?", [service_id, task_id, branch_id]);
-        }
-
         // Keep has_ca / ca_id in sync (profile + lists gate CA on has_ca = '1')
         if (ca && AllowCaChange) {
             if (ca.has_ca && ca.ca_id) {
@@ -1381,7 +1396,7 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             } else if (!ca.has_ca) {
                 if (String(task_data.has_ca) === "1" || task_data.ca_id) {
                     await conn.query(
-                        "UPDATE tasks SET has_ca = '0', ca_id = NULL WHERE task_id = ? AND branch_id = ?",
+                        "UPDATE tasks SET has_ca = '0', ca_id = NULL, ca_approval = 'pending' WHERE task_id = ? AND branch_id = ?",
                         [task_id, branch_id]
                     );
                 }
@@ -1545,6 +1560,8 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
           t.service_id,
           t.has_ca,
           t.ca_id,
+          t.ca_approval,
+          t.udin,
           t.has_agent,
           t.agent_id,
           t.fees,
@@ -1675,6 +1692,10 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
 
         const has_ca = element?.has_ca == "1";
         object.has_ca = has_ca;
+        object.ca_approval = has_ca
+            ? (element?.ca_approval || "pending")
+            : null;
+        object.udin = element?.udin ?? null;
         if (has_ca) {
             object.ca = await USER_SNIPPED_DATA(element?.ca_id);
         }
@@ -1708,6 +1729,110 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to fetch task details",
             error: error.message
+        });
+    }
+});
+
+const CA_APPROVAL_STATUSES = ["pending", "sent", "complete"];
+
+/** Staff: set CA approval status (only when CA is assigned). */
+router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { task_id = "", ca_approval = "" } = req.body || {};
+        const taskId = String(task_id || "").trim();
+        const next = String(ca_approval || "").trim().toLowerCase();
+
+        if (!taskId) {
+            return res.status(400).json({ success: false, message: "task_id is required" });
+        }
+        if (!CA_APPROVAL_STATUSES.includes(next)) {
+            return res.status(400).json({
+                success: false,
+                message: `ca_approval must be one of: ${CA_APPROVAL_STATUSES.join(", ")}`,
+            });
+        }
+
+        const [rows] = await pool.query(
+            "SELECT task_id, has_ca, ca_id, ca_approval FROM tasks WHERE branch_id = ? AND task_id = ? LIMIT 1",
+            [branch_id, taskId]
+        );
+        if (!rows.length) {
+            return res.status(404).json({ success: false, message: "Task not found" });
+        }
+        const task = rows[0];
+        if (String(task.has_ca) !== "1" || !task.ca_id) {
+            return res.status(400).json({
+                success: false,
+                message: "CA approval is only available when a CA is assigned",
+            });
+        }
+
+        await pool.query(
+            "UPDATE tasks SET ca_approval = ? WHERE branch_id = ? AND task_id = ?",
+            [next, branch_id, taskId]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "CA approval updated successfully",
+            data: { task_id: taskId, ca_approval: next },
+        });
+    } catch (error) {
+        console.error("Task CA approval update error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update CA approval",
+            error: error.message,
+        });
+    }
+});
+
+/** Staff: set / clear UDIN number (only when CA is assigned). */
+router.put("/details/udin", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { task_id = "", udin = null } = req.body || {};
+        const taskId = String(task_id || "").trim();
+        const nextUdin =
+            udin == null || String(udin).trim() === ""
+                ? null
+                : String(udin).trim().slice(0, 100);
+
+        if (!taskId) {
+            return res.status(400).json({ success: false, message: "task_id is required" });
+        }
+
+        const [rows] = await pool.query(
+            "SELECT task_id, has_ca, ca_id FROM tasks WHERE branch_id = ? AND task_id = ? LIMIT 1",
+            [branch_id, taskId]
+        );
+        if (!rows.length) {
+            return res.status(404).json({ success: false, message: "Task not found" });
+        }
+        if (String(rows[0].has_ca) !== "1" || !rows[0].ca_id) {
+            return res.status(400).json({
+                success: false,
+                message: "UDIN is only available when a CA is assigned",
+            });
+        }
+
+        await pool.query(
+            "UPDATE tasks SET udin = ? WHERE branch_id = ? AND task_id = ?",
+            [nextUdin, branch_id, taskId]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "UDIN updated successfully",
+            data: { task_id: taskId, udin: nextUdin },
+        });
+    } catch (error) {
+        console.error("Task UDIN update error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update UDIN",
+            error: error.message,
         });
     }
 });
@@ -3401,8 +3526,16 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             .map((r) => r.task_id);
 
         if (statusVal === "complete") {
+            // Closing the task also closes CA approval/UDIN (feature is for open tasks only)
             await conn.query(
-                `UPDATE tasks SET status = ?, complete_date = ?, complete_by = ?, cancelled_date = NULL, cancelled_by = NULL WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
+                `UPDATE tasks
+                 SET status = ?,
+                     complete_date = ?,
+                     complete_by = ?,
+                     cancelled_date = NULL,
+                     cancelled_by = NULL,
+                     ca_approval = CASE WHEN has_ca = '1' THEN 'complete' ELSE ca_approval END
+                 WHERE branch_id = ? AND task_id IN (${targetPlaceholders})`,
                 [statusVal, new Date(), username || null, branch_id, ...targetIds]
             );
 
@@ -3630,13 +3763,20 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
     try {
         conn = await pool.getConnection();
         const branch_id = req.branch_id;
-        const { task_id = "", page_no = 1, limit = 20, search = "" } = req.query || {};
+        const {
+            task_id = "",
+            page_no = 1,
+            limit = 20,
+            search = "",
+            scope = "all",
+        } = req.query || {};
 
         if (!task_id || typeof task_id !== "string" || task_id.trim() === "") {
             conn.release();
             return res.status(400).json({ success: false, message: "task_id is required" });
         }
 
+        const taskId = task_id.trim();
         const pageNum = Math.max(1, Number(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
         const offset = (pageNum - 1) * limitNum;
@@ -3647,18 +3787,49 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
             searchTerm.length > 0 ? " AND (name LIKE ? OR remark LIKE ?)" : "";
         const searchPattern = searchTerm.length > 0 ? `%${searchTerm}%` : null;
 
-        const whereParams = [branch_id, task_id.trim()];
+        const scopeKey = String(scope || "all").toLowerCase();
+        let scopeClause = "";
+        const scopeParams = [];
+
+        if (scopeKey === "office" || scopeKey === "ca") {
+            const [taskRows] = await conn.query(
+                `SELECT has_ca, ca_id
+                 FROM tasks
+                 WHERE branch_id = ? AND task_id = ?
+                 LIMIT 1`,
+                [branch_id, taskId]
+            );
+            const task = taskRows?.[0];
+            const caId =
+                task && String(task.has_ca) === "1" && task.ca_id
+                    ? String(task.ca_id).trim()
+                    : "";
+
+            if (caId) {
+                if (scopeKey === "ca") {
+                    scopeClause = " AND created_by = ?";
+                    scopeParams.push(caId);
+                } else {
+                    // Office = everything not uploaded by the assigned CA
+                    scopeClause =
+                        " AND (created_by IS NULL OR created_by = '' OR created_by <> ?)";
+                    scopeParams.push(caId);
+                }
+            }
+        }
+
+        const whereParams = [branch_id, taskId, ...scopeParams];
         if (searchPattern !== null) {
             whereParams.push(searchPattern, searchPattern);
         }
 
         const [totalRows] = await conn.query(
-            `SELECT COUNT(*) AS total FROM documents WHERE branch_id = ? AND task_id = ? AND category_id = 'TASK' AND is_reserved = '1' AND is_deleted = '0'${searchClause}`,
+            `SELECT COUNT(*) AS total FROM documents WHERE branch_id = ? AND task_id = ? AND category_id = 'TASK' AND is_reserved = '1' AND is_deleted = '0'${scopeClause}${searchClause}`,
             whereParams
         );
 
         const [rows] = await conn.query(
-            `SELECT * FROM documents WHERE branch_id = ? AND task_id = ? AND category_id = 'TASK' AND is_reserved = '1' AND is_deleted = '0'${searchClause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+            `SELECT * FROM documents WHERE branch_id = ? AND task_id = ? AND category_id = 'TASK' AND is_reserved = '1' AND is_deleted = '0'${scopeClause}${searchClause} ORDER BY id DESC LIMIT ? OFFSET ?`,
             [...whereParams, limitNum, offset]
         );
 
@@ -3679,6 +3850,7 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
                     : null,
                 size: element.size,
                 mime_type: element.mime_type,
+                created_by: element.created_by || null,
                 create_date: element.create_date,
                 create_by: create_by_snipped_data,
                 modify_by: modify_by_snipped_data
@@ -3695,7 +3867,8 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
                 total: totalRows[0].total,
                 total_pages: Math.ceil(totalRows[0].total / limitNum),
                 is_last_page: offset + list.length >= totalRows[0].total
-            }
+            },
+            scope: scopeKey === "office" || scopeKey === "ca" ? scopeKey : "all",
         });
     } catch (error) {
         console.error("Error retrieving task documents:", error);

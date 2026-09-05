@@ -2,18 +2,28 @@ import express from "express";
 import pool from "../db.js";
 import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { generateClientOtp, sendClientOtp } from "../helpers/clientOtp.js";
-import { authCa } from "../middleware/authCa.js";
+import { authCa, listCaProfilesByPhone } from "../middleware/authCa.js";
 import {
     normalizeCountryCode,
     normalizeMobileDigits,
 } from "../helpers/clientPhone.js";
-import { findPartyUserByMobile } from "../helpers/authProfile.js";
 
 const router = express.Router();
 const CA_OTP_TYPE = "ca_login";
 
 async function findActiveCaProfile(country_code, mobile) {
-    return findPartyUserByMobile(pool, country_code, mobile, "ca");
+    const branches = await listCaProfilesByPhone(country_code, mobile);
+    if (!branches.length) {
+        return null;
+    }
+    return {
+        username: branches[0].username,
+        name: branches[0].name,
+        email: branches[0].email,
+        mobile: branches[0].mobile,
+        country_code: branches[0].country_code,
+        branch_id: branches[0].branch?.branch_id,
+    };
 }
 
 router.post("/login/send-otp", async (req, res) => {
@@ -176,11 +186,24 @@ router.post("/login", async (req, res) => {
 
         await conn.commit();
 
+        const branches = await listCaProfilesByPhone(
+            normalizedCountryCode,
+            normalizedMobile
+        );
+
+        if (!branches.length) {
+            return res.status(404).json({
+                success: false,
+                message: "No active branch assignments found for this CA.",
+            });
+        }
+
         return res.status(200).json({
             success: true,
             message: "Login successful",
             token,
             expire_date: FORMAT_DATE(tokenMeta?.[0]?.expire_date) ?? null,
+            branches,
         });
     } catch (err) {
         if (conn) {
