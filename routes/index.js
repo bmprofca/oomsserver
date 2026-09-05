@@ -44,6 +44,7 @@ import whatsappRoutes from "./whatsapp.js";
 import smsRoutes from "./sms.js";
 import backupRoutes from "./backup.js";
 import accountRoutes from "./account.js";
+import voipRoutes from "./voip.js";
 
 
 router.use("/auth", authRoutes);
@@ -92,5 +93,6 @@ router.use("/compliance", complianceRoutes);
 router.use("/recurring-task", complianceRoutes);
 router.use("/backup", backupRoutes);
 router.use("/account", accountRoutes);
+router.use("/voip", voipRoutes);
 
 export default router;

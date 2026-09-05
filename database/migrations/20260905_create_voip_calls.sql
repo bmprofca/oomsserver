@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS `voip_calls` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `call_id` VARCHAR(80) NOT NULL,
+  `provider_call_id` VARCHAR(120) NULL,
+  `branch_id` VARCHAR(50) NOT NULL,
+  `username` VARCHAR(100) NOT NULL,
+  `caller` VARCHAR(50) NOT NULL,
+  `callee` VARCHAR(30) NOT NULL,
+  `status` VARCHAR(30) NOT NULL DEFAULT 'queued',
+  `failure_reason` VARCHAR(500) NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `answered_at` DATETIME NULL,
+  `ended_at` DATETIME NULL,
+  `duration_seconds` INT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_voip_call_id` (`call_id`),
+  KEY `idx_voip_provider_call_id` (`provider_call_id`),
+  KEY `idx_voip_branch_created` (`branch_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

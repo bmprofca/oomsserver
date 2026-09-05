@@ -13,7 +13,7 @@ export function setupSocketIO(server) {
     });
 
     io.on("connection", (socket) => {
-        socket.on("auth", async ({ username, token }) => {
+        socket.on("auth", async ({ username, token, branch }) => {
             const [check_row] = await pool.query("SELECT * FROM `login_token` WHERE username = ? AND token = ? AND status = '1'", [username, token, '1']);
             if (check_row.length === 0) {
                 socket.emit("auth_status", false);
@@ -21,6 +21,17 @@ export function setupSocketIO(server) {
                 return;
             }
             socket.join(username);
+            if (branch) {
+                const [branchRows] = await pool.query(
+                    `SELECT id FROM branch_mapping
+                     WHERE username = ? AND branch_id = ?
+                       AND is_accepted = '1' AND status = '1' AND is_deleted = '0'
+                     LIMIT 1`,
+                    [username, String(branch)]
+                ).catch(() => [[]]);
+                if (branchRows.length) socket.join(`branch:${String(branch)}`);
+            }
+            socket.join(`user:${username}`);
             socket.emit("auth_status", true);
         });
         socket.on("disconnect", (reason) => {
