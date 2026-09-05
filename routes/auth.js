@@ -185,6 +185,35 @@ function serializeRouteError(err) {
     };
 }
 
+router.post("/logout", async (req, res) => {
+    try {
+        const token = req.headers["token"] || req.headers["Token"] || "";
+        const username = req.headers["username"] || req.headers["Username"] || "";
+
+        if (token) {
+            await pool.query(
+                `UPDATE tokens
+                 SET status = ?
+                 WHERE token = ?
+                   AND (? = '' OR username = ?)
+                   AND status = ?`,
+                ["0", token, username, username, "1"]
+            );
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Logged out successfully",
+        });
+    } catch (err) {
+        console.error("LOGOUT ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            message: "Logout failed",
+        });
+    }
+});
+
 
 router.post("/login/send-otp", async (req, res) => {
     let conn;
