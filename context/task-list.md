@@ -1,6 +1,6 @@
 # Task list — Server context
 
-> **Purpose:** Tag when changing task list / staff-tasks / task-detailed payloads used by table UIs (complete date, compliance period). Pair with [`CLIENT/context/task-list-display.md`](../../CLIENT/context/task-list-display.md).
+> **Purpose:** Tag when changing task list / staff-tasks / task-detailed payloads used by table UIs (complete date, compliance period, CA approval). Pair with [`CLIENT/context/task-list-display.md`](../../CLIENT/context/task-list-display.md).
 
 ---
 
@@ -24,6 +24,21 @@ Without this, the task list UI cannot show completion under status.
 
 ---
 
+## CA approval
+
+List/report rows with an assigned CA should include:
+
+- `has_ca`, `ca` (snipped profile)
+- `ca_approval`: `'pending' | 'sent' | 'complete'` (null when no CA)
+
+| Endpoint | Notes |
+|----------|--------|
+| `GET /task/list` | `t.ca_approval` selected + mapped |
+| `report/task-detailed` | under `assignment.ca_approval` |
+| `report/staff-tasks` | top-level `has_ca`, `ca`, `ca_approval` |
+
+---
+
 ## Compliance period
 
 List/report rows should include where available:
@@ -38,4 +53,5 @@ Client builds the human label via `getTaskCompliancePeriodLabel`.
 ## Do not
 
 - Strip `complete_date` from `/task/list` “for slimming” — UI depends on it for completed rows
+- Strip `ca_approval` from list feeds when `has_ca` — staff column shows approval under CA name
 - Trust only client-computed completion timestamps; store/send DB `tasks.complete_date`

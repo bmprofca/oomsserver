@@ -7,6 +7,7 @@ import {
     deleteProfileDocument,
 } from "../helpers/b2Storage.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
+import { notifyCaApprovalComplete } from "../helpers/caApprovalEmail.js";
 
 const router = express.Router();
 
@@ -23,6 +24,20 @@ const ALLOWED_STATUSES = [
 ];
 
 const ALLOWED_CA_APPROVALS = ["pending", "sent", "complete"];
+
+const ALLOWED_FREQUENCIES = new Set([
+    "monthly",
+    "quarterly",
+    "half-yearly",
+    "yearly",
+]);
+
+function normalizeFrequency(frequency) {
+    const key = String(frequency || "").trim().toLowerCase().replace(/_/g, "-");
+    if (key === "halfyearly" || key === "half-year") return "half-yearly";
+    if (key === "annual" || key === "annually") return "yearly";
+    return key;
+}
 
 function parseQueryArray(value) {
     if (value === undefined || value === null) return [];
@@ -105,6 +120,10 @@ router.get("/list", validateCaSession, async (req, res) => {
             ca_approval,
             firm_id,
             service_id,
+            service_ids,
+            frequency,
+            compliance_year,
+            compliance_period,
         } = req.query || {};
 
         const pageNum = Math.max(1, Number(page_no) || 1);
@@ -132,6 +151,33 @@ router.get("/list", validateCaSession, async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: `Invalid ca_approval value(s): ${invalidCaApprovals.join(", ")}`,
+            });
+        }
+
+        const serviceIdList = [
+            ...parseQueryArray(service_ids),
+            ...(service_id && String(service_id).trim() !== ""
+                ? [String(service_id).trim()]
+                : []),
+        ].filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+        const frequencyNorm = normalizeFrequency(frequency);
+        if (frequencyNorm && !ALLOWED_FREQUENCIES.has(frequencyNorm)) {
+            return res.status(400).json({
+                success: false,
+                message: "frequency must be monthly, quarterly, half-yearly, or yearly",
+            });
+        }
+
+        const hasComplianceYear =
+            compliance_year != null && String(compliance_year).trim() !== "";
+        const hasCompliancePeriod =
+            compliance_period != null && String(compliance_period).trim() !== "";
+
+        if (hasCompliancePeriod && !hasComplianceYear) {
+            return res.status(400).json({
+                success: false,
+                message: "compliance_year is required when compliance_period is provided",
             });
         }
 
@@ -173,9 +219,34 @@ router.get("/list", validateCaSession, async (req, res) => {
             params.push(String(firm_id).trim());
         }
 
-        if (service_id && String(service_id).trim() !== "") {
-            baseQuery += " AND t.service_id = ?";
-            params.push(String(service_id).trim());
+        if (serviceIdList.length > 0) {
+            const placeholders = serviceIdList.map(() => "?").join(", ");
+            baseQuery += ` AND t.service_id IN (${placeholders})`;
+            params.push(...serviceIdList);
+        }
+
+        if (frequencyNorm) {
+            baseQuery += ` AND LOWER(s.type) = 'compliance'`;
+            if (frequencyNorm === "half-yearly") {
+                baseQuery += ` AND LOWER(REPLACE(TRIM(COALESCE(s.frequency, '')), '_', '-')) IN ('half-yearly', 'halfyearly')`;
+            } else if (frequencyNorm === "yearly") {
+                baseQuery += ` AND LOWER(REPLACE(TRIM(COALESCE(s.frequency, '')), '_', '-')) IN ('yearly', 'annual', 'annually')`;
+            } else {
+                baseQuery += ` AND LOWER(REPLACE(TRIM(COALESCE(s.frequency, '')), '_', '-')) = ?`;
+                params.push(frequencyNorm);
+            }
+        }
+
+        if (hasComplianceYear || hasCompliancePeriod) {
+            baseQuery += " AND LOWER(s.type) = 'compliance'";
+            if (hasComplianceYear) {
+                baseQuery += " AND t.compliance_year = ?";
+                params.push(String(compliance_year).trim());
+            }
+            if (hasCompliancePeriod) {
+                baseQuery += " AND t.compliance_period = ?";
+                params.push(String(compliance_period).trim());
+            }
         }
 
         if (search && String(search).trim() !== "") {
@@ -256,7 +327,12 @@ router.get("/list", validateCaSession, async (req, res) => {
                 status: statusList,
                 ca_approval: caApprovalList,
                 firm_id: firm_id ? String(firm_id).trim() : null,
-                service_id: service_id ? String(service_id).trim() : null,
+                service_ids: serviceIdList,
+                frequency: frequencyNorm || null,
+                compliance_year: hasComplianceYear ? String(compliance_year).trim() : null,
+                compliance_period: hasCompliancePeriod
+                    ? String(compliance_period).trim()
+                    : null,
                 search: search ? String(search).trim() : null,
             },
         });
@@ -765,6 +841,15 @@ router.put("/details/:task_id/udin/complete", validateCaSession, async (req, res
             `UPDATE tasks SET ca_approval = 'complete' WHERE branch_id = ? AND task_id = ?`,
             [branch_id, task_id]
         );
+
+        notifyCaApprovalComplete({
+            branch_id,
+            task_id,
+            ca_username,
+            udin: task.udin,
+        }).catch((err) => {
+            console.error("CA approval complete notify error:", err?.message || err);
+        });
 
         return res.status(200).json({
             success: true,

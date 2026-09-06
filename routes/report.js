@@ -1019,13 +1019,32 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             limit = 20,
             search,
             status_filter: statusFilterQuery,
-            staff_username
+            staff_username,
+            ca_approval,
         } = req.query;
 
         const IN_PROCESS_ONLY_CATEGORIES = ['OD', 'DT', 'D7', 'FT'];
         const status_filter = IN_PROCESS_ONLY_CATEGORIES.includes(category)
             ? 'in process'
             : statusFilterQuery;
+
+        const ALLOWED_CA_APPROVALS = ['pending', 'sent', 'complete'];
+        let caApprovalList = [];
+        if (ca_approval != null && String(ca_approval).trim() !== '') {
+            const raw = Array.isArray(ca_approval) ? ca_approval : String(ca_approval).split(',');
+            caApprovalList = raw
+                .map((item) => String(item).trim().toLowerCase())
+                .filter((item) => item && item !== 'all' && item !== '__all__');
+            const invalidCaApprovals = caApprovalList.filter(
+                (item) => !ALLOWED_CA_APPROVALS.includes(item)
+            );
+            if (invalidCaApprovals.length) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid ca_approval value(s): ${invalidCaApprovals.join(', ')}`,
+                });
+            }
+        }
 
         const categoryDescriptions = {
             "OD": "Overdue - In process tasks with due date passed",
@@ -1142,6 +1161,12 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
             }
         }
 
+        if (caApprovalList.length > 0) {
+            const placeholders = caApprovalList.map(() => '?').join(', ');
+            whereConditions += ` AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) IN (${placeholders})`;
+            queryParams.push(...caApprovalList);
+        }
+
         // Apply staff filter if provided (tasks assigned to this staff)
         const staffUsernameFilter = staff_username && String(staff_username).trim() !== "" && String(staff_username).trim() !== "all"
             ? String(staff_username).trim()
@@ -1195,6 +1220,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.billing_status,
                 t.has_ca,
                 t.ca_id,
+                t.ca_approval,
                 t.has_agent,
                 t.agent_id,
                 t.target_date,
@@ -1635,6 +1661,9 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 },
                 assignment: {
                     ca: caDetails,
+                    ca_approval: (task.has_ca === '1' && task.ca_id && task.ca_approval != null)
+                        ? (task.ca_approval || 'pending')
+                        : null,
                     agent: agentDetails,
                     staff_count: staffList.length,
                     staff: staffList
@@ -5133,7 +5162,8 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
         const branch_id = req.branch_id;
         const {
             staff_username,
-            status  // 'all', 'complete', 'cancel', 'in process', 'pending from client', 'pending from department'
+            status,  // 'all', 'complete', 'cancel', 'in process', 'pending from client', 'pending from department'
+            ca_approval,
         } = req.query;
 
         // Validate required parameter
@@ -5142,6 +5172,24 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
                 success: false,
                 message: "staff_username is required"
             });
+        }
+
+        const ALLOWED_CA_APPROVALS = ['pending', 'sent', 'complete'];
+        let caApprovalList = [];
+        if (ca_approval != null && String(ca_approval).trim() !== '') {
+            const raw = Array.isArray(ca_approval) ? ca_approval : String(ca_approval).split(',');
+            caApprovalList = raw
+                .map((item) => String(item).trim().toLowerCase())
+                .filter((item) => item && item !== 'all' && item !== '__all__');
+            const invalidCaApprovals = caApprovalList.filter(
+                (item) => !ALLOWED_CA_APPROVALS.includes(item)
+            );
+            if (invalidCaApprovals.length) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid ca_approval value(s): ${invalidCaApprovals.join(', ')}`,
+                });
+            }
         }
 
         // Verify staff exists and is active
@@ -5187,6 +5235,9 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
                 t.billing_status,
                 t.fees,
                 t.total,
+                t.has_ca,
+                t.ca_id,
+                t.ca_approval,
                 s.name as service_name,
                 s.frequency as service_frequency,
                 p.name as client_name,
@@ -5211,53 +5262,68 @@ router.get("/staff-tasks", auth, validateBranch, async (req, res) => {
             queryParams.push(status);
         }
 
+        if (caApprovalList.length > 0) {
+            const placeholders = caApprovalList.map(() => '?').join(', ');
+            tasksQuery += ` AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) IN (${placeholders})`;
+            queryParams.push(...caApprovalList);
+        }
+
         // Add order by
         tasksQuery += ` ORDER BY t.due_date ASC`;
 
         const [tasks] = await pool.query(tasksQuery, queryParams);
 
         // Format response
-        const taskList = tasks.map(task => ({
-            task_id: task.task_id,
-            task_type: task.task_type || null,
-            service_name: task.service_name,
-            service: {
-                name: task.service_name,
-                frequency: task.service_frequency || null,
-            },
-            client_name: task.client_name,
-            client_mobile: task.client_mobile,
-            firm_name: task.firm_name,
-            firm: {
+        const taskList = [];
+        for (const task of tasks) {
+            const has_ca = String(task.has_ca) === '1' && task.ca_id;
+            const ca = has_ca ? await USER_SNIPPED_DATA(task.ca_id) : null;
+
+            taskList.push({
+                task_id: task.task_id,
+                task_type: task.task_type || null,
+                service_name: task.service_name,
+                service: {
+                    name: task.service_name,
+                    frequency: task.service_frequency || null,
+                },
+                client_name: task.client_name,
+                client_mobile: task.client_mobile,
                 firm_name: task.firm_name,
-                file_no: task.firm_file_no || null,
-            },
-            status: task.task_status,
-            due_date: task.due_date,
-            target_date: task.target_date,
-            create_date: task.create_date,
-            complete_date: task.complete_date,
-            compliance_year: task.compliance_year || null,
-            compliance_period: task.compliance_period || null,
-            dates: {
+                firm: {
+                    firm_name: task.firm_name,
+                    file_no: task.firm_file_no || null,
+                },
+                status: task.task_status,
                 due_date: task.due_date,
-                create_date: task.create_date,
                 target_date: task.target_date,
-                complete_date: task.complete_date || null,
+                create_date: task.create_date,
+                complete_date: task.complete_date,
                 compliance_year: task.compliance_year || null,
                 compliance_period: task.compliance_period || null,
-            },
-            charges: {
-                fees: parseFloat(task.fees || 0),
-                total: parseFloat(task.total || 0),
-            },
-            financials: {
-                fees: parseFloat(task.fees || 0),
-                total: parseFloat(task.total || 0),
-                billing_status: task.billing_status == '0' ? 'pending' :
-                    task.billing_status == '1' ? 'billed' : 'non_billable'
-            }
-        }));
+                dates: {
+                    due_date: task.due_date,
+                    create_date: task.create_date,
+                    target_date: task.target_date,
+                    complete_date: task.complete_date || null,
+                    compliance_year: task.compliance_year || null,
+                    compliance_period: task.compliance_period || null,
+                },
+                charges: {
+                    fees: parseFloat(task.fees || 0),
+                    total: parseFloat(task.total || 0),
+                },
+                financials: {
+                    fees: parseFloat(task.fees || 0),
+                    total: parseFloat(task.total || 0),
+                    billing_status: task.billing_status == '0' ? 'pending' :
+                        task.billing_status == '1' ? 'billed' : 'non_billable'
+                },
+                has_ca: Boolean(has_ca),
+                ca_approval: has_ca ? (task.ca_approval || 'pending') : null,
+                ca: ca,
+            });
+        }
 
         // Summary by status
         const summary = {

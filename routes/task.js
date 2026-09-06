@@ -7,6 +7,7 @@ import { executeCreatePurchase } from "../helpers/purchaseCreate.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
+import { notifyCaApprovalSent } from "../helpers/caApprovalEmail.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
@@ -861,6 +862,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             service_ids,
             ca,
             agent,
+            ca_approval,
         } = req.query || {};
 
         const pageNum = Math.max(1, Number(page_no) || 1);
@@ -868,6 +870,22 @@ router.get("/list", auth, validateBranch, async (req, res) => {
         const offset = (pageNum - 1) * limitNum;
         const statusList = parseQueryArray(status);
         const serviceIdList = parseQueryArray(service_ids);
+        const ALLOWED_CA_APPROVALS = ["pending", "sent", "complete"];
+        let caApprovalList = parseQueryArray(ca_approval).map((item) =>
+            String(item).trim().toLowerCase()
+        );
+        caApprovalList = caApprovalList.filter(
+            (item) => item && item !== "all" && item !== "__all__"
+        );
+        const invalidCaApprovals = caApprovalList.filter(
+            (item) => !ALLOWED_CA_APPROVALS.includes(item)
+        );
+        if (invalidCaApprovals.length) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid ca_approval value(s): ${invalidCaApprovals.join(", ")}`,
+            });
+        }
 
         let baseQuery = `
             FROM tasks t
@@ -911,6 +929,11 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             baseQuery += " AND t.has_agent = '1' AND t.agent_id = ?";
             params.push(String(agent).trim());
         }
+        if (caApprovalList.length > 0) {
+            const caApprovalPlaceholders = caApprovalList.map(() => "?").join(", ");
+            baseQuery += ` AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) IN (${caApprovalPlaceholders})`;
+            params.push(...caApprovalList);
+        }
 
         if (search && String(search).trim() !== "") {
             const searchPattern = `%${String(search).trim()}%`;
@@ -951,6 +974,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.compliance_period,
                 t.has_ca,
                 t.ca_id,
+                t.ca_approval,
                 t.has_agent,
                 t.agent_id,
                 t.fees,
@@ -1043,6 +1067,9 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
             const has_ca = element?.has_ca == '1';
             object.has_ca = has_ca;
+            object.ca_approval = has_ca
+                ? (element?.ca_approval || 'pending')
+                : null;
             if (has_ca) {
                 const ca_data = await USER_SNIPPED_DATA(element?.ca_id);
                 object.ca = ca_data;
@@ -1768,10 +1795,23 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
             });
         }
 
+        const previous = String(task.ca_approval || "pending").toLowerCase();
+
         await pool.query(
             "UPDATE tasks SET ca_approval = ? WHERE branch_id = ? AND task_id = ?",
             [next, branch_id, taskId]
         );
+
+        if (next === "sent" && previous !== "sent") {
+            // Fire-and-forget: do not block / fail the approval update on mail errors.
+            notifyCaApprovalSent({
+                branch_id,
+                task_id: taskId,
+                ca_username: task.ca_id,
+            }).catch((err) => {
+                console.error("CA approval sent notify error:", err?.message || err);
+            });
+        }
 
         return res.status(200).json({
             success: true,
