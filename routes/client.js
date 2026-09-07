@@ -48,11 +48,7 @@ const CLIENT_DELETE_MOBILE_REGEX = /^\d{10}$/;
 const router = express.Router();
 
 const BIRTHDAY_EMAIL_TEMPLATE_TYPES = [
-    "birthday",
-    "birthday_reminder",
-    "birthday reminder",
-    "birthday_wish",
-    "birthday wish",
+    "Birthday Wish",
 ];
 
 function isBirthdayToday(dateOfBirth) {
@@ -403,7 +399,7 @@ router.post("/payment-reminder", auth, validateBranch, async (req, res) => {
                     try {
                         if (channel === "email") {
                             if (!client.email) throw new Error("Client does not have an email address");
-                            const template = await getActivePaymentTemplate(branch_id, "payment_reminder");
+                            const template = await getActivePaymentTemplate(branch_id, "Payment Reminder");
                             const smtpConfig = await getActiveSmtpConfig(branch_id);
                             const sendResult = await sendEmail(
                                 smtpConfig,
@@ -4108,6 +4104,11 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                 document_url: uploaded.url,
                 firm_name: doc.firm_name || "",
                 remark: doc.remark || "",
+                attachment: {
+                    filename: documentName,
+                    content: buffer,
+                    contentType: mimeType || doc.mime_type || "application/octet-stream",
+                },
             });
         }
 
@@ -4134,18 +4135,10 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                     if (!recipientEmail) {
                         throw new Error("Email address is required");
                     }
-                    let template;
-                    try {
-                        template = await getActivePaymentTemplate(
-                            branch_id,
-                            "document_sharing"
-                        );
-                    } catch {
-                        template = await getActivePaymentTemplate(
-                            branch_id,
-                            "document sharing"
-                        );
-                    }
+                    const template = await getActivePaymentTemplate(
+                        branch_id,
+                        "Document Share"
+                    );
                     const smtpConfig = await getActiveSmtpConfig(branch_id);
                     for (const item of prepared) {
                         try {
@@ -4174,7 +4167,8 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
                                 renderTemplate(template.html_body, variables),
                                 template.text_body
                                     ? renderTemplate(template.text_body, variables)
-                                    : null
+                                    : null,
+                                item.attachment ? [item.attachment] : []
                             );
                         } catch (docError) {
                             failures.push(

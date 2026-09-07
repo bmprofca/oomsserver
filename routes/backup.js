@@ -41,7 +41,8 @@ function decrypt(payload) {
 async function getEmailConfig(branch_id) {
     const [config] = await pool.query(
         `SELECT * FROM email_configs 
-         WHERE branch_id = ? AND status = 'active' AND is_default = 1 
+         WHERE branch_id = ? AND status = 'active' 
+         ORDER BY id DESC
          LIMIT 1`,
         [branch_id]
     );

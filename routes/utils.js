@@ -8,6 +8,7 @@ import {
     normalizeSmsChannel,
     smsChannelLabel,
 } from "../helpers/smsChannel.js";
+import { emailTemplateTypeCandidates, formatEmailTemplateType } from "../helpers/emailStaticTemplateTypes.js";
 
 const router = express.Router();
 const statesAndDistricts = JSON.parse(
@@ -41,90 +42,21 @@ const FIRM_TYPES = [
 const WHATSAPP_CHANNELS = ["disabled", "ooms system", "ooms web", "onechatting"];
 
 function normalizeNotificationType(typeRaw) {
-    const raw = typeRaw == null ? "" : String(typeRaw).trim().toLowerCase();
-    if (!raw) return "";
-
-    const compact = raw.replace(/[\s_-]+/g, " ").trim();
-
-    const aliases = {
-        payment: "payment",
-        receive: "payment receive",
-        received: "received",
-        "payment receive": "payment receive",
-        "payment receipt": "payment_receipt",
-        "payment reminder": "payment reminder",
-        payment_reminder: "payment reminder",
-        sale: "sale",
-        "sale invoice": "sale_invoice",
-        sale_invoice: "sale_invoice",
-        "sale reminder": "sale_reminder",
-        sale_reminder: "sale_reminder",
-        "task create": "task create",
-        "task complete": "task complete",
-        "task cancel": "task cancel",
-        birthday: "birthday wish",
-        "birthday reminder": "birthday wish",
-        "birthday wish": "birthday wish",
-        "document sharing": "document sharing",
-        document_sharing: "document sharing",
-        "document share": "document sharing",
-    };
-
-    return aliases[compact] || compact;
+    return formatEmailTemplateType(typeRaw).toLowerCase();
 }
 
 /** Alternate template names used across email / SMS / WhatsApp for the same intent. */
 function notificationTypeCandidates(notificationType) {
+    const emailCandidates = emailTemplateTypeCandidates(notificationType);
+    if (emailCandidates.length) return emailCandidates;
+
     const primary = String(notificationType || "").trim().toLowerCase();
     if (!primary) return [];
-
-    const candidates = new Set([
+    return [
         primary,
         primary.replace(/ /g, "_"),
         primary.replace(/ /g, "-"),
-    ]);
-
-    if (primary === "birthday wish" || primary === "birthday reminder" || primary === "birthday") {
-        [
-            "birthday",
-            "birthday wish",
-            "birthday reminder",
-            "birthday_wish",
-            "birthday_reminder",
-            "birthday-wish",
-            "birthday-reminder",
-        ].forEach((item) => candidates.add(item));
-    }
-
-    if (
-        primary === "document sharing" ||
-        primary === "document_sharing" ||
-        primary === "document share"
-    ) {
-        [
-            "document sharing",
-            "document_sharing",
-            "document-sharing",
-            "document share",
-            "document_share",
-        ].forEach((item) => candidates.add(item));
-    }
-
-    if (
-        primary === "sale" ||
-        primary === "sale invoice" ||
-        primary === "sale_invoice"
-    ) {
-        [
-            "sale",
-            "sale invoice",
-            "sale_invoice",
-            "sale-invoice",
-            "saleinvoice",
-        ].forEach((item) => candidates.add(item));
-    }
-
-    return [...candidates];
+    ];
 }
 
 function channelResult(available, reason = "", extra = {}) {
@@ -199,7 +131,7 @@ async function checkEmailAvailability(branch_id, notificationType) {
             `SELECT config_id, config_name
              FROM email_configs
              WHERE branch_id = ? AND status = 'active'
-             ORDER BY is_default DESC, id DESC
+             ORDER BY id DESC
              LIMIT 1`,
             [branch_id]
         );
@@ -214,45 +146,12 @@ async function checkEmailAvailability(branch_id, notificationType) {
              WHERE branch_id = ?
                AND status = 'active'
                AND LOWER(TRIM(template_type)) IN (${typeCandidates.map(() => "?").join(", ")})
-             ORDER BY is_default DESC, id DESC
+             ORDER BY id DESC
              LIMIT 1`,
             [branch_id, ...typeCandidates]
         );
 
-        let hasTemplate = Boolean(activeTemplate?.template_id);
-
-        // Sale / payment static emails often resolve via email_static_mapping columns.
-        if (!hasTemplate) {
-            const primary = String(notificationType || "").trim().toLowerCase();
-            const mapCol =
-                primary === "sale" ||
-                    primary === "sale_invoice" ||
-                    primary === "sale invoice"
-                    ? "sale_invoice"
-                    : primary === "payment"
-                        ? "payment"
-                        : primary === "payment receive" ||
-                            primary === "receive" ||
-                            primary === "received"
-                            ? "payment_receipt"
-                            : null;
-
-            if (mapCol) {
-                const [[mapRow]] = await poolQuery(
-                    `SELECT \`${mapCol}\` AS mapped_id
-                     FROM email_static_mapping
-                     WHERE branch_id = ?
-                       AND \`${mapCol}\` IS NOT NULL
-                       AND TRIM(\`${mapCol}\`) <> ''
-                     ORDER BY id ASC
-                     LIMIT 1`,
-                    [branch_id]
-                );
-                if (mapRow?.mapped_id) {
-                    hasTemplate = true;
-                }
-            }
-        }
+        const hasTemplate = Boolean(activeTemplate?.template_id);
 
         if (!hasTemplate) {
             return channelResult(false, `Email template is not configured for type '${notificationType}'`);

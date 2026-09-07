@@ -1,0 +1,27 @@
+CREATE TABLE IF NOT EXISTS dsc_companies (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  company_id VARCHAR(40) NOT NULL,
+  name VARCHAR(160) NOT NULL,
+  slug VARCHAR(80) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+  create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  modify_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_dsc_companies_id (company_id),
+  UNIQUE KEY uq_dsc_companies_slug (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS dsc_types (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  type_id VARCHAR(40) NOT NULL,
+  name VARCHAR(160) NOT NULL,
+  slug VARCHAR(80) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+  create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  modify_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_dsc_types_id (type_id),
+  UNIQUE KEY uq_dsc_types_slug (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

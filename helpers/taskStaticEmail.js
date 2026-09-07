@@ -4,16 +4,14 @@ import { getConfigWithDecryptedPassword } from "../services/emailConfigService.j
 import { renderRecipientEmail } from "../utils/templateRenderer.js";
 import { USER_SNIPPED_DATA } from "./function.js";
 
-const TASK_CREATE_TEMPLATE_TYPE = "task create";
-const TASK_COMPLETE_TEMPLATE_TYPE = "task complete";
-const TASK_CANCEL_TEMPLATE_TYPE = "task cancel";
+import { EMAIL_STATIC_TEMPLATE_TYPES, findActiveStaticTemplateId, getActiveBranchSmtpConfigId } from "./emailStaticTemplateTypes.js";
+
+const TASK_CREATE_TEMPLATE_TYPE = EMAIL_STATIC_TEMPLATE_TYPES.TASK_CREATE;
+const TASK_COMPLETE_TEMPLATE_TYPE = EMAIL_STATIC_TEMPLATE_TYPES.TASK_COMPLETE;
+const TASK_CANCEL_TEMPLATE_TYPE = "Task Cancel";
 
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
-}
-
-function branchKey(branch_id) {
-    return branch_id == null ? "" : String(branch_id);
 }
 
 function formatDateTime(value) {
@@ -34,94 +32,18 @@ function formatDateOnly(value) {
 }
 
 async function getDefaultActiveConfigId(branch_id) {
-    const [rows] = await pool.query(
-        `SELECT config_id FROM email_configs
-         WHERE branch_id = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [branch_id]
-    );
-    return rows[0]?.config_id || null;
+    return getActiveBranchSmtpConfigId(branch_id);
 }
 
 async function resolveTaskCreateTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT task_create FROM email_static_mapping
-         WHERE branch_id = ?
-           AND task_create IS NOT NULL
-           AND TRIM(task_create) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].task_create) {
-        return String(mapRows[0].task_create).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, TASK_CREATE_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, TASK_CREATE_TEMPLATE_TYPE);
 }
 async function resolveTaskCompleteTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT task_complete FROM email_static_mapping
-         WHERE branch_id = ?
-           AND task_complete IS NOT NULL
-           AND TRIM(task_complete) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].task_complete) {
-        return String(mapRows[0].task_complete).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, TASK_COMPLETE_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, TASK_COMPLETE_TEMPLATE_TYPE);
 }
 
 async function resolveTaskCancelTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT task_cancel FROM email_static_mapping
-         WHERE branch_id = ?
-           AND task_cancel IS NOT NULL
-           AND TRIM(task_cancel) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].task_cancel) {
-        return String(mapRows[0].task_cancel).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, TASK_CANCEL_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, TASK_CANCEL_TEMPLATE_TYPE);
 }
 
 async function loadActiveStaticTemplate(template_id) {

@@ -327,7 +327,7 @@ async function processAutopayClient(reminderRow, { force = false, sent_by = null
             try {
                 if (channel === "email") {
                     if (!client.email) throw new Error("Client does not have an email address");
-                    const template = await getActivePaymentTemplate(branch_id, "payment_reminder");
+                    const template = await getActivePaymentTemplate(branch_id, "Payment Reminder");
                     const smtpConfig = await getActiveSmtpConfig(branch_id);
                     const sendResult = await sendEmail(
                         smtpConfig,

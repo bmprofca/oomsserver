@@ -47,6 +47,12 @@ async function createConfig({ branch_id, username, payload }) {
     try {
         await conn.beginTransaction();
 
+        if (status === "active") {
+            await conn.query(
+                "UPDATE email_configs SET status = 'inactive', modify_by = ?, modify_date = NOW() WHERE branch_id = ?",
+                [username || null, branch_id]
+            );
+        }
         if (Number(is_default) === 1) {
             await conn.query(
                 "UPDATE email_configs SET is_default = 0, modify_by = ?, modify_date = NOW() WHERE branch_id = ?",
@@ -158,7 +164,7 @@ async function listConfigs({ branch_id, page_no = 1, limit = 10 }) {
         `SELECT config_id, branch_id, config_name, host, port, secure, username, from_email, from_name, reply_to, is_default, status, create_by, modify_by, create_date, modify_date
          FROM email_configs
          WHERE branch_id = ?
-         ORDER BY is_default DESC, id DESC
+         ORDER BY FIELD(status, 'active', 'inactive') DESC, id DESC
          LIMIT ? OFFSET ?`,
         [branch_id, size, offset]
     );
@@ -191,11 +197,33 @@ async function getConfigDetails({ branch_id, config_id }) {
 
 async function changeStatus({ branch_id, config_id, status, username }) {
     if (!["active", "inactive"].includes(status)) throw new Error("Invalid status value");
-    const [result] = await pool.query(
-        "UPDATE email_configs SET status = ?, modify_by = ?, modify_date = NOW() WHERE branch_id = ? AND config_id = ?",
-        [status, username || null, branch_id, config_id]
-    );
-    if (result.affectedRows === 0) throw new Error("SMTP config not found");
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [exists] = await conn.query(
+            "SELECT config_id FROM email_configs WHERE branch_id = ? AND config_id = ? LIMIT 1",
+            [branch_id, config_id]
+        );
+        if (!exists.length) throw new Error("SMTP config not found");
+
+        if (status === "active") {
+            await conn.query(
+                "UPDATE email_configs SET status = 'inactive', modify_by = ?, modify_date = NOW() WHERE branch_id = ? AND config_id <> ?",
+                [username || null, branch_id, config_id]
+            );
+        }
+
+        await conn.query(
+            "UPDATE email_configs SET status = ?, modify_by = ?, modify_date = NOW() WHERE branch_id = ? AND config_id = ?",
+            [status, username || null, branch_id, config_id]
+        );
+        await conn.commit();
+    } catch (error) {
+        await conn.rollback();
+        throw error;
+    } finally {
+        conn.release();
+    }
     return getConfigDetails({ branch_id, config_id });
 }
 

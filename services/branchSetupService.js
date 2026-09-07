@@ -1,6 +1,7 @@
 import pool from '../db.js';
 import { TODAY_DATE } from '../helpers/function.js';
 import { clampDueDateOffset } from '../helpers/complianceDueDate.js';
+import { ensureBranchStaticCatalog } from '../helpers/emailStaticTemplateTypes.js';
 
 const DEFAULT_INVOICE_PREFIXES = [
     { type: 'opening balance', prefix: 'OB/' },
@@ -185,10 +186,12 @@ export async function initializeBranchDefaults({
 
     const invoice_prefixes = await setupInvoicePrefixes(branchId, createdBy, connection);
     const branch_service = await setupDefaultBranchService(branchId, createdBy, connection);
+    const static_templates = await ensureBranchStaticCatalog(branchId, createdBy, connection);
 
     return {
         branch_id: branchId,
         invoice_prefixes,
         branch_service,
+        static_templates: static_templates.map((row) => row.template_type),
     };
 }

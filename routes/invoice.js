@@ -450,18 +450,10 @@ router.post("/share", auth, validateBranch, async (req, res) => {
                     if (!recipientEmail) {
                         throw new Error("Email address is required");
                     }
-                    let template;
-                    try {
-                        template = await getActivePaymentTemplate(
-                            branch_id,
-                            "document_sharing"
-                        );
-                    } catch {
-                        template = await getActivePaymentTemplate(
-                            branch_id,
-                            "document sharing"
-                        );
-                    }
+                    const template = await getActivePaymentTemplate(
+                        branch_id,
+                        "Document Share"
+                    );
                     const smtpConfig = await getActiveSmtpConfig(branch_id);
                     const sendResult = await sendEmail(
                         smtpConfig,
@@ -470,7 +462,14 @@ router.post("/share", auth, validateBranch, async (req, res) => {
                         renderTemplate(template.html_body, variables),
                         template.text_body
                             ? renderTemplate(template.text_body, variables)
-                            : null
+                            : null,
+                        [
+                            {
+                                filename: documentName,
+                                content: built.buffer,
+                                contentType: "application/pdf",
+                            },
+                        ]
                     );
                     channelResults.email = {
                         status: "sent",

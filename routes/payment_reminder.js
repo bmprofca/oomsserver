@@ -4,6 +4,12 @@ import nodemailer from "nodemailer";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE } from "../helpers/function.js";
+import {
+    EMAIL_STATIC_TEMPLATE_TYPES,
+    emailTemplateTypeSqlIn,
+    findActiveStaticTemplate,
+    formatEmailTemplateType,
+} from "../helpers/emailStaticTemplateTypes.js";
 
 const router = express.Router();
 
@@ -231,25 +237,17 @@ async function getUserBalance(branch_id, username) {
 /**
  * Get active payment reminder template by type
  */
-async function getActivePaymentTemplate(branch_id, template_type = "payment_reminder") {
-    const [rows] = await pool.query(
-        `SELECT 
-            template_id, template_type, template_name, subject, 
-            html_body, text_body, variables_json, status, is_default
-         FROM email_static_templates 
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, create_date DESC
-         LIMIT 1`,
-        [branch_id, template_type]
-    );
+async function getActivePaymentTemplate(branch_id, template_type = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_REMINDER) {
+    const row = await findActiveStaticTemplate(branch_id, template_type);
 
-    if (!rows.length) {
-        throw new Error(`No active ${template_type} template found`);
+    if (!row) {
+        throw new Error(`No active ${formatEmailTemplateType(template_type)} template found`);
     }
 
     return {
-        ...rows[0],
-        variables_json: parseJSON(rows[0].variables_json, [])
+        ...row,
+        template_type: formatEmailTemplateType(row.template_type),
+        variables_json: parseJSON(row.variables_json, [])
     };
 }
 
@@ -264,7 +262,7 @@ async function getActiveSmtpConfig(branch_id, config_id = null) {
         query += ` AND config_id = ?`;
         params.push(config_id);
     } else {
-        query += ` ORDER BY is_default DESC LIMIT 1`;
+        query += ` ORDER BY id DESC LIMIT 1`;
     }
 
     const [rows] = await pool.query(query, params);
@@ -282,7 +280,7 @@ async function getActiveSmtpConfig(branch_id, config_id = null) {
 /**
  * Send email using SMTP config
  */
-async function sendEmail(smtpConfig, to, subject, html, text = null) {
+async function sendEmail(smtpConfig, to, subject, html, text = null, attachments = null) {
     const transporter = nodemailer.createTransport({
         host: smtpConfig.host,
         port: Number(smtpConfig.port),
@@ -302,7 +300,8 @@ async function sendEmail(smtpConfig, to, subject, html, text = null) {
         to,
         subject,
         html,
-        ...(text && { text })
+        ...(text && { text }),
+        ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
     };
 
     const result = await transporter.sendMail(mailOptions);
@@ -524,7 +523,7 @@ async function preparePaymentReminderVariables(branch_id, username, user, balanc
 router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { username, config_id, template_type = "payment_reminder" } = req.body || {};
+        const { username, config_id, template_type = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_REMINDER } = req.body || {};
 
         if (!username) {
             return fail(res, "username is required");
@@ -598,7 +597,7 @@ router.post("/payment-reminder/send", auth, validateBranch, async (req, res) => 
 router.post("/payment-reminder/bulk-send", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
-        const { usernames, config_id, template_type = "payment_reminder" } = req.body || {};
+        const { usernames, config_id, template_type = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_REMINDER } = req.body || {};
 
         if (!usernames || !Array.isArray(usernames) || usernames.length === 0) {
             return fail(res, "usernames array is required");
@@ -886,7 +885,8 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
             return fail(res, "template_name, subject and html_body are required");
         }
 
-        const template_type = "payment_reminder";
+        const template_type = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_REMINDER;
+        const typeMatch = emailTemplateTypeSqlIn("template_type", template_type);
         const variables = parseVariables(subject, html_body, text_body);
 
         let result;
@@ -894,8 +894,8 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
         if (template_id) {
             const [existing] = await pool.query(
                 `SELECT template_id FROM email_static_templates 
-                 WHERE branch_id = ? AND template_id = ? AND template_type = ?`,
-                [branch_id, template_id, template_type]
+                 WHERE branch_id = ? AND template_id = ? AND ${typeMatch.sql}`,
+                [branch_id, template_id, ...typeMatch.params]
             );
 
             if (!existing.length) {
@@ -906,18 +906,18 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
                 await pool.query(
                     `UPDATE email_static_templates 
                      SET is_default = 0, modify_by = ?, modify_date = NOW()
-                     WHERE branch_id = ? AND template_type = ?`,
-                    [username, branch_id, template_type]
+                     WHERE branch_id = ? AND ${typeMatch.sql}`,
+                    [username, branch_id, ...typeMatch.params]
                 );
             }
 
             await pool.query(
                 `UPDATE email_static_templates 
-                 SET template_name = ?, subject = ?, html_body = ?, text_body = ?, 
+                 SET template_type = ?, template_name = ?, subject = ?, html_body = ?, text_body = ?, 
                      variables_json = ?, is_default = ?, modify_by = ?, modify_date = NOW()
-                 WHERE branch_id = ? AND template_id = ? AND template_type = ?`,
-                [template_name, subject, html_body, text_body, JSON.stringify(variables),
-                    Number(is_default), username, branch_id, template_id, template_type]
+                 WHERE branch_id = ? AND template_id = ?`,
+                [template_type, template_name, subject, html_body, text_body, JSON.stringify(variables),
+                    Number(is_default), username, branch_id, template_id]
             );
 
             result = { template_id };
@@ -928,8 +928,8 @@ router.post("/payment-reminder/template", auth, validateBranch, async (req, res)
                 await pool.query(
                     `UPDATE email_static_templates 
                      SET is_default = 0, modify_by = ?, modify_date = NOW()
-                     WHERE branch_id = ? AND template_type = ?`,
-                    [username, branch_id, template_type]
+                     WHERE branch_id = ? AND ${typeMatch.sql}`,
+                    [username, branch_id, ...typeMatch.params]
                 );
             }
 
@@ -961,12 +961,13 @@ router.get("/payment-reminder/template", auth, validateBranch, async (req, res) 
     try {
         const branch_id = req.branch_id;
 
+        const typeMatch = emailTemplateTypeSqlIn("template_type", EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_REMINDER);
         const [templates] = await pool.query(
             `SELECT template_id, template_name, subject, html_body, text_body, variables_json, is_default, status, create_date
              FROM email_static_templates 
-             WHERE branch_id = ? AND template_type = 'payment_reminder' AND status = 'active'
+             WHERE branch_id = ? AND ${typeMatch.sql} AND status = 'active'
              ORDER BY is_default DESC, create_date DESC`,
-            [branch_id]
+            [branch_id, ...typeMatch.params]
         );
 
         const defaultTemplate = templates.find(t => t.is_default === 1) || templates[0];

@@ -4,6 +4,15 @@ import nodemailer from "nodemailer";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
+import {
+    emailTemplateTypeSqlIn,
+    ensureBranchStaticCatalog,
+    formatEmailTemplateType,
+    getActiveBranchSmtpConfigId,
+    getSuggestedStaticVariables,
+    isCanonicalStaticType,
+    STATIC_TYPE_LIST,
+} from "../helpers/emailStaticTemplateTypes.js";
 
 const router = express.Router();
 
@@ -163,21 +172,23 @@ async function incrementDailyCount(configId, branchId) {
  */
 async function getAvailableConfigs(branchId, primaryConfigId, fallbackConfigId = null) {
     const availableConfigs = [];
+    const activeId = await getActiveBranchSmtpConfigId(branchId);
+    const resolvedPrimary = primaryConfigId || activeId;
     
-    console.log(`Getting available configs - Primary: ${primaryConfigId}, Fallback: ${fallbackConfigId}`);
+    console.log(`Getting available configs - Active: ${activeId}, Stored: ${primaryConfigId}, Fallback: ${fallbackConfigId}`);
     
     // Check primary config
-    if (primaryConfigId) {
+    if (resolvedPrimary) {
         const [primary] = await pool.query(
             `SELECT * FROM email_configs 
              WHERE branch_id = ? AND config_id = ? AND status = 'active'
              LIMIT 1`,
-            [branchId, primaryConfigId]
+            [branchId, resolvedPrimary]
         );
         
         if (primary.length) {
             console.log(`Primary config found: ${primary[0].config_name}`);
-            const limitCheck = await checkAndResetDailyLimit(primaryConfigId, branchId);
+            const limitCheck = await checkAndResetDailyLimit(resolvedPrimary, branchId);
             console.log(`Primary daily limit - canSend: ${limitCheck.canSend}, remaining: ${limitCheck.remaining}`);
             if (limitCheck.canSend) {
                 availableConfigs.push({
@@ -645,6 +656,9 @@ router.post("/config/create", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      if (status === "active") {
+        await conn.query("UPDATE email_configs SET status = 'inactive', modify_by=?, modify_date=NOW() WHERE branch_id=?", [username, branch_id]);
+      }
       if (Number(is_default) === 1) {
         await conn.query("UPDATE email_configs SET is_default = 0, modify_by=?, modify_date=NOW() WHERE branch_id=?", [username, branch_id]);
       }
@@ -697,7 +711,7 @@ router.get("/config/list", auth, validateBranch, async (req, res) => {
     const page_no = Math.max(Number(req.query.page_no || 1), 1);
     const limit = Math.max(Number(req.query.limit || 10), 1);
     const offset = (page_no - 1) * limit;
-    const [rows] = await pool.query("SELECT config_id, branch_id, config_name, host, port, secure, username, password_encrypted, from_email, from_name, reply_to, is_default, status, create_by, modify_by, create_date, modify_date FROM email_configs WHERE branch_id=? ORDER BY is_default DESC, id DESC LIMIT ? OFFSET ?", [branch_id, limit, offset]);
+    const [rows] = await pool.query("SELECT config_id, branch_id, config_name, host, port, secure, username, password_encrypted, from_email, from_name, reply_to, is_default, status, create_by, modify_by, create_date, modify_date FROM email_configs WHERE branch_id=? ORDER BY FIELD(status, 'active', 'inactive') DESC, id DESC LIMIT ? OFFSET ?", [branch_id, limit, offset]);
     const data = rows.map((row) => {
       let password = "";
       try {
@@ -763,13 +777,174 @@ router.put("/config/set-default", auth, validateBranch, async (req, res) => {
   }
 });
 
+const CONFIG_DELETE_CHILD_COLS = [
+  ["email_broadcasts", "config_id"],
+  ["email_broadcasts", "fallback_config_id"],
+  ["email_send_attempts", "config_id"],
+  ["email_broadcast_recipients", "used_config_id"],
+];
+
+let configDeleteSchemaReady = false;
+
+async function ensureConfigDeleteSchema() {
+  if (configDeleteSchemaReady) return;
+
+  for (const [table, column] of CONFIG_DELETE_CHILD_COLS) {
+    const [cols] = await pool.query(
+      `SELECT COLUMN_TYPE, IS_NULLABLE
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [table, column]
+    );
+    if (!cols.length) continue;
+
+    const [fks] = await pool.query(
+      `SELECT rc.CONSTRAINT_NAME, rc.DELETE_RULE
+       FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+       JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+         ON kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
+        AND kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+       WHERE rc.CONSTRAINT_SCHEMA = DATABASE()
+         AND kcu.TABLE_NAME = ?
+         AND kcu.COLUMN_NAME = ?
+         AND kcu.REFERENCED_TABLE_NAME = 'email_configs'`,
+      [table, column]
+    );
+    const fk = fks[0];
+    const needsNullable = cols[0].IS_NULLABLE === "NO";
+    const needsFk = Boolean(fk && fk.DELETE_RULE !== "SET NULL");
+    if (!needsNullable && !needsFk) continue;
+
+    if (fk) {
+      await pool.query(`ALTER TABLE \`${table}\` DROP FOREIGN KEY \`${fk.CONSTRAINT_NAME}\``);
+    }
+    if (needsNullable) {
+      await pool.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` ${cols[0].COLUMN_TYPE} NULL`);
+    }
+    await pool.query(
+      `ALTER TABLE \`${table}\`
+       ADD CONSTRAINT \`${fk?.CONSTRAINT_NAME || `fk_${table}_${column}`}\`
+       FOREIGN KEY (\`${column}\`) REFERENCES email_configs (config_id)
+       ON UPDATE CASCADE ON DELETE SET NULL`
+    );
+  }
+
+  configDeleteSchemaReady = true;
+}
+
+router.put("/config/delete", auth, validateBranch, async (req, res) => {
+  const { config_id } = req.body || {};
+  if (!config_id) return fail(res, "config_id is required");
+
+  try {
+    await ensureConfigDeleteSchema();
+  } catch (error) {
+    console.error("SMTP config delete schema check failed:", error);
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [exists] = await conn.query(
+      "SELECT config_id FROM email_configs WHERE branch_id=? AND config_id=? LIMIT 1",
+      [req.branch_id, config_id]
+    );
+    if (!exists.length) {
+      await conn.rollback();
+      return fail(res, "SMTP config not found", 404);
+    }
+
+    const [active] = await conn.query(
+      `SELECT COUNT(*) AS total
+       FROM email_broadcasts
+       WHERE branch_id=? AND (config_id=? OR fallback_config_id=?)
+         AND status IN ('scheduled', 'processing', 'paused')`,
+      [req.branch_id, config_id, config_id]
+    );
+    if (Number(active[0]?.total || 0) > 0) {
+      await conn.rollback();
+      return fail(res, "This SMTP config is used by scheduled or running broadcasts. Finish or cancel them first.");
+    }
+
+    await conn.query(
+      "UPDATE email_broadcasts SET config_id=NULL, modify_date=NOW() WHERE branch_id=? AND config_id=?",
+      [req.branch_id, config_id]
+    );
+    await conn.query(
+      "UPDATE email_broadcasts SET fallback_config_id=NULL, modify_date=NOW() WHERE branch_id=? AND fallback_config_id=?",
+      [req.branch_id, config_id]
+    );
+
+    try {
+      await conn.query("DELETE FROM email_daily_usage WHERE branch_id=? AND config_id=?", [req.branch_id, config_id]);
+    } catch (error) {
+      if (error?.errno !== 1146) throw error;
+    }
+    try {
+      await conn.query(
+        "UPDATE email_send_attempts SET config_id=NULL WHERE branch_id=? AND config_id=?",
+        [req.branch_id, config_id]
+      );
+    } catch (error) {
+      if (![1054, 1146].includes(error?.errno)) throw error;
+    }
+    try {
+      await conn.query(
+        "UPDATE email_broadcast_recipients SET used_config_id=NULL WHERE branch_id=? AND used_config_id=?",
+        [req.branch_id, config_id]
+      );
+    } catch (error) {
+      if (![1054, 1146].includes(error?.errno)) throw error;
+    }
+
+    const [result] = await conn.query(
+      "DELETE FROM email_configs WHERE branch_id=? AND config_id=?",
+      [req.branch_id, config_id]
+    );
+    if (!result.affectedRows) {
+      await conn.rollback();
+      return fail(res, "SMTP config not found", 404);
+    }
+
+    await conn.commit();
+    return ok(res, "SMTP config deleted successfully", {});
+  } catch (error) {
+    await conn.rollback();
+    if (error?.errno === 1451) {
+      return fail(res, "This SMTP config is still linked to existing email records and cannot be deleted.");
+    }
+    return fail(res, error.message || "Failed to delete SMTP config");
+  } finally {
+    conn.release();
+  }
+});
+
 router.put("/config/change-status", auth, validateBranch, async (req, res) => {
   const { config_id, status } = req.body || {};
   if (!config_id || !status) return fail(res, "config_id and status are required");
   if (!["active", "inactive"].includes(status)) return fail(res, "Invalid status value");
-  const [result] = await pool.query("UPDATE email_configs SET status=?, modify_by=?, modify_date=NOW() WHERE branch_id=? AND config_id=?", [status, userFromReq(req), req.branch_id, config_id]);
-  if (!result.affectedRows) return fail(res, "SMTP config not found", 404);
-  return ok(res, "SMTP config status updated successfully", {});
+  const username = userFromReq(req);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [exists] = await conn.query("SELECT config_id FROM email_configs WHERE branch_id=? AND config_id=? LIMIT 1", [req.branch_id, config_id]);
+    if (!exists.length) {
+      await conn.rollback();
+      return fail(res, "SMTP config not found", 404);
+    }
+    if (status === "active") {
+      await conn.query("UPDATE email_configs SET status='inactive', modify_by=?, modify_date=NOW() WHERE branch_id=? AND config_id<>?", [username, req.branch_id, config_id]);
+    }
+    await conn.query("UPDATE email_configs SET status=?, modify_by=?, modify_date=NOW() WHERE branch_id=? AND config_id=?", [status, username, req.branch_id, config_id]);
+    await conn.commit();
+    return ok(res, "SMTP config status updated successfully", {});
+  } catch (error) {
+    await conn.rollback();
+    return fail(res, error.message);
+  } finally {
+    conn.release();
+  }
 });
 
 // TEMPLATE APIs
@@ -859,8 +1034,14 @@ router.post("/broadcast/create", auth, validateBranch, async (req, res) => {
             daily_limit = 1000
         } = req.body || {};
         
-        if (!config_id || !template_id || !broadcast_name) {
-            return fail(res, "config_id, template_id and broadcast_name are required");
+        if (!template_id || !broadcast_name) {
+            return fail(res, "template_id and broadcast_name are required");
+        }
+
+        const activeConfigId = await getActiveBranchSmtpConfigId(branch_id);
+        const resolvedConfigId = config_id || activeConfigId;
+        if (!resolvedConfigId) {
+            return fail(res, "Select an SMTP configuration or activate one first.");
         }
         
         if (!["now", "scheduled"].includes(schedule_type)) {
@@ -881,24 +1062,15 @@ router.post("/broadcast/create", auth, validateBranch, async (req, res) => {
             }
         }
 
-        // Check if config exists and is active
         const [cfg] = await pool.query(
-            "SELECT config_id, daily_limit, username, password_encrypted, host, port, secure, from_email, from_name FROM email_configs WHERE branch_id=? AND config_id=? AND status='active' LIMIT 1", 
-            [branch_id, config_id]
+            "SELECT config_id, daily_limit, username, password_encrypted, host, port, secure, from_email, from_name, status FROM email_configs WHERE branch_id=? AND config_id=? LIMIT 1", 
+            [branch_id, resolvedConfigId]
         );
         if (!cfg.length) {
-            return fail(res, "Active SMTP config not found");
+            return fail(res, "SMTP config not found");
         }
-        
-        // Check fallback config if provided
-        if (fallback_config_id) {
-            const [fallbackCfg] = await pool.query(
-                "SELECT config_id FROM email_configs WHERE branch_id=? AND config_id=? AND status='active' LIMIT 1", 
-                [branch_id, fallback_config_id]
-            );
-            if (!fallbackCfg.length) {
-                return fail(res, "Fallback SMTP config not found or inactive");
-            }
+        if (cfg[0].status !== "active") {
+            return fail(res, "Selected SMTP config is inactive. Activate it first.");
         }
         
         const [tpl] = await pool.query(
@@ -928,7 +1100,7 @@ router.post("/broadcast/create", auth, validateBranch, async (req, res) => {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 
                          ?, ?, 0, 0, 0, ?, ?, ?, NOW(), NOW())`,
                 [
-                    broadcast_id, branch_id, config_id, fallback_config_id || null, template_id, broadcast_name, 
+                    broadcast_id, branch_id, resolvedConfigId, null, template_id, broadcast_name, 
                     template.subject, template.html_body, template.text_body,
                     template.variables_json, JSON.stringify(global_variables_json || {}), schedule_type,
                    schedule_type === "scheduled" ? formatScheduledTime(scheduled_at, timezone) : null, timezone, 
@@ -1084,187 +1256,105 @@ router.post("/broadcast/process-due", auth, validateBranch, async (req, res) => 
 });
 
 
-// ==================== STATIC TEMPLATE APIs (email_static_templates) ====================
+// ==================== STATIC TEMPLATE APIs (notification catalog, independent of campaign templates) ====================
+
+function mapStaticTemplateRow(row) {
+    return {
+        ...row,
+        template_type: formatEmailTemplateType(row.template_type),
+        variables_json: parseJSON(row.variables_json, []),
+        total_variables: parseJSON(row.variables_json, []).length,
+    };
+}
+
+async function listStaticCatalogHandler(req, res) {
+    try {
+        const rows = await ensureBranchStaticCatalog(req.branch_id, userFromReq(req));
+        const data = rows.map(mapStaticTemplateRow);
+        return ok(res, "Static notification templates retrieved successfully", data, {
+            page_no: 1,
+            limit: data.length,
+            total: data.length,
+            total_pages: 1,
+            has_more: false,
+            types: STATIC_TYPE_LIST,
+        });
+    } catch (error) {
+        console.error("Get static catalog error:", error);
+        return fail(res, error.message || "Failed to fetch templates");
+    }
+}
+
+router.get("/static-template/catalog", auth, validateBranch, listStaticCatalogHandler);
+router.get("/static-template/active-list", auth, validateBranch, listStaticCatalogHandler);
 
 /**
- * Create a new static template
- * POST /api/email/static-template/create
- * Body: { template_type, template_name, subject, html_body, text_body, status, is_default }
+ * Upsert a catalog type (branches customize the predefined 7 types; they cannot invent new ones).
  */
 router.post("/static-template/create", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const username = userFromReq(req);
-        const { 
-            template_type, 
-            template_name, 
-            subject, 
-            html_body, 
-            text_body = null, 
-            status = "active",
-            is_default = 0
+        const {
+            template_type,
+            template_name,
+            subject,
+            html_body,
+            text_body = null,
+            status = "inactive",
         } = req.body || {};
 
-        // Validation
-        if (!template_type || template_type.trim() === "") {
-            return fail(res, "template_type is required (e.g., task_create, task_complete, payment_receipt)");
+        if (!isCanonicalStaticType(template_type)) {
+            return fail(res, `template_type must be one of: ${STATIC_TYPE_LIST.join(", ")}`);
         }
-        if (!template_name || template_name.trim() === "") {
-            return fail(res, "template_name is required");
-        }
-        if (!subject || subject.trim() === "") {
-            return fail(res, "subject is required");
-        }
-        if (!html_body || html_body.trim() === "") {
-            return fail(res, "html_body is required");
-        }
-        if (!["active", "inactive"].includes(status)) {
-            return fail(res, "status must be 'active' or 'inactive'");
-        }
+        if (!template_name || !String(template_name).trim()) return fail(res, "template_name is required");
+        if (!subject || !String(subject).trim()) return fail(res, "subject is required");
+        if (!html_body || !String(html_body).trim()) return fail(res, "html_body is required");
+        if (!["active", "inactive"].includes(status)) return fail(res, "status must be 'active' or 'inactive'");
 
-        // Generate unique template_id
-        const template_id = newId("stpl");
-
-        // Parse variables from template
+        await ensureBranchStaticCatalog(branch_id, username);
+        const storedType = formatEmailTemplateType(template_type);
+        const typeMatch = emailTemplateTypeSqlIn("template_type", storedType);
         const variables = parseVariables(subject, html_body, text_body);
 
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
-
-            // If is_default = 1, remove default from other templates of same type
-            if (Number(is_default) === 1) {
-                await conn.query(
-                    `UPDATE email_static_templates 
-                     SET is_default = 0, modify_by = ?, modify_date = NOW() 
-                     WHERE branch_id = ? AND template_type = ?`,
-                    [username, branch_id, template_type]
-                );
-            }
-
-            // Insert new template
-            await conn.query(
-                `INSERT INTO email_static_templates (
-                    template_id, branch_id, template_type, template_name, 
-                    subject, html_body, text_body, variables_json, 
-                    status, is_default, create_by, modify_by, create_date, modify_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-                [
-                    template_id, branch_id, template_type, template_name.trim(),
-                    subject.trim(), html_body, text_body, JSON.stringify(variables),
-                    status, Number(is_default), username, username
-                ]
-            );
-
-            await conn.commit();
-        } catch (e) {
-            await conn.rollback();
-            throw e;
-        } finally {
-            conn.release();
-        }
-
-        // Fetch created template
-        const [rows] = await pool.query(
-            `SELECT template_id, branch_id, template_type, template_name, subject, 
-                    html_body, text_body, variables_json, status, is_default, 
-                    create_by, modify_by, create_date, modify_date 
-             FROM email_static_templates 
-             WHERE branch_id = ? AND template_id = ? LIMIT 1`,
-            [branch_id, template_id]
+        const [existing] = await pool.query(
+            `SELECT template_id FROM email_static_templates WHERE branch_id = ? AND ${typeMatch.sql} LIMIT 1`,
+            [branch_id, ...typeMatch.params]
         );
 
-        return ok(res, "Static template created successfully", {
-            ...rows[0],
-            variables_json: parseJSON(rows[0].variables_json, [])
-        });
+        if (existing.length) {
+            await pool.query(
+                `UPDATE email_static_templates
+                 SET template_name = ?, subject = ?, html_body = ?, text_body = ?,
+                     variables_json = ?, status = ?, template_type = ?, modify_by = ?, modify_date = NOW()
+                 WHERE branch_id = ? AND template_id = ?`,
+                [
+                    template_name.trim(), subject.trim(), html_body, text_body,
+                    JSON.stringify(variables), status, storedType, username,
+                    branch_id, existing[0].template_id,
+                ]
+            );
+        } else {
+            await pool.query(
+                `INSERT INTO email_static_templates (
+                    template_id, branch_id, template_type, template_name,
+                    subject, html_body, text_body, variables_json,
+                    status, is_default, create_by, modify_by, create_date, modify_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW())`,
+                [
+                    newId("stpl"), branch_id, storedType, template_name.trim(),
+                    subject.trim(), html_body, text_body, JSON.stringify(variables),
+                    status, username, username,
+                ]
+            );
+        }
 
+        const catalog = await ensureBranchStaticCatalog(branch_id, username);
+        const saved = catalog.find((row) => row.template_type === storedType);
+        return ok(res, "Static template saved successfully", mapStaticTemplateRow(saved || {}));
     } catch (error) {
         console.error("Create static template error:", error);
-        return fail(res, error.message || "Failed to create template");
-    }
-});
-
-/**
- * Get all active static templates
- * GET /api/email/static-template/active-list
- * Query: template_type (optional), page_no, limit, search
- */
-router.get("/static-template/active-list", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const page_no = Math.max(Number(req.query.page_no || 1), 1);
-        const limit = Math.min(100, Math.max(Number(req.query.limit || 20), 1));
-        const offset = (page_no - 1) * limit;
-        const template_type = req.query.template_type ? String(req.query.template_type).trim() : null;
-        const search = req.query.search ? String(req.query.search).trim() : "";
-
-        let query = `
-            SELECT 
-                template_id,
-                template_type,
-                template_name,
-                subject,
-                status,
-                is_default,
-                variables_json,
-                create_date,
-                modify_date
-            FROM email_static_templates 
-            WHERE branch_id = ? AND status = 'active'
-        `;
-        
-        const params = [branch_id];
-
-        if (template_type) {
-            query += ` AND template_type = ?`;
-            params.push(template_type);
-        }
-
-        if (search) {
-            query += ` AND (template_name LIKE ? OR subject LIKE ? OR template_type LIKE ?)`;
-            params.push(`%${search}%`, `%${search}%`, `%${search}%`);
-        }
-
-        query += ` ORDER BY is_default DESC, create_date DESC LIMIT ? OFFSET ?`;
-        params.push(limit, offset);
-
-        const [rows] = await pool.query(query, params);
-
-        // Get total count
-        let countQuery = `SELECT COUNT(*) as total FROM email_static_templates WHERE branch_id = ? AND status = 'active'`;
-        const countParams = [branch_id];
-        
-        if (template_type) {
-            countQuery += ` AND template_type = ?`;
-            countParams.push(template_type);
-        }
-        
-        if (search) {
-            countQuery += ` AND (template_name LIKE ? OR subject LIKE ? OR template_type LIKE ?)`;
-            countParams.push(`%${search}%`, `%${search}%`, `%${search}%`);
-        }
-        
-        const [countRows] = await pool.query(countQuery, countParams);
-        const total = countRows[0]?.total || 0;
-
-        const data = rows.map(row => ({
-            ...row,
-            variables_json: parseJSON(row.variables_json, []),
-            total_variables: parseJSON(row.variables_json, []).length
-        }));
-
-        return ok(res, "Active static templates retrieved successfully", data, {
-            page_no,
-            limit,
-            total,
-            total_pages: Math.ceil(total / limit),
-            has_more: page_no * limit < total
-        });
-
-    } catch (error) {
-        console.error("Get active static templates error:", error);
-        return fail(res, error.message || "Failed to fetch templates");
+        return fail(res, error.message || "Failed to save template");
     }
 });
 
@@ -1276,6 +1366,7 @@ router.get("/static-template/by-type/:template_type", auth, validateBranch, asyn
     try {
         const branch_id = req.branch_id;
         const template_type = req.params.template_type;
+        const typeMatch = emailTemplateTypeSqlIn("template_type", template_type);
 
         const [rows] = await pool.query(
             `SELECT 
@@ -1290,13 +1381,14 @@ router.get("/static-template/by-type/:template_type", auth, validateBranch, asyn
                 is_default,
                 create_date
             FROM email_static_templates 
-            WHERE branch_id = ? AND template_type = ? AND status = 'active'
-            ORDER BY is_default DESC, create_date DESC`,
-            [branch_id, template_type]
+            WHERE branch_id = ? AND ${typeMatch.sql}
+            ORDER BY FIELD(status, 'active', 'inactive') DESC, create_date DESC`,
+            [branch_id, ...typeMatch.params]
         );
 
         const data = rows.map(row => ({
             ...row,
+            template_type: formatEmailTemplateType(row.template_type),
             variables_json: parseJSON(row.variables_json, [])
         }));
 
@@ -1316,10 +1408,6 @@ router.get("/static-template/details/:template_id", auth, validateBranch, async 
     try {
         const branch_id = req.branch_id;
         const template_id = req.params.template_id;
-
-        console.log("=== FETCHING TEMPLATE DETAILS ===");
-        console.log("Branch ID:", branch_id);
-        console.log("Template ID:", template_id);
 
         const [rows] = await pool.query(
             `SELECT 
@@ -1343,8 +1431,6 @@ router.get("/static-template/details/:template_id", auth, validateBranch, async 
             [branch_id, template_id]
         );
 
-        console.log("Query result rows:", rows.length);
-        
         if (!rows.length) {
             return fail(res, "Template not found", 404);
         }
@@ -1355,18 +1441,14 @@ router.get("/static-template/details/:template_id", auth, validateBranch, async 
         let parsedVariables = [];
         try {
             parsedVariables = JSON.parse(template.variables_json || '[]');
-        } catch (e) {
-            console.error("Error parsing variables_json:", e);
+        } catch {
             parsedVariables = [];
         }
-
-        console.log("HTML Body length:", template.html_body?.length || 0);
-        console.log("HTML Body preview:", template.html_body?.substring(0, 100));
 
         const responseData = {
             template_id: template.template_id,
             branch_id: template.branch_id,
-            template_type: template.template_type,
+            template_type: formatEmailTemplateType(template.template_type),
             template_name: template.template_name,
             subject: template.subject,
             html_body: template.html_body || "",  // Ensure it's never null
@@ -1380,12 +1462,9 @@ router.get("/static-template/details/:template_id", auth, validateBranch, async 
             modify_date: template.modify_date
         };
 
-        console.log("Response data keys:", Object.keys(responseData));
-        
         return ok(res, "Template details retrieved successfully", responseData);
 
     } catch (error) {
-        console.error("Get template details error:", error);
         return fail(res, error.message || "Failed to fetch template");
     }
 });
@@ -1397,7 +1476,7 @@ router.put("/static-template/update", auth, validateBranch, async (req, res) => 
     try {
         const branch_id = req.branch_id;
         const username = userFromReq(req);
-        const { template_id, template_name, subject, html_body, text_body, status, is_default } = req.body || {};
+        const { template_id, template_name, subject, html_body, text_body, status } = req.body || {};
 
         if (!template_id) {
             return fail(res, "template_id is required");
@@ -1457,40 +1536,12 @@ router.put("/static-template/update", auth, validateBranch, async (req, res) => 
         values.push(username);
         updates.push("modify_date = NOW()");
 
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
-
-            // Handle is_default change
-            if (is_default !== undefined && Number(is_default) === 1 && Number(old.is_default) !== 1) {
-                // Remove default from other templates of same type
-                await conn.query(
-                    `UPDATE email_static_templates 
-                     SET is_default = 0, modify_by = ?, modify_date = NOW() 
-                     WHERE branch_id = ? AND template_type = ? AND template_id != ?`,
-                    [username, branch_id, old.template_type, template_id]
-                );
-                updates.push("is_default = ?");
-                values.push(1);
-            } else if (is_default !== undefined && Number(is_default) === 0) {
-                updates.push("is_default = ?");
-                values.push(0);
-            }
-
-            if (updates.length > 0) {
-                values.push(template_id, branch_id);
-                await conn.query(
-                    `UPDATE email_static_templates SET ${updates.join(", ")} WHERE template_id = ? AND branch_id = ?`,
-                    values
-                );
-            }
-
-            await conn.commit();
-        } catch (e) {
-            await conn.rollback();
-            throw e;
-        } finally {
-            conn.release();
+        if (updates.length > 0) {
+            values.push(template_id, branch_id);
+            await pool.query(
+                `UPDATE email_static_templates SET ${updates.join(", ")} WHERE template_id = ? AND branch_id = ?`,
+                values
+            );
         }
 
         return ok(res, "Static template updated successfully");
@@ -1534,87 +1585,65 @@ router.put("/static-template/delete", auth, validateBranch, async (req, res) => 
     }
 });
 
-/**
- * Set template as default for its type
- * PUT /api/email/static-template/set-default
- */
-router.put("/static-template/set-default", auth, validateBranch, async (req, res) => {
+router.put("/static-template/change-status", auth, validateBranch, async (req, res) => {
     try {
-        const branch_id = req.branch_id;
-        const username = userFromReq(req);
-        const { template_id } = req.body || {};
+        const { template_id, status } = req.body || {};
+        if (!template_id || !status) return fail(res, "template_id and status are required");
+        if (!["active", "inactive"].includes(status)) return fail(res, "Invalid status value");
 
-        if (!template_id) {
-            return fail(res, "template_id is required");
-        }
-
-        // Get template type
-        const [templateRows] = await pool.query(
-            `SELECT template_type FROM email_static_templates WHERE branch_id = ? AND template_id = ? LIMIT 1`,
-            [branch_id, template_id]
+        const [result] = await pool.query(
+            `UPDATE email_static_templates
+             SET status = ?, modify_by = ?, modify_date = NOW()
+             WHERE branch_id = ? AND template_id = ?`,
+            [status, userFromReq(req), req.branch_id, template_id]
         );
-
-        if (!templateRows.length) {
-            return fail(res, "Template not found", 404);
-        }
-
-        const template_type = templateRows[0].template_type;
-
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
-
-            // Remove default from all templates of this type
-            await conn.query(
-                `UPDATE email_static_templates 
-                 SET is_default = 0, modify_by = ?, modify_date = NOW() 
-                 WHERE branch_id = ? AND template_type = ?`,
-                [username, branch_id, template_type]
-            );
-
-            // Set this template as default
-            await conn.query(
-                `UPDATE email_static_templates 
-                 SET is_default = 1, modify_by = ?, modify_date = NOW() 
-                 WHERE branch_id = ? AND template_id = ?`,
-                [username, branch_id, template_id]
-            );
-
-            await conn.commit();
-        } catch (e) {
-            await conn.rollback();
-            throw e;
-        } finally {
-            conn.release();
-        }
-
-        return ok(res, "Default template set successfully");
-
+        if (!result.affectedRows) return fail(res, "Template not found", 404);
+        return ok(res, status === "active"
+            ? "Notification type activated. Emails of this type will send when email is selected."
+            : "Notification type deactivated.", {});
     } catch (error) {
-        console.error("Set default template error:", error);
-        return fail(res, error.message || "Failed to set default template");
+        return fail(res, error.message || "Failed to change status");
     }
 });
 
-router.get("/variables/:template_type", auth, validateBranch, async (req, res) => {
-    const { template_type } = req.params;
-    
-    const [rows] = await pool.query(
-        `SELECT template_id, template_name, variables_json 
-         FROM email_static_templates 
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC`,
-        [req.branch_id, template_type]
-    );
-    
-    return res.json({
-        success: true,
-        template_type: template_type,
-        templates: rows.map(r => ({
-            ...r,
-            variables_json: JSON.parse(r.variables_json || '[]')
-        }))
+/** Activating a type is the replacement for "set default". */
+router.put("/static-template/set-default", auth, validateBranch, async (req, res) => {
+    try {
+        const { template_id } = req.body || {};
+        if (!template_id) return fail(res, "template_id is required");
+        const [result] = await pool.query(
+            `UPDATE email_static_templates
+             SET status = 'active', modify_by = ?, modify_date = NOW()
+             WHERE branch_id = ? AND template_id = ?`,
+            [userFromReq(req), req.branch_id, template_id]
+        );
+        if (!result.affectedRows) return fail(res, "Template not found", 404);
+        return ok(res, "Notification type activated successfully");
+    } catch (error) {
+        return fail(res, error.message || "Failed to activate template");
+    }
+});
+
+router.get("/static-template/suggested-variables/:template_type", auth, validateBranch, async (req, res) => {
+    const template_type = formatEmailTemplateType(req.params.template_type);
+    if (!isCanonicalStaticType(template_type)) {
+        return fail(res, `template_type must be one of: ${STATIC_TYPE_LIST.join(", ")}`);
+    }
+    const variables = getSuggestedStaticVariables(template_type);
+    return ok(res, "Suggested variables retrieved", {
+        template_type,
+        usage: "Use {{variable_name}} in subject or body",
+        note: template_type === "Document Share"
+            ? "The shared file is attached to the email automatically."
+            : "",
+        variables,
     });
+});
+
+router.get("/variables/:template_type", auth, validateBranch, async (req, res) => {
+    const template_type = formatEmailTemplateType(req.params.template_type);
+    const suggested = getSuggestedStaticVariables(template_type);
+    return ok(res, "Suggested variables retrieved", suggested);
 });
 
 /**
@@ -2119,7 +2148,7 @@ router.get("/config/usage-summary", auth, validateBranch, async (req, res) => {
                  AND du.branch_id = c.branch_id 
                  AND du.usage_date = ?
              WHERE c.branch_id = ? AND c.status = 'active'
-             ORDER BY c.is_default DESC, c.config_name`,
+             ORDER BY FIELD(c.status, 'active', 'inactive') DESC, c.config_name`,
             [date, branch_id]
         );
         

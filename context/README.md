@@ -23,6 +23,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`invoice.md`](./invoice.md) | `POST /invoice/generate` + `/share`, sale/purchase edit, PDFKit, `downloadable` |
 | [`ledger-report.md`](./ledger-report.md) | Ledger PDF (`ledgerReport.js`), download/share endpoints, document sharing HEADER override |
 | [`proxy.md`](./proxy.md) | B2 media proxy URLs (`/proxy/media`), `mediaUrl.js`, local-dev → live host |
+| [`password-groups.md`](./password-groups.md) | Password groups + firm credentials, status `'1'`/`'0'`, select-all delete |
 
 ## Pair with client
 
@@ -43,3 +44,4 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | `attendance.md` | `CLIENT/context/attendance.md` |
 | `salary.md` | `CLIENT/context/salary.md` |
 | `invoice.md` | `CLIENT/context/invoice.md`, `CLIENT/context/ledger-tab.md`, `CLIENT/context/finance-registers.md` |
+| `password-groups.md` | `CLIENT/context/password-groups.md` |

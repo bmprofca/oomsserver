@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { UNIQUE_RANDOM_STRING, RANDOM_STRING, TIMESTAMP, USER_DATA } from "../helpers/function.js";
-import { DSC_TYPES, DSC_COMPANIES } from "../helpers/Config.js";
+import { listDscCompanies, listDscTypes } from "../helpers/dscCatalog.js";
 
 const router = express.Router();
 
@@ -34,13 +34,26 @@ async function insertRow(tableName, data) {
 router.get("/dsc/list", auth, validateBranch, async (req, res) => {
     try {
 
-        const { search, page, limit } = req.query;
+        const { search, page, limit, expires_from, expires_to } = req.query;
 
         const pageNum = Number(page) || 1;
         const limitNum = Number(limit) || 20;
         const offset = (Number(pageNum) - 1) * limitNum;
 
         const searchPattern = search != null && search !== '' ? `%${search}%` : '%%';
+        const fromDate = String(expires_from || "").trim();
+        const toDate = String(expires_to || "").trim();
+
+        let whereExpiry = "";
+        const extraParams = [];
+        if (fromDate) {
+            whereExpiry += " AND dsc_register.validity_end >= ?";
+            extraParams.push(fromDate);
+        }
+        if (toDate) {
+            whereExpiry += " AND dsc_register.validity_end <= ?";
+            extraParams.push(toDate);
+        }
 
         const countQuery = `
         SELECT COUNT(*) AS total FROM dsc_register
@@ -49,8 +62,9 @@ router.get("/dsc/list", auth, validateBranch, async (req, res) => {
         AND profile.user_type = 'client'
         AND profile.status = '1'
         AND (profile.name LIKE ? OR profile.mobile LIKE ? OR profile.email LIKE ?)
+        ${whereExpiry}
         `;
-        const [[{ total }]] = await pool.query(countQuery, [searchPattern, searchPattern, searchPattern]);
+        const [[{ total }]] = await pool.query(countQuery, [searchPattern, searchPattern, searchPattern, ...extraParams]);
 
         const listQuery = `
         SELECT dsc_register.*,profile.name,profile.mobile,profile.email FROM dsc_register
@@ -59,10 +73,11 @@ router.get("/dsc/list", auth, validateBranch, async (req, res) => {
         AND profile.user_type = 'client'
         AND profile.status = '1'
         AND (profile.name LIKE ? OR profile.mobile LIKE ? OR profile.email LIKE ?)
+        ${whereExpiry}
         ORDER BY dsc_register.id DESC
         LIMIT ? OFFSET ?
        `;
-        const [rows] = await pool.query(listQuery, [searchPattern, searchPattern, searchPattern, limitNum, offset]);
+        const [rows] = await pool.query(listQuery, [searchPattern, searchPattern, searchPattern, ...extraParams, limitNum, offset]);
 
         const data = [];
         for (let index = 0; index < rows.length; index++) {
@@ -126,10 +141,10 @@ router.get("/dsc/list", auth, validateBranch, async (req, res) => {
 
 router.get("/dsc/types", auth, validateBranch, async (req, res) => {
     try {
-
+        const data = await listDscTypes(pool);
         return res.status(200).json({
             success: true,
-            data: DSC_TYPES
+            data
         });
 
     } catch (error) {
@@ -144,10 +159,10 @@ router.get("/dsc/types", auth, validateBranch, async (req, res) => {
 
 router.get("/dsc/companies", auth, validateBranch, async (req, res) => {
     try {
-
+        const data = await listDscCompanies(pool);
         return res.status(200).json({
             success: true,
-            data: DSC_COMPANIES
+            data
         });
 
     } catch (error) {
@@ -1798,7 +1813,11 @@ router.get("/password-group/list-firm-credentials/:group_id", auth, validateBran
                     username: el.credential_username,
                     password: el.password,
                     description: el.description,
-                    status: el.credential_status == "1",
+                    status: el.credential_status === true ||
+                        el.credential_status === 1 ||
+                        el.credential_status === "1" ||
+                        String(el.credential_status || "").toLowerCase() === "true" ||
+                        String(el.credential_status || "").toLowerCase() === "active",
                     created_by: {
                         name: create_by_user?.name,
                         mobile: create_by_user?.mobile,
@@ -1881,6 +1900,15 @@ router.put("/password-group/edit-firm-credentials/:credential_id", auth, validat
         const { username, password, description, status } = req.body || {};
         const modify_by = req.headers["username"] || "";
         const branch_id = req.branch_id;
+        const normalizedStatus = status === undefined
+            ? undefined
+            : (
+                status === true ||
+                status === 1 ||
+                status === "1" ||
+                String(status).toLowerCase() === "true" ||
+                String(status).toLowerCase() === "active"
+            ) ? "1" : "0";
 
         if (!credential_id) {
             return res.status(400).json({
@@ -1922,7 +1950,7 @@ router.put("/password-group/edit-firm-credentials/:credential_id", auth, validat
                 username !== undefined ? (username?.trim() || null) : existing[0].username,
                 password !== undefined ? password : existing[0].password,
                 description !== undefined ? (description?.trim() || null) : existing[0].description,
-                status !== undefined ? status : existing[0].status,
+                status !== undefined ? normalizedStatus : existing[0].status,
                 modify_by,
                 credential_id
             ]
@@ -1944,7 +1972,7 @@ router.put("/password-group/edit-firm-credentials/:credential_id", auth, validat
                 username: username !== undefined ? (username?.trim() || null) : existing[0].username,
                 password: password !== undefined ? password : existing[0].password,
                 description: description !== undefined ? (description?.trim() || null) : existing[0].description,
-                status: status !== undefined ? status : existing[0].status,
+                status: status !== undefined ? normalizedStatus === "1" : existing[0].status == "1",
                 modified_by: {
                     username: modify_by_user?.username,
                     name: modify_by_user?.name,
@@ -1974,25 +2002,84 @@ router.delete("/password-group/delete-firm-credentials", auth, validateBranch, a
         const rawIds = req.body?.credential_ids;
         const delete_by = req.headers["username"] || "";
         const branch_id = req.branch_id;
+        const group_id = typeof req.body?.group_id === "string" ? req.body.group_id.trim() : "";
+        const searchText = typeof req.body?.search === "string" ? req.body.search.trim() : "";
+        const isAll =
+            req.body?.select_all === true ||
+            req.body?.select_all === "true" ||
+            req.body?.is_all === true ||
+            req.body?.is_all === "true";
 
-        if (!Array.isArray(rawIds) || rawIds.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "credential_ids must be a non-empty array"
-            });
-        }
+        let credential_ids = [];
 
-        const credential_ids = [...new Set(
-            rawIds
-                .map((id) => (typeof id === "string" ? id.trim() : String(id ?? "").trim()))
-                .filter((id) => id.length > 0)
-        )];
+        if (isAll) {
+            if (!group_id) {
+                return res.status(400).json({
+                    success: false,
+                    message: "group_id is required when select_all is true"
+                });
+            }
 
-        if (credential_ids.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "credential_ids must contain at least one valid id"
-            });
+            const [groupInfo] = await pool.query(
+                `SELECT group_id FROM password_groups
+                 WHERE group_id = ? AND branch_id = ? AND is_deleted = '0'`,
+                [group_id, branch_id]
+            );
+
+            if (groupInfo.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Group not found"
+                });
+            }
+
+            let selectSql = `
+                SELECT pg.credential_id
+                FROM password_group_firms pg
+                LEFT JOIN firms f
+                    ON pg.firm_id = f.firm_id
+                    AND f.branch_id = ?
+                    AND f.is_deleted = '0'
+                WHERE pg.group_id = ?
+                  AND pg.is_deleted = '0'
+            `;
+            const selectParams = [branch_id, group_id];
+
+            if (searchText) {
+                const searchPattern = `%${searchText}%`;
+                selectSql += ` AND (pg.username LIKE ? OR pg.description LIKE ? OR IFNULL(f.firm_name, '') LIKE ?)`;
+                selectParams.push(searchPattern, searchPattern, searchPattern);
+            }
+
+            const [matched] = await pool.query(selectSql, selectParams);
+            credential_ids = matched.map((row) => row.credential_id).filter(Boolean);
+
+            if (credential_ids.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "No credentials match the current selection"
+                });
+            }
+        } else {
+            if (!Array.isArray(rawIds) || rawIds.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "credential_ids must be a non-empty array"
+                });
+            }
+
+            credential_ids = [...new Set(
+                rawIds
+                    .map((id) => (typeof id === "string" ? id.trim() : String(id ?? "").trim()))
+                    .filter((id) => id.length > 0)
+            )];
+
+            if (credential_ids.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "credential_ids must contain at least one valid id"
+                });
+            }
         }
 
         const placeholders = credential_ids.map(() => "?").join(", ");

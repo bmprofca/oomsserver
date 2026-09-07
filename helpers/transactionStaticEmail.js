@@ -4,17 +4,15 @@ import { getConfigWithDecryptedPassword } from "../services/emailConfigService.j
 import { renderRecipientEmail } from "../utils/templateRenderer.js";
 import { USER_SNIPPED_DATA, BANK_SNIPPED_DATA, CAPITAL_SNIPPED_DATA } from "./function.js";
 
+import { EMAIL_STATIC_TEMPLATE_TYPES, findActiveStaticTemplateId, getActiveBranchSmtpConfigId } from "./emailStaticTemplateTypes.js";
+
 // Transaction Email Types (matching your mapping table)
-const PAYMENT_RECEIPT_TEMPLATE_TYPE = "payment_receipt";
-const PAYMENT_TEMPLATE_TYPE = "payment";
-const RECEIVED_TEMPLATE_TYPE = "received";
+const PAYMENT_RECEIPT_TEMPLATE_TYPE = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_RECEIVE;
+const PAYMENT_TEMPLATE_TYPE = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT;
+const RECEIVED_TEMPLATE_TYPE = EMAIL_STATIC_TEMPLATE_TYPES.PAYMENT_RECEIVE;
 
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
-}
-
-function branchKey(branch_id) {
-    return branch_id == null ? "" : String(branch_id);
 }
 
 function formatDateTime(value) {
@@ -26,14 +24,7 @@ function formatDateTime(value) {
 }
 
 async function getDefaultActiveConfigId(branch_id) {
-    const [rows] = await pool.query(
-        `SELECT config_id FROM email_configs
-         WHERE branch_id = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [branch_id]
-    );
-    return rows[0]?.config_id || null;
+    return getActiveBranchSmtpConfigId(branch_id);
 }
 
 async function loadActiveStaticTemplate(template_id) {
@@ -58,30 +49,7 @@ async function isUnsubscribed(branch_id, email) {
 
 // ==================== PAYMENT RECEIPT (When client pays) ====================
 async function resolvePaymentReceiptTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT payment_receipt FROM email_static_mapping
-         WHERE branch_id = ?
-           AND payment_receipt IS NOT NULL
-           AND TRIM(payment_receipt) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].payment_receipt) {
-        return String(mapRows[0].payment_receipt).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, PAYMENT_RECEIPT_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, PAYMENT_RECEIPT_TEMPLATE_TYPE);
 }
 
 /**
@@ -160,30 +128,7 @@ function notifyPaymentReceiptEmail(params) {
 
 // ==================== PAYMENT (When company pays to someone) ====================
 async function resolvePaymentTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT payment FROM email_static_mapping
-         WHERE branch_id = ?
-           AND payment IS NOT NULL
-           AND TRIM(payment) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].payment) {
-        return String(mapRows[0].payment).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, PAYMENT_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, PAYMENT_TEMPLATE_TYPE);
 }
 
 /**
@@ -261,30 +206,7 @@ function notifyPaymentEmail(params) {
 
 // ==================== RECEIVED (Money received from client - alias) ====================
 async function resolveReceivedTemplateId(branch_id) {
-    const key = branchKey(branch_id);
-    const [mapRows] = await pool.query(
-        `SELECT received FROM email_static_mapping
-         WHERE branch_id = ?
-           AND received IS NOT NULL
-           AND TRIM(received) <> ''
-         ORDER BY id ASC
-         LIMIT 1`,
-        [key]
-    );
-    if (mapRows.length && mapRows[0].received) {
-        return String(mapRows[0].received).trim();
-    }
-
-    const bid = Number(branch_id);
-    if (Number.isNaN(bid)) return null;
-    const [fallback] = await pool.query(
-        `SELECT template_id FROM email_static_templates
-         WHERE branch_id = ? AND template_type = ? AND status = 'active'
-         ORDER BY is_default DESC, id DESC
-         LIMIT 1`,
-        [bid, RECEIVED_TEMPLATE_TYPE]
-    );
-    return fallback[0]?.template_id ? String(fallback[0].template_id).trim() : null;
+    return findActiveStaticTemplateId(branch_id, RECEIVED_TEMPLATE_TYPE);
 }
 
 /**
