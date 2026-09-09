@@ -13,6 +13,9 @@ import { setupSocketIO } from "./helpers/Socket.js";
 import { generateDatabaseContext } from "./helpers/DatabaseContext.js";
 import { startEmailBroadcastCron } from "./cron/emailBroadcastCron.js";
 import { startAttendanceWeeklyOffCron } from "./cron/attendanceWeeklyOffCron.js";
+import { startOneChattingCampaignCron } from "./cron/oneChattingCampaignCron.js";
+import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
+import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
 import publicRoutes from "./routes/public.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
 import { registerNeronEventForwarder } from "./services/neronVoipEvents.js";
@@ -96,6 +99,9 @@ server.listen(PORT, '0.0.0.0', () => {
     generateDatabaseContext();
     startEmailBroadcastCron();
     startAttendanceWeeklyOffCron();
+    startOneChattingCampaignCron();
+    startSmsCampaignCron();
+    startEmailBroadcastScheduleCron();
 });
 
 export { WsIo };

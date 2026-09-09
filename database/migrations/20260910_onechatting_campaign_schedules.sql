@@ -1,0 +1,42 @@
+CREATE TABLE IF NOT EXISTS `onechatting_campaign_schedules` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `schedule_id` varchar(50) NOT NULL,
+  `branch_id` varchar(50) NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `template_id` varchar(100) NOT NULL,
+  `template_name` varchar(255) DEFAULT NULL,
+  `component` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`component`)),
+  `audience` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`audience`)),
+  `schedule_type` enum('daily','weekly','monthly') NOT NULL,
+  `schedule_config` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`schedule_config`)),
+  `timezone` varchar(64) NOT NULL DEFAULT 'Asia/Kolkata',
+  `is_active` tinyint(4) NOT NULL DEFAULT 1,
+  `last_run_at` datetime DEFAULT NULL,
+  `last_run_key` varchar(32) DEFAULT NULL,
+  `last_campaign_id` varchar(100) DEFAULT NULL,
+  `last_error` text DEFAULT NULL,
+  `create_by` varchar(100) DEFAULT NULL,
+  `modify_by` varchar(100) DEFAULT NULL,
+  `create_date` datetime DEFAULT NULL,
+  `modify_date` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_schedule_id` (`schedule_id`),
+  KEY `idx_branch_active` (`branch_id`, `is_active`),
+  KEY `idx_last_run_key` (`last_run_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `onechatting_campaign_schedule_runs` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `run_id` varchar(50) NOT NULL,
+  `schedule_id` varchar(50) NOT NULL,
+  `branch_id` varchar(50) NOT NULL,
+  `status` enum('success','failed','skipped') NOT NULL,
+  `campaign_id` varchar(100) DEFAULT NULL,
+  `recipients_count` int(11) NOT NULL DEFAULT 0,
+  `message` text DEFAULT NULL,
+  `run_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_run_id` (`run_id`),
+  KEY `idx_schedule_run` (`schedule_id`, `run_at`),
+  KEY `idx_branch_run` (`branch_id`, `run_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

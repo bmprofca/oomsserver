@@ -1,6 +1,10 @@
 /**
  * Client balance effect rules (matches GET_BALANCE in function.js).
  * balance = sum(party2 amounts) - sum(party1 amounts).
+ *
+ * IMPORTANT: Aggregate transaction effects FIRST, then filter clients/profile
+ * with EXISTS. Never JOIN clients/profile before SUM(effect) — duplicate
+ * profile (or clients) rows multiply the balance (e.g. 2× ledger balance).
  */
 
 /** Per-row client balance effects from transactions (includes transaction_date). */
@@ -58,13 +62,35 @@ export const LEGACY_DASHBOARD_EFFECTS_SQL = `
       AND party1_id NOT REGEXP '^[0-9]+$'
 `;
 
-const CLIENT_JOIN_SQL = `
-    INNER JOIN clients c ON c.username = b.party_id
-      AND CAST(c.branch_id AS CHAR) = CAST(? AS CHAR)
-      AND c.user_type = 'client'
-      AND (c.is_deleted = '0' OR c.is_deleted = 0)
-    INNER JOIN profile pr ON pr.username = c.username
-      AND LOWER(TRIM(pr.user_type)) = 'client'
+/**
+ * Filter aggregated balances to active branch clients that have a client profile.
+ * Uses EXISTS so duplicate clients/profile rows cannot inflate SUM(effect).
+ * Params: branchId (1).
+ */
+const CLIENT_EXISTS_SQL = `
+    AND EXISTS (
+        SELECT 1
+        FROM clients c
+        WHERE c.username = bal.party_id
+          AND CAST(c.branch_id AS CHAR) = CAST(? AS CHAR)
+          AND c.user_type = 'client'
+          AND (c.is_deleted = '0' OR c.is_deleted = 0)
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM profile pr
+        WHERE pr.username = bal.party_id
+          AND LOWER(TRIM(pr.user_type)) = 'client'
+    )
+`;
+
+/** Effects aggregated per party — no joins that can multiply rows. */
+const CLIENT_BALANCE_AGG_SQL = `
+    SELECT party_id,
+           SUM(effect) AS balance,
+           MAX(transaction_date) AS last_transaction_date
+    FROM (${CLIENT_BALANCE_EFFECTS_SQL}) e
+    GROUP BY party_id
 `;
 
 function clientBalanceSearchHaving(search) {
@@ -87,15 +113,15 @@ function clientBalanceSearchHaving(search) {
     };
 }
 
-function clientBalanceHavingClause(side, balanceAfter = 0) {
+function clientBalanceWhereClause(side, balanceAfter = 0) {
     if (side === "debtor") {
         const min = Math.max(0, Number(balanceAfter) || 0);
         if (min > 0) {
-            return { sql: "HAVING balance >= ?", params: [min] };
+            return { sql: "AND bal.balance >= ?", params: [min] };
         }
-        return { sql: "HAVING balance > 0.02", params: [] };
+        return { sql: "AND bal.balance > 0.02", params: [] };
     }
-    return { sql: "HAVING balance < -0.02", params: [] };
+    return { sql: "AND bal.balance < -0.02", params: [] };
 }
 
 /**
@@ -103,21 +129,21 @@ function clientBalanceHavingClause(side, balanceAfter = 0) {
  * @param {'debtor'|'creditor'} side
  */
 export function clientBalanceCountSql(side) {
-    const { sql: balanceHaving } = clientBalanceHavingClause(side, 0);
+    const { sql: balanceWhere } = clientBalanceWhereClause(side, 0);
     return `
         SELECT COUNT(*) AS total_count,
                COALESCE(SUM(balance), 0) AS total_amount
         FROM (
-            SELECT b.party_id, SUM(b.effect) AS balance
-            FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
-            ${CLIENT_JOIN_SQL}
-            GROUP BY b.party_id
-            ${balanceHaving}
+            SELECT bal.party_id, bal.balance
+            FROM (${CLIENT_BALANCE_AGG_SQL}) bal
+            WHERE 1 = 1
+              ${CLIENT_EXISTS_SQL}
+              ${balanceWhere}
         ) counted
     `;
 }
 
-/** Params: branchId x3 (effects x2, join x1) */
+/** Params: branchId x3 (effects x2, clients EXISTS x1) */
 export function clientBalanceCountParams(branchId) {
     return [branchId, branchId, branchId];
 }
@@ -127,13 +153,13 @@ export function clientBalanceCountParams(branchId) {
  * @param {'debtor'|'creditor'} side
  */
 export function clientBalanceListSql(side, search = "", balanceAfter = 0) {
-    const { sql: balanceHaving } = clientBalanceHavingClause(side, balanceAfter);
+    const { sql: balanceWhere } = clientBalanceWhereClause(side, balanceAfter);
     const lastPaymentJoin = side === "debtor"
-        ? `LEFT JOIN (${CLIENT_LAST_PAYMENT_SQL}) lp ON lp.party_id = b.party_id`
+        ? `LEFT JOIN (${CLIENT_LAST_PAYMENT_SQL}) lp ON lp.party_id = bal.party_id`
         : "";
     const lastDateExpr = side === "debtor"
-        ? "MAX(lp.last_payment_date)"
-        : "MAX(b.transaction_date)";
+        ? "lp.last_payment_date"
+        : "bal.last_transaction_date";
     const order = side === "debtor"
         ? "ORDER BY (last_transaction_date IS NULL) DESC, last_transaction_date ASC, total_balance DESC"
         : "ORDER BY total_balance ASC";
@@ -165,14 +191,14 @@ export function clientBalanceListSql(side, search = "", balanceAfter = 0) {
             END AS last_received_in
         FROM (
             SELECT
-                b.party_id AS username,
-                SUM(b.effect) AS balance,
+                bal.party_id AS username,
+                bal.balance,
                 ${lastDateExpr} AS last_transaction_date
-            FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
-            ${CLIENT_JOIN_SQL}
+            FROM (${CLIENT_BALANCE_AGG_SQL}) bal
             ${lastPaymentJoin}
-            GROUP BY b.party_id
-            ${balanceHaving}
+            WHERE 1 = 1
+              ${CLIENT_EXISTS_SQL}
+              ${balanceWhere}
         ) agg
         INNER JOIN profile p ON p.username = agg.username
           AND LOWER(TRIM(p.user_type)) = 'client'
@@ -187,12 +213,23 @@ export function clientBalanceListSql(side, search = "", balanceAfter = 0) {
 export function clientBalanceListParams(branchId, limit, offset, search = "", side = "debtor", balanceAfter = 0) {
     const { params: searchParams } = clientBalanceSearchHaving(search);
     const lastPaymentParam = side === "debtor" ? [branchId] : [];
-    const { params: balanceParams } = clientBalanceHavingClause(side, balanceAfter);
-    return [branchId, branchId, branchId, ...lastPaymentParam, ...balanceParams, branchId, ...searchParams, limit, offset];
+    const { params: balanceParams } = clientBalanceWhereClause(side, balanceAfter);
+    // effects x2, lastPayment?, clients EXISTS, balance?, firms, search..., limit, offset
+    return [
+        branchId,
+        branchId,
+        ...lastPaymentParam,
+        branchId,
+        ...balanceParams,
+        branchId,
+        ...searchParams,
+        limit,
+        offset,
+    ];
 }
 
 export function clientBalanceTotalSql(side, search = "", balanceAfter = 0) {
-    const { sql: balanceHaving } = clientBalanceHavingClause(side, balanceAfter);
+    const { sql: balanceWhere } = clientBalanceWhereClause(side, balanceAfter);
     const { sql: searchHaving } = clientBalanceSearchHaving(search);
     return `
         SELECT COUNT(*) AS total,
@@ -200,11 +237,13 @@ export function clientBalanceTotalSql(side, search = "", balanceAfter = 0) {
         FROM (
             SELECT agg.username, MAX(agg.balance) AS total_balance
             FROM (
-                SELECT b.party_id AS username, SUM(b.effect) AS balance
-                FROM (${CLIENT_BALANCE_EFFECTS_SQL}) b
-                ${CLIENT_JOIN_SQL}
-                GROUP BY b.party_id
-                ${balanceHaving}
+                SELECT
+                    bal.party_id AS username,
+                    bal.balance
+                FROM (${CLIENT_BALANCE_AGG_SQL}) bal
+                WHERE 1 = 1
+                  ${CLIENT_EXISTS_SQL}
+                  ${balanceWhere}
             ) agg
             INNER JOIN profile p ON p.username = agg.username
               AND LOWER(TRIM(p.user_type)) = 'client'
@@ -217,6 +256,7 @@ export function clientBalanceTotalSql(side, search = "", balanceAfter = 0) {
 
 export function clientBalanceTotalParams(branchId, search = "", side = "debtor", balanceAfter = 0) {
     const { params: searchParams } = clientBalanceSearchHaving(search);
-    const { params: balanceParams } = clientBalanceHavingClause(side, balanceAfter);
+    const { params: balanceParams } = clientBalanceWhereClause(side, balanceAfter);
+    // effects x2, clients EXISTS, balance?, firms, search...
     return [branchId, branchId, branchId, ...balanceParams, branchId, ...searchParams];
 }

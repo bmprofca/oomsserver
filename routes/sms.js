@@ -542,4 +542,155 @@ router.post("/fast2sms/campaign/process", auth, validateBranch, async (req, res)
     }
 });
 
+router.get("/fast2sms/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { listSchedules } = await import(
+            "../services/smsFast2smsCampaignScheduleService.js"
+        );
+        const activeOnly =
+            String(req.query.active_only || "").trim() === "1" ||
+            String(req.query.active_only || "").toLowerCase() === "true";
+        const data = await listSchedules(req.branch_id, { active_only: activeOnly });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("GET SMS CAMPAIGN SCHEDULES ERROR:", error);
+        return httpError(res, error, "Failed to list recurring schedules");
+    }
+});
+
+router.post("/fast2sms/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { createSchedule } = await import(
+            "../services/smsFast2smsCampaignScheduleService.js"
+        );
+        const result = await createSchedule({
+            branch_id: req.branch_id,
+            name: req.body?.name,
+            template_id: req.body?.template_id,
+            template_name: req.body?.template_name,
+            variables_values: req.body?.variables_values,
+            audience: req.body?.audience,
+            schedule_type: req.body?.schedule_type,
+            schedule_config: req.body?.schedule_config,
+            timezone: req.body?.timezone || "Asia/Kolkata",
+            create_by: usernameFromReq(req),
+        });
+        if (!result.ok) {
+            return res.status(result.status || 400).json({
+                success: false,
+                message: result.message,
+            });
+        }
+        return res.status(201).json({
+            success: true,
+            message: "Recurring SMS schedule created",
+            data: result.data,
+        });
+    } catch (error) {
+        console.error("POST SMS CAMPAIGN SCHEDULE ERROR:", error);
+        return httpError(res, error, "Failed to create recurring schedule");
+    }
+});
+
+router.put(
+    "/fast2sms/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { updateSchedule } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await updateSchedule(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim(),
+                {
+                    name: req.body?.name,
+                    schedule_type: req.body?.schedule_type,
+                    schedule_config: req.body?.schedule_config,
+                    is_active: req.body?.is_active,
+                },
+                usernameFromReq(req)
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule updated",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("PUT SMS CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to update recurring schedule");
+        }
+    }
+);
+
+router.delete(
+    "/fast2sms/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { deleteSchedule } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await deleteSchedule(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim()
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule deleted",
+            });
+        } catch (error) {
+            console.error("DELETE SMS CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to delete recurring schedule");
+        }
+    }
+);
+
+router.post(
+    "/fast2sms/campaign/schedules/:scheduleId/run",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { runScheduleNow } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await runScheduleNow(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim(),
+                { create_by: usernameFromReq(req) }
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                    data: result.data,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Campaign created from schedule",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("RUN SMS CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to run recurring schedule");
+        }
+    }
+);
+
 export default router;

@@ -4,6 +4,7 @@ import { RANDOM_STRING } from "./function.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "./NoteFile.js";
 import { notifyTaskCreatedEmail } from "./taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp } from "./whatsappNotification.js";
+import { notifyTaskCreatedSms } from "./smsNotification.js";
 
 function isISODateString(value) {
     return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -411,6 +412,7 @@ async function createTaskFromQuotation({
 
         notifyTaskCreatedEmail({ branch_id, task_id: taskData.task_id });
         notifyTaskCreatedWhatsapp({ branch_id, task_id: taskData.task_id, created_by: createdBy });
+        notifyTaskCreatedSms({ branch_id, task_id: taskData.task_id });
 
         const [updatedRows] = await conn.query(
             `SELECT status, task_id, modify_date
@@ -603,6 +605,7 @@ async function createTaskFromServiceRequest({
 
         notifyTaskCreatedEmail({ branch_id, task_id: taskData.task_id });
         notifyTaskCreatedWhatsapp({ branch_id, task_id: taskData.task_id, created_by: createdBy });
+        notifyTaskCreatedSms({ branch_id, task_id: taskData.task_id });
 
         const [updatedRows] = await conn.query(
             `SELECT status, task_id, modify_date

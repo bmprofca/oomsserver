@@ -50,7 +50,7 @@ Availability normalizes `birthday_reminder` → **`birthday wish`** (WhatsApp sy
 |---------|--------|
 | WhatsApp | Template / mapping name **`birthday wish`** → `sendBirthdayWishWhatsapp` |
 | Email | `email_static_templates` types: `birthday`, `birthday_reminder`, … |
-| SMS | `sms_templates` names: `birthday`, `birthday reminder`, `birthday wish`, … |
+| SMS | Fast2SMS mapping type **`birthday wish`** → `sendBirthdayWishSms` (`helpers/smsNotification.js`). Availability requires an active `sms_fast2sms_template_mapping` for that type. |
 
 ---
 

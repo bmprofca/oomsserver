@@ -11,6 +11,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`client-balance.md`](./client-balance.md) | Debtors/creditors dashboard APIs, `clientBalanceSql`, client `pan_number` on lists |
 | [`payment-reminder.md`](./payment-reminder.md) | `POST /client/payment-reminder`, debit eligibility, channels |
 | [`birthday-reminder.md`](./birthday-reminder.md) | `POST /client/birthday-reminder`, availability aliases, WhatsApp `{{…}}` only |
+| [`sms-notifications.md`](./sms-notifications.md) | Fast2SMS mapped notifications (`smsNotification.js`), template types, availability |
 | [`task-list.md`](./task-list.md) | `/task/list` + report payloads: `complete_date`, compliance fields |
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
 | [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |
@@ -25,6 +26,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`proxy.md`](./proxy.md) | B2 media proxy URLs (`/proxy/media`), `mediaUrl.js`, local-dev → live host |
 | [`password-groups.md`](./password-groups.md) | Password groups + firm credentials, status `'1'`/`'0'`, select-all delete |
 | [`staff.md`](./staff.md) | `/settings/staff` invite (email/mobile), list image, status OTP |
+| [`document-delete-otp.md`](./document-delete-otp.md) | Client/task document delete OTP to branch admin |
 
 ## Pair with client
 

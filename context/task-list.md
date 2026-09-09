@@ -36,6 +36,7 @@ List/report rows with an assigned CA should include:
 | `GET /task/list` | `t.ca_approval` selected + mapped |
 | `report/task-detailed` | under `assignment.ca_approval` |
 | `report/staff-tasks` | top-level `has_ca`, `ca`, `ca_approval` |
+| `GET /task/notifications` | Header bell: `ca_approval = complete` AND `status NOT IN ('complete','cancel')`. Returns `{ count, notifications[] }` with `path` → `/task/profile/:task_id/details`. Pair: [`CLIENT/context/header-notifications.md`](../../CLIENT/context/header-notifications.md) |
 
 ---
 

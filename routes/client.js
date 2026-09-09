@@ -34,7 +34,12 @@ import {
     sendEmail,
 } from "./payment_reminder.js";
 import { sendPaymentReminderWhatsapp, sendBirthdayWishWhatsapp, sendDocumentSharingWhatsapp } from "../helpers/whatsappNotification.js";
-import { sendPaymentReminderSms } from "../helpers/smsNotification.js";
+import { sendPaymentReminderSms, sendBirthdayWishSms } from "../helpers/smsNotification.js";
+import {
+    consumeDocumentDeleteOtp,
+    issueDocumentDeleteOtp,
+    normalizeDocumentIds,
+} from "../helpers/documentDeleteOtp.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
 import CLIENT_DOCUMENT_TYPES from "../helpers/clientDocumentTypes.js";
 import { generateOtp } from "../helpers/otp.js";
@@ -635,7 +640,16 @@ router.post("/birthday-reminder", auth, validateBranch, async (req, res) => {
                                 message_id: sendResult.messageId || null,
                             };
                         } else if (channel === "sms") {
-                            throw new Error("SMS sending is not available");
+                            const smsResult = await sendBirthdayWishSms({
+                                branch_id,
+                                username,
+                                variables,
+                                mobile: client.mobile,
+                            });
+                            channelResults.sms = {
+                                status: "sent",
+                                request_id: smsResult?.request_id || null,
+                            };
                         } else if (channel === "whatsapp") {
                             await sendBirthdayWishWhatsapp({
                                 branch_id,
@@ -4270,8 +4284,78 @@ router.post("/details/documents/share", auth, validateBranch, async (req, res) =
 });
 
 /**
- * Soft-delete client documents (is_deleted = '1'). Does not remove files from B2.
+ * POST /client/details/documents/delete/send-otp
  * Body: { username, document_ids: string[] }
+ * Sends OTP to the branch admin's registered mobile.
+ */
+router.post("/details/documents/delete/send-otp", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { username = "", document_ids } = req.body || {};
+        const clientUsername = String(username || "").trim();
+
+        if (!clientUsername) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, clientUsername))) {
+            return res.status(403).json({
+                success: false,
+                message: "User not found or does not belong to this branch",
+            });
+        }
+
+        const ids = normalizeDocumentIds(document_ids);
+        if (!ids.length) {
+            return res.status(400).json({
+                success: false,
+                message: "document_ids must be a non-empty array",
+            });
+        }
+
+        const placeholders = ids.map(() => "?").join(",");
+        const [rows] = await pool.query(
+            `SELECT document_id FROM documents
+             WHERE branch_id = ?
+               AND username = ?
+               AND document_id IN (${placeholders})
+               AND is_deleted = '0'`,
+            [branch_id, clientUsername, ...ids]
+        );
+        const foundIds = new Set((rows || []).map((r) => String(r.document_id)));
+        const notFound = ids.filter((id) => !foundIds.has(id));
+        if (notFound.length > 0) {
+            return res.status(404).json({
+                success: false,
+                message: "One or more documents not found for this client",
+                not_found_document_ids: notFound,
+            });
+        }
+
+        const otpPayload = await issueDocumentDeleteOtp({
+            branch_id,
+            scope: "client",
+            ownerKey: clientUsername,
+            documentIds: ids,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "OTP sent to the branch admin",
+            data: otpPayload,
+        });
+    } catch (error) {
+        console.error("Client document delete send-otp error:", error);
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            success: false,
+            message: error.message || "Failed to send OTP",
+        });
+    }
+});
+
+/**
+ * Soft-delete client documents (is_deleted = '1'). Does not remove files from B2.
+ * Body: { username, document_ids: string[], otp }
  */
 router.delete("/details/documents/delete", auth, validateBranch, async (req, res) => {
     let conn;
@@ -4279,7 +4363,7 @@ router.delete("/details/documents/delete", auth, validateBranch, async (req, res
         conn = await pool.getConnection();
         const branch_id = req.branch_id;
         const modifyBy = req.headers["username"] || "";
-        const { username = "", document_ids } = req.body || {};
+        const { username = "", document_ids, otp } = req.body || {};
 
         const clientUsername = String(username || "").trim();
         if (!clientUsername) {
@@ -4298,7 +4382,7 @@ router.delete("/details/documents/delete", auth, validateBranch, async (req, res
             });
         }
 
-        const ids = [...new Set(document_ids.map((id) => String(id).trim()).filter(Boolean))];
+        const ids = normalizeDocumentIds(document_ids);
         if (ids.length === 0) {
             return res.status(400).json({
                 success: false,
@@ -4329,6 +4413,21 @@ router.delete("/details/documents/delete", auth, validateBranch, async (req, res
         const orderedIds = ids.filter((id) => foundIds.has(id));
 
         await conn.beginTransaction();
+
+        const otpCheck = await consumeDocumentDeleteOtp(conn, {
+            otp,
+            scope: "client",
+            ownerKey: clientUsername,
+            documentIds: orderedIds,
+        });
+        if (!otpCheck.ok) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: otpCheck.message,
+            });
+        }
+
         await conn.query(
             `UPDATE documents
              SET is_deleted = '1', modify_by = ?, modify_date = NOW()

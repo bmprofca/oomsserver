@@ -217,7 +217,7 @@ async function resolveOnechattingTemplateId(developerToken, templateName) {
     return null;
 }
 
-async function fetchTaskWhatsappContext(branch_id, task_id) {
+export async function fetchTaskWhatsappContext(branch_id, task_id) {
     const [rows] = await pool.query(
         `SELECT
             t.task_id,
@@ -293,7 +293,7 @@ function formatTaskFees(taskRow) {
     return "";
 }
 
-async function buildTaskCreateVariables(taskRow) {
+export async function buildTaskCreateVariables(taskRow) {
     const creator = await USER_SNIPPED_DATA(taskRow.create_by || "");
     const createByDisplay =
         (creator?.name && String(creator.name).trim()) ||
@@ -320,7 +320,7 @@ async function buildTaskCreateVariables(taskRow) {
     };
 }
 
-async function buildTaskCompleteVariables(taskRow, completed_by) {
+export async function buildTaskCompleteVariables(taskRow, completed_by) {
     const completer = await USER_SNIPPED_DATA(
         completed_by || taskRow.complete_by || ""
     );
@@ -349,7 +349,7 @@ async function buildTaskCompleteVariables(taskRow, completed_by) {
     };
 }
 
-async function buildPaymentReceiveVariables({
+export async function buildPaymentReceiveVariables({
     branch_id,
     party1_id,
     party1_type,
@@ -403,7 +403,7 @@ async function buildPaymentReceiveVariables({
     };
 }
 
-async function buildPaymentVariables({
+export async function buildPaymentVariables({
     branch_id,
     party2_id,
     party2_type,

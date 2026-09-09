@@ -30,10 +30,18 @@ GET /report/dashboard/details?type=debtors|creditors
 | `balance` | Debtor: positive; creditor: negative |
 | `last_transaction` | Debtors only (`date`, `days_ago`, `period`) |
 
-### SQL
+## SQL
 
 `clientBalanceListSql` must `SELECT MAX(p.pan_number) AS pan_number`.  
 Search `HAVING` also matches `p.pan_number` (9 search params when search is set).
+
+### Aggregation order (do not regress)
+
+1. Sum transaction **effects** per `party_id` with **no** join to `clients` / `profile`.
+2. Filter with **`EXISTS`** on `clients` + `profile` (never `INNER JOIN` before `SUM`).
+3. Only then join profile/firms for display (outer query uses `MAX(balance)`).
+
+Joining `profile` (or duplicate `clients` rows) **before** `SUM(effect)` multiplies the balance — e.g. two profile rows → **2×** the ledger/`GET_BALANCE` amount. Profile and ledger stay correct because they use `GET_BALANCE` without those joins.
 
 ---
 

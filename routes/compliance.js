@@ -23,6 +23,7 @@ import {
 } from "../helpers/recurringTaskHelper.js";
 import { notifyTaskCompletedEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
+import { notifyTaskCompletedSms } from "../helpers/smsNotification.js";
 import { parseDueDateOffset } from "../helpers/complianceDueDate.js";
 
 const router = express.Router();
@@ -250,6 +251,11 @@ async function applyComplianceTaskStatus(conn, {
             completed_by: username || "system",
         });
         notifyTaskCompletedWhatsapp({
+            branch_id,
+            task_id,
+            completed_by: username || "system",
+        });
+        notifyTaskCompletedSms({
             branch_id,
             task_id,
             completed_by: username || "system",
@@ -1586,6 +1592,11 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                     completed_by: username || "system",
                 });
                 notifyTaskCompletedWhatsapp({
+                    branch_id,
+                    task_id: taskId,
+                    completed_by: username || "system",
+                });
+                notifyTaskCompletedSms({
                     branch_id,
                     task_id: taskId,
                     completed_by: username || "system",

@@ -78,7 +78,7 @@ function whatsappChannelLabel(channel) {
     return WHATSAPP_CHANNEL_LABELS[key] || key || "";
 }
 
-async function checkSmsAvailability(branch_id) {
+async function checkSmsAvailability(branch_id, notificationType) {
     try {
         const [[branchRow]] = await poolQuery(
             `SELECT sms_channel
@@ -111,6 +111,35 @@ async function checkSmsAvailability(branch_id) {
             if (!config?.config_id) {
                 return channelResult(false, "Fast2SMS is not configured");
             }
+
+            const typeCandidates = notificationTypeCandidates(notificationType)
+                .map((item) => String(item).trim().toLowerCase())
+                .filter(Boolean);
+            const uniqueTypes = [...new Set(typeCandidates)];
+            if (!uniqueTypes.length) {
+                return channelResult(false, "Notification type is required for SMS");
+            }
+
+            const [[mapping]] = await poolQuery(
+                `SELECT m.map_id
+                 FROM sms_fast2sms_template_mapping m
+                 INNER JOIN sms_fast2sms_templates t
+                   ON t.template_id = m.sms_template_id
+                  AND t.branch_id = m.branch_id
+                 WHERE m.branch_id = ?
+                   AND LOWER(TRIM(m.template_type)) IN (${uniqueTypes.map(() => "?").join(", ")})
+                   AND m.status = 1
+                   AND t.status = 'active'
+                 LIMIT 1`,
+                [branch_id, ...uniqueTypes]
+            );
+            if (!mapping?.map_id) {
+                return channelResult(
+                    false,
+                    `SMS template mapping missing for type '${notificationType}'`
+                );
+            }
+
             return channelResult(true, "", {
                 channel,
                 channel_label: smsChannelLabel(channel),

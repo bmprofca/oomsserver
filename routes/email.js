@@ -1019,129 +1019,161 @@ router.put("/template/change-status", auth, validateBranch, async (req, res) => 
 // BROADCAST APIs
 router.post("/broadcast/create", auth, validateBranch, async (req, res) => {
     try {
-        const branch_id = req.branch_id;
-        const username = userFromReq(req);
-        const { 
-            config_id, 
-            fallback_config_id,
-            template_id, 
-            broadcast_name, 
-            schedule_type = "now", 
-            scheduled_at = null, 
-            timezone = "Asia/Kolkata", 
-            global_variables_json = {}, 
-            recipients,
-            daily_limit = 1000
-        } = req.body || {};
-        
-        if (!template_id || !broadcast_name) {
-            return fail(res, "template_id and broadcast_name are required");
-        }
-
-        const activeConfigId = await getActiveBranchSmtpConfigId(branch_id);
-        const resolvedConfigId = config_id || activeConfigId;
-        if (!resolvedConfigId) {
-            return fail(res, "Select an SMTP configuration or activate one first.");
-        }
-        
-        if (!["now", "scheduled"].includes(schedule_type)) {
-            return fail(res, "Invalid schedule_type");
-        }
-        
-        if (schedule_type === "scheduled" && !scheduled_at) {
-            return fail(res, "scheduled_at required when schedule_type is scheduled");
-        }
-        
-        if (!Array.isArray(recipients) || !recipients.length) {
-            return fail(res, "recipients must be non-empty array");
-        }
-        
-        for (const recipient of recipients) {
-            if (!recipient?.recipient_email || !isValidEmail(recipient.recipient_email)) {
-                return fail(res, "recipient_email required for every recipient");
-            }
-        }
-
-        const [cfg] = await pool.query(
-            "SELECT config_id, daily_limit, username, password_encrypted, host, port, secure, from_email, from_name, status FROM email_configs WHERE branch_id=? AND config_id=? LIMIT 1", 
-            [branch_id, resolvedConfigId]
+        const { createEmailBroadcastInternal } = await import(
+            "../services/emailBroadcastCreateService.js"
         );
-        if (!cfg.length) {
-            return fail(res, "SMTP config not found");
+        const result = await createEmailBroadcastInternal({
+            branch_id: req.branch_id,
+            username: userFromReq(req),
+            config_id: req.body?.config_id,
+            template_id: req.body?.template_id,
+            broadcast_name: req.body?.broadcast_name,
+            schedule_type: req.body?.schedule_type || "now",
+            scheduled_at: req.body?.scheduled_at || null,
+            timezone: req.body?.timezone || "Asia/Kolkata",
+            global_variables_json: req.body?.global_variables_json || {},
+            recipients: req.body?.recipients,
+            audience: req.body?.audience,
+            daily_limit: req.body?.daily_limit || 1000,
+        });
+        if (!result.ok) {
+            return fail(res, result.message, result.status || 400);
         }
-        if (cfg[0].status !== "active") {
-            return fail(res, "Selected SMTP config is inactive. Activate it first.");
-        }
-        
-        const [tpl] = await pool.query(
-            "SELECT * FROM email_templates WHERE branch_id=? AND template_id=? AND status='active' LIMIT 1", 
-            [branch_id, template_id]
-        );
-        if (!tpl.length) {
-            return fail(res, "Active template not found");
-        }
-
-        const broadcast_id = newId("brd");
-        const template = tpl[0];
-        
-        const finalDailyLimit = daily_limit || cfg[0].daily_limit || 1000;
-        
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
-            
-            await conn.query(
-                `INSERT INTO email_broadcasts
-                 (broadcast_id, branch_id, config_id, fallback_config_id, template_id, broadcast_name, 
-                  subject_snapshot, html_body_snapshot, text_body_snapshot, template_variables_json,
-                  global_variables_json, schedule_type, scheduled_at, timezone, status, 
-                  total_recipients, total_pending, total_sent, total_failed, total_skipped, daily_limit,
-                  create_by, modify_by, create_date, modify_date)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 
-                         ?, ?, 0, 0, 0, ?, ?, ?, NOW(), NOW())`,
-                [
-                    broadcast_id, branch_id, resolvedConfigId, null, template_id, broadcast_name, 
-                    template.subject, template.html_body, template.text_body,
-                    template.variables_json, JSON.stringify(global_variables_json || {}), schedule_type,
-                   schedule_type === "scheduled" ? formatScheduledTime(scheduled_at, timezone) : null, timezone, 
-                    recipients.length, recipients.length, finalDailyLimit,
-                    username, username
-                ]
-            );
-            
-            // Insert recipients
-            for (const recipient of recipients) {
-                await conn.query(
-                    `INSERT INTO email_broadcast_recipients
-                     (recipient_id, broadcast_id, branch_id, recipient_name, recipient_email, 
-                      variable_values_json, status, attempt_count, create_date, modify_date)
-                     VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, NOW(), NOW())`,
-                    [newId("rcp"), broadcast_id, branch_id, recipient.recipient_name || null, 
-                     recipient.recipient_email, JSON.stringify(recipient.variable_values_json || {})]
-                );
-            }
-            
-            await conn.commit();
-        } catch (e) {
-            await conn.rollback();
-            throw e;
-        } finally {
-            conn.release();
-        }
-        
-        // 🔥 FIX: Process immediately if schedule_type is "now"
-        if (schedule_type === "now") {
-            // Don't await - process in background to avoid timeout
-            processBroadcastRecipients(branch_id, broadcast_id).catch(err => {
-                console.error(`Error processing broadcast ${broadcast_id}:`, err);
-            });
-        }
-        
-        return ok(res, "Broadcast created successfully", { broadcast_id });
-        
+        return ok(res, result.message || "Broadcast created successfully", result.data);
     } catch (error) {
         console.error("Broadcast creation error:", error);
         return fail(res, error.message);
+    }
+});
+
+router.post("/broadcast/resolve-recipients", auth, validateBranch, async (req, res) => {
+    try {
+        const { resolveEmailCampaignRecipients } = await import(
+            "../helpers/emailCampaignRecipients.js"
+        );
+        const audience = req.body && typeof req.body === "object" ? req.body : {};
+        const resolved = await resolveEmailCampaignRecipients(req.branch_id, audience);
+        if (!resolved.ok) {
+            return res.status(resolved.status || 400).json(resolved.data);
+        }
+        return ok(res, "Recipients resolved", {
+            count: resolved.count,
+            data: resolved.data,
+            meta: resolved.meta,
+        });
+    } catch (error) {
+        console.error("Email resolve recipients error:", error);
+        return fail(res, error.message || "Failed to resolve recipients");
+    }
+});
+
+router.get("/broadcast/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { listSchedules } = await import(
+            "../services/emailBroadcastScheduleService.js"
+        );
+        const activeOnly =
+            String(req.query.active_only || "").trim() === "1" ||
+            String(req.query.active_only || "").toLowerCase() === "true";
+        const data = await listSchedules(req.branch_id, { active_only: activeOnly });
+        return ok(res, "Schedules fetched", data);
+    } catch (error) {
+        console.error("GET EMAIL BROADCAST SCHEDULES ERROR:", error);
+        return fail(res, "Failed to list recurring schedules", 500);
+    }
+});
+
+router.post("/broadcast/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { createSchedule } = await import(
+            "../services/emailBroadcastScheduleService.js"
+        );
+        const result = await createSchedule({
+            branch_id: req.branch_id,
+            name: req.body?.name || req.body?.broadcast_name,
+            config_id: req.body?.config_id,
+            template_id: req.body?.template_id,
+            template_name: req.body?.template_name,
+            global_variables_json: req.body?.global_variables_json || {},
+            audience: req.body?.audience,
+            daily_limit: req.body?.daily_limit || 1000,
+            schedule_type: req.body?.schedule_type,
+            schedule_config: req.body?.schedule_config,
+            timezone: req.body?.timezone || "Asia/Kolkata",
+            create_by: userFromReq(req),
+        });
+        if (!result.ok) {
+            return fail(res, result.message, result.status || 400);
+        }
+        return ok(res, "Recurring email schedule created", result.data);
+    } catch (error) {
+        console.error("POST EMAIL BROADCAST SCHEDULE ERROR:", error);
+        return fail(res, "Failed to create recurring schedule", 500);
+    }
+});
+
+router.put("/broadcast/schedules/:scheduleId", auth, validateBranch, async (req, res) => {
+    try {
+        const { updateSchedule } = await import(
+            "../services/emailBroadcastScheduleService.js"
+        );
+        const result = await updateSchedule(
+            req.branch_id,
+            String(req.params.scheduleId || "").trim(),
+            {
+                name: req.body?.name,
+                schedule_type: req.body?.schedule_type,
+                schedule_config: req.body?.schedule_config,
+                is_active: req.body?.is_active,
+            },
+            userFromReq(req)
+        );
+        if (!result.ok) {
+            return fail(res, result.message, result.status || 400);
+        }
+        return ok(res, "Schedule updated", result.data);
+    } catch (error) {
+        console.error("PUT EMAIL BROADCAST SCHEDULE ERROR:", error);
+        return fail(res, "Failed to update recurring schedule", 500);
+    }
+});
+
+router.delete("/broadcast/schedules/:scheduleId", auth, validateBranch, async (req, res) => {
+    try {
+        const { deleteSchedule } = await import(
+            "../services/emailBroadcastScheduleService.js"
+        );
+        const result = await deleteSchedule(
+            req.branch_id,
+            String(req.params.scheduleId || "").trim()
+        );
+        if (!result.ok) {
+            return fail(res, result.message, result.status || 400);
+        }
+        return ok(res, "Schedule deleted");
+    } catch (error) {
+        console.error("DELETE EMAIL BROADCAST SCHEDULE ERROR:", error);
+        return fail(res, "Failed to delete recurring schedule", 500);
+    }
+});
+
+router.post("/broadcast/schedules/:scheduleId/run", auth, validateBranch, async (req, res) => {
+    try {
+        const { runScheduleNow } = await import(
+            "../services/emailBroadcastScheduleService.js"
+        );
+        const result = await runScheduleNow(
+            req.branch_id,
+            String(req.params.scheduleId || "").trim(),
+            { create_by: userFromReq(req) }
+        );
+        if (!result.ok) {
+            return fail(res, result.message, result.status || 400);
+        }
+        return ok(res, "Broadcast created from schedule", result.data);
+    } catch (error) {
+        console.error("RUN EMAIL BROADCAST SCHEDULE ERROR:", error);
+        return fail(res, "Failed to run recurring schedule", 500);
     }
 });
 

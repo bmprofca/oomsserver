@@ -7,6 +7,7 @@ import { executeCreatePurchase } from "../helpers/purchaseCreate.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
+import { notifyTaskCreatedSms, notifyTaskCompletedSms } from "../helpers/smsNotification.js";
 import { notifyCaApprovalSent } from "../helpers/caApprovalEmail.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
@@ -14,6 +15,11 @@ import {
     downloadAndUploadProfileDocument,
     getProfileDocumentAccessUrl,
 } from "../helpers/b2Storage.js";
+import {
+    consumeDocumentDeleteOtp,
+    issueDocumentDeleteOtp,
+    normalizeDocumentIds,
+} from "../helpers/documentDeleteOtp.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { resolveSaleEntriesBranchId } from "../helpers/saleEntriesBranch.js";
 import {
@@ -522,6 +528,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 for (const item of created) {
                     notifyTaskCreatedEmail({ branch_id, task_id: item.task_id });
                     notifyTaskCreatedWhatsapp({ branch_id, task_id: item.task_id, created_by: username });
+                    notifyTaskCreatedSms({ branch_id, task_id: item.task_id });
                 }
 
                 return res.status(200).json({
@@ -785,6 +792,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
             notifyTaskCreatedEmail({ branch_id, task_id });
             notifyTaskCreatedWhatsapp({ branch_id, task_id, created_by: username });
+            notifyTaskCreatedSms({ branch_id, task_id });
 
             return res.status(200).json({
                 success: true,
@@ -3591,6 +3599,11 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
                         task_id: taskId,
                         completed_by: username || "system",
                     });
+                    notifyTaskCompletedSms({
+                        branch_id,
+                        task_id: taskId,
+                        completed_by: username || "system",
+                    });
                 } catch (emailError) {
                     console.error(`Failed to send completion notification for task ${taskId}:`, emailError);
                 }
@@ -3922,6 +3935,56 @@ router.get("/details/document/list", auth, validateBranch, async (req, res) => {
     }
 });
 
+router.post("/details/document/delete/send-otp", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const { document_ids } = req.body || {};
+        const ids = normalizeDocumentIds(document_ids);
+        if (!ids.length) {
+            return res.status(400).json({
+                success: false,
+                message: "document_ids must be a non-empty array",
+            });
+        }
+
+        const placeholders = ids.map(() => "?").join(",");
+        const [rows] = await pool.query(
+            `SELECT document_id FROM documents WHERE branch_id = ? AND document_id IN (${placeholders})
+             AND category_id = 'TASK' AND is_reserved = '1' AND is_deleted = '0'`,
+            [branch_id, ...ids]
+        );
+        const foundIds = new Set((rows || []).map((r) => String(r.document_id)));
+        const notFound = ids.filter((id) => !foundIds.has(id));
+        if (notFound.length > 0) {
+            return res.status(404).json({
+                success: false,
+                message: "One or more task documents not found for this branch",
+                not_found_document_ids: notFound,
+            });
+        }
+
+        const otpPayload = await issueDocumentDeleteOtp({
+            branch_id,
+            scope: "task",
+            ownerKey: branch_id,
+            documentIds: ids,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "OTP sent to the branch admin",
+            data: otpPayload,
+        });
+    } catch (error) {
+        console.error("Task document delete send-otp error:", error);
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            success: false,
+            message: error.message || "Failed to send OTP",
+        });
+    }
+});
+
 router.delete("/details/document/delete", auth, validateBranch, async (req, res) => {
     let conn;
     try {
@@ -3929,7 +3992,7 @@ router.delete("/details/document/delete", auth, validateBranch, async (req, res)
         const branch_id = req.branch_id;
         const modifyBy = req.headers["username"] || req.headers["Username"] || "";
         // Allow both body and query for DELETE; prefer body for array support.
-        const { document_ids } = req.body || {};
+        const { document_ids, otp } = req.body || {};
 
         if (!Array.isArray(document_ids) || document_ids.length === 0) {
             return res.status(400).json({
@@ -3938,7 +4001,7 @@ router.delete("/details/document/delete", auth, validateBranch, async (req, res)
             });
         }
 
-        const ids = [...new Set(document_ids.map((id) => String(id).trim()).filter(Boolean))];
+        const ids = normalizeDocumentIds(document_ids);
         if (ids.length === 0) {
             return res.status(400).json({
                 success: false,
@@ -3968,6 +4031,21 @@ router.delete("/details/document/delete", auth, validateBranch, async (req, res)
         const orderedIds = ids.filter((id) => foundIds.has(id));
 
         await conn.beginTransaction();
+
+        const otpCheck = await consumeDocumentDeleteOtp(conn, {
+            otp,
+            scope: "task",
+            ownerKey: branch_id,
+            documentIds: orderedIds,
+        });
+        if (!otpCheck.ok) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: otpCheck.message,
+            });
+        }
+
         await conn.query(
             `UPDATE documents SET is_deleted = '1', modify_by = ?, modify_date = NOW()
              WHERE branch_id = ? AND document_id IN (${placeholders})
@@ -4939,6 +5017,101 @@ router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to cancel CA purchase",
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * Header notifications: CA approval complete but task still open.
+ * GET /task/notifications
+ * Query: limit? (default 20, max 50)
+ *
+ * Filters:
+ * - ca_approval = 'complete'
+ * - status NOT IN ('complete', 'cancel')
+ */
+router.get("/notifications", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const limitNum = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+
+        const whereSql = `
+            FROM tasks t
+            LEFT JOIN services s ON s.service_id = t.service_id
+            LEFT JOIN firms f
+                ON f.firm_id = t.firm_id
+               AND (f.is_deleted = '0' OR f.is_deleted = 0)
+            LEFT JOIN profile cp
+                ON cp.username = t.username
+               AND cp.id = (
+                    SELECT MAX(cp2.id)
+                    FROM profile cp2
+                    WHERE cp2.username = t.username
+               )
+            WHERE t.branch_id = ?
+              AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
+              AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
+        `;
+
+        const [[countRow]] = await pool.query(
+            `SELECT COUNT(*) AS total ${whereSql}`,
+            [branch_id]
+        );
+        const total = Number(countRow?.total) || 0;
+
+        const [rows] = await pool.query(
+            `SELECT
+                t.task_id,
+                t.username,
+                t.status,
+                t.ca_approval,
+                t.udin,
+                t.create_date,
+                t.due_date,
+                s.name AS service_name,
+                f.firm_name,
+                cp.name AS client_name
+             ${whereSql}
+             ORDER BY t.create_date DESC, t.id DESC
+             LIMIT ?`,
+            [branch_id, limitNum]
+        );
+
+        const notifications = (rows || []).map((row) => {
+            const serviceName = row.service_name || "Task";
+            const clientName = row.client_name || row.username || "Client";
+            const firmName = row.firm_name || "";
+            return {
+                id: `ca-complete-${row.task_id}`,
+                type: "ca_approval_complete",
+                title: "CA approval complete",
+                message: `${serviceName} for ${clientName} is CA-approved but the task is still ${row.status || "open"}.`,
+                task_id: row.task_id,
+                status: row.status || null,
+                ca_approval: row.ca_approval || "complete",
+                udin: row.udin || null,
+                service_name: serviceName,
+                client_name: clientName,
+                firm_name: firmName,
+                path: `/task/profile/${encodeURIComponent(row.task_id)}/details`,
+                at: row.create_date || null,
+            };
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Notifications fetched successfully",
+            data: {
+                count: total,
+                notifications,
+            },
+        });
+    } catch (error) {
+        console.error("Task notifications error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch notifications",
             error: error.message,
         });
     }

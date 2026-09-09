@@ -66,3 +66,13 @@ Empty `q` returns empty arrays. Client modules are **not** searched here — the
 
 See [`CLIENT/context/global-search.md`](../../CLIENT/context/global-search.md).
 
+---
+
+## Notification availability
+
+```
+GET /utils/notification-availability?type=
+```
+
+SMS (`checkSmsAvailability`) requires Fast2SMS config **and** an active template mapping for the requested type. See [`sms-notifications.md`](./sms-notifications.md).
+

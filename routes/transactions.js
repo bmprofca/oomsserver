@@ -14,6 +14,10 @@ import {
     notifyPaymentWhatsapp,
     sendDocumentSharingWhatsapp,
 } from "../helpers/whatsappNotification.js";
+import {
+    notifyPaymentReceiveSms,
+    notifyPaymentSms,
+} from "../helpers/smsNotification.js";
 import { isSupportedGenerateType } from "../helpers/invoiceFormatMapping.js";
 import {
     collectLedgerStatement,
@@ -1612,7 +1616,15 @@ router.post("/payment/receive", auth, validateBranch, async (req, res) => {
                 });
             }
             if (shouldNotifySms) {
-                // SMS notification hook is not wired for payment receive yet.
+                notifyPaymentReceiveSms({
+                    branch_id,
+                    amount: amountNum,
+                    party1_id: p1_id,
+                    party1_type: p1_type,
+                    transaction_date: txnDate,
+                    invoice_no,
+                    received_by: username,
+                });
             }
         } catch (err) {
             await connection.rollback();
@@ -1753,7 +1765,15 @@ router.post("/payment/payment", auth, validateBranch, async (req, res) => {
                 });
             }
             if (shouldNotifySms) {
-                // SMS notification hook is not wired for payment yet.
+                notifyPaymentSms({
+                    branch_id,
+                    amount: amountNum,
+                    party2_id: p2_id,
+                    party2_type: p2_type,
+                    transaction_date: txnDate,
+                    invoice_no,
+                    paid_by: username,
+                });
             }
         } catch (err) {
             await connection.rollback();

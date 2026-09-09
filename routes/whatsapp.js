@@ -2206,97 +2206,353 @@ router.post("/onechatting/campaign/resolve-recipients", auth, validateBranch, as
     }
 });
 
-router.post("/onechatting/campaign/create", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const name = req.body?.name != null ? String(req.body.name).trim() : "";
-        const template_id =
-            req.body?.template_id != null ? String(req.body.template_id).trim() : "";
-        const schedule_date =
-            req.body?.schedule_date != null ? String(req.body.schedule_date).trim() : "";
-        const rawNumbers = Array.isArray(req.body?.numbers) ? req.body.numbers : [];
-        const component = Array.isArray(req.body?.component) ? req.body.component : null;
-        const audience =
-            req.body?.audience && typeof req.body.audience === "object"
-                ? req.body.audience
-                : null;
+/**
+ * Shared create used by HTTP route and recurring campaign cron.
+ * Returns { ok, status?, data, recipients_count?, message? } — does not write to Express res.
+ */
+async function createOneChattingCampaignInternal({
+    branch_id,
+    name,
+    template_id,
+    component,
+    audience = null,
+    numbers: rawNumbers = [],
+    schedule_date = "",
+}) {
+    const trimmedName = name != null ? String(name).trim() : "";
+    const trimmedTemplateId =
+        template_id != null ? String(template_id).trim() : "";
+    const trimmedSchedule =
+        schedule_date != null ? String(schedule_date).trim() : "";
 
-        if (!name) {
-            return res.status(400).json({ success: false, message: "name is required" });
-        }
-        if (!template_id) {
-            return res.status(400).json({ success: false, message: "template_id is required" });
-        }
-        if (!component) {
-            return res.status(400).json({
-                success: false,
-                message: "component must be an array",
-            });
-        }
+    if (!trimmedName) {
+        return {
+            ok: false,
+            status: 400,
+            data: { success: false, message: "name is required" },
+            message: "name is required",
+        };
+    }
+    if (!trimmedTemplateId) {
+        return {
+            ok: false,
+            status: 400,
+            data: { success: false, message: "template_id is required" },
+            message: "template_id is required",
+        };
+    }
+    if (!Array.isArray(component)) {
+        return {
+            ok: false,
+            status: 400,
+            data: { success: false, message: "component must be an array" },
+            message: "component must be an array",
+        };
+    }
 
-        let numbers = [];
-        if (audience) {
-            const resolvedAudience = await resolveOneChattingCampaignRecipients(
-                branch_id,
-                audience
-            );
-            if (!resolvedAudience.ok) {
-                return res.status(resolvedAudience.status).json(resolvedAudience.data);
-            }
-            numbers = resolvedAudience.data.map((item) => item.number).filter(Boolean);
-        } else {
-            numbers = [
-                ...new Set(
-                    rawNumbers
-                        .map((n) =>
-                            String(n || "")
-                                .trim()
-                                .replace(/^\+/, "")
-                                .replace(/\s/g, "")
-                        )
-                        .filter(Boolean)
-                ),
-            ];
+    let numbers = [];
+    if (audience && typeof audience === "object") {
+        const resolvedAudience = await resolveOneChattingCampaignRecipients(
+            branch_id,
+            audience
+        );
+        if (!resolvedAudience.ok) {
+            return {
+                ok: false,
+                status: resolvedAudience.status,
+                data: resolvedAudience.data,
+                message: resolvedAudience.data?.message || "Failed to resolve audience",
+            };
         }
+        numbers = resolvedAudience.data.map((item) => item.number).filter(Boolean);
+    } else {
+        numbers = [
+            ...new Set(
+                (Array.isArray(rawNumbers) ? rawNumbers : [])
+                    .map((n) =>
+                        String(n || "")
+                            .trim()
+                            .replace(/^\+/, "")
+                            .replace(/\s/g, "")
+                    )
+                    .filter(Boolean)
+            ),
+        ];
+    }
 
-        if (!numbers.length) {
-            return res.status(400).json({
+    if (!numbers.length) {
+        return {
+            ok: false,
+            status: 400,
+            data: {
                 success: false,
                 message: "No valid WhatsApp numbers found for this audience",
-            });
-        }
-        if (numbers.length > ONECHATTING_CAMPAIGN_MAX_NUMBERS) {
-            return res.status(400).json({
+            },
+            message: "No valid WhatsApp numbers found for this audience",
+        };
+    }
+    if (numbers.length > ONECHATTING_CAMPAIGN_MAX_NUMBERS) {
+        return {
+            ok: false,
+            status: 400,
+            data: {
                 success: false,
                 message: `numbers cannot exceed ${ONECHATTING_CAMPAIGN_MAX_NUMBERS}`,
-            });
-        }
-
-        const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
-        if (!resolved.ok) {
-            return res.status(resolved.status).json(resolved.data);
-        }
-
-        const body = {
-            name,
-            template_id,
-            numbers,
-            component,
+            },
+            message: `numbers cannot exceed ${ONECHATTING_CAMPAIGN_MAX_NUMBERS}`,
         };
-        if (schedule_date) {
-            body.schedule_date = schedule_date;
+    }
+
+    const resolved = await resolveOneChattingBranchDeveloperToken(branch_id);
+    if (!resolved.ok) {
+        return {
+            ok: false,
+            status: resolved.status,
+            data: resolved.data,
+            message: resolved.data?.message || "Developer token unavailable",
+        };
+    }
+
+    const body = {
+        name: trimmedName,
+        template_id: trimmedTemplateId,
+        numbers,
+        component,
+    };
+    if (trimmedSchedule) {
+        body.schedule_date = trimmedSchedule;
+    }
+
+    const response = await axios.post(ONECHATTING_CAMPAIGN_CREATE_URL, body, {
+        headers: {
+            token: resolved.developer_token,
+            "Content-Type": "application/json",
+        },
+    });
+
+    if (response.status === 401) {
+        return {
+            ok: false,
+            status: 400,
+            data: response.data,
+            message: response.data?.message || "Unauthorized",
+            recipients_count: numbers.length,
+        };
+    }
+
+    const okStatus = response.status >= 200 && response.status < 300;
+    return {
+        ok: okStatus,
+        status: response.status,
+        data: response.data,
+        recipients_count: numbers.length,
+        message: response.data?.msg || response.data?.message,
+    };
+}
+
+router.post("/onechatting/campaign/create", auth, validateBranch, async (req, res) => {
+    try {
+        const result = await createOneChattingCampaignInternal({
+            branch_id: req.branch_id,
+            name: req.body?.name,
+            template_id: req.body?.template_id,
+            component: Array.isArray(req.body?.component) ? req.body.component : null,
+            audience:
+                req.body?.audience && typeof req.body.audience === "object"
+                    ? req.body.audience
+                    : null,
+            numbers: Array.isArray(req.body?.numbers) ? req.body.numbers : [],
+            schedule_date: req.body?.schedule_date,
+        });
+
+        if (!result.ok) {
+            return res.status(result.status || 400).json(
+                result.data || { success: false, message: result.message }
+            );
         }
 
-        return await proxyOneChattingPost(
-            ONECHATTING_CAMPAIGN_CREATE_URL,
-            resolved.developer_token,
-            body,
-            res
-        );
+        return res.status(result.status || 200).json(result.data);
     } catch (error) {
         return handleOneChattingAxiosError(error, res, "Failed to create campaign");
     }
 });
+
+router.get("/onechatting/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const {
+            listSchedules,
+        } = await import("../services/oneChattingCampaignScheduleService.js");
+        const activeOnly =
+            String(req.query.active_only || "").trim() === "1" ||
+            String(req.query.active_only || "").toLowerCase() === "true";
+        const data = await listSchedules(req.branch_id, { active_only: activeOnly });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("GET ONECHATTING CAMPAIGN SCHEDULES ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to list recurring schedules",
+        });
+    }
+});
+
+router.post("/onechatting/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { createSchedule } = await import(
+            "../services/oneChattingCampaignScheduleService.js"
+        );
+        const create_by =
+            req.headers.username || req.headers.Username || req.user?.username || null;
+        const result = await createSchedule({
+            branch_id: req.branch_id,
+            name: req.body?.name,
+            template_id: req.body?.template_id,
+            template_name: req.body?.template_name,
+            component: req.body?.component,
+            audience: req.body?.audience,
+            schedule_type: req.body?.schedule_type,
+            schedule_config: req.body?.schedule_config,
+            timezone: req.body?.timezone || "Asia/Kolkata",
+            create_by,
+        });
+        if (!result.ok) {
+            return res.status(result.status || 400).json({
+                success: false,
+                message: result.message,
+            });
+        }
+        return res.status(201).json({
+            success: true,
+            message: "Recurring campaign schedule created",
+            data: result.data,
+        });
+    } catch (error) {
+        console.error("POST ONECHATTING CAMPAIGN SCHEDULE ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to create recurring schedule",
+        });
+    }
+});
+
+router.put(
+    "/onechatting/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { updateSchedule } = await import(
+                "../services/oneChattingCampaignScheduleService.js"
+            );
+            const modify_by =
+                req.headers.username ||
+                req.headers.Username ||
+                req.user?.username ||
+                null;
+            const schedule_id = String(req.params.scheduleId || "").trim();
+            const result = await updateSchedule(
+                req.branch_id,
+                schedule_id,
+                {
+                    name: req.body?.name,
+                    schedule_type: req.body?.schedule_type,
+                    schedule_config: req.body?.schedule_config,
+                    is_active: req.body?.is_active,
+                },
+                modify_by
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule updated",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("PUT ONECHATTING CAMPAIGN SCHEDULE ERROR:", error);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to update recurring schedule",
+            });
+        }
+    }
+);
+
+router.delete(
+    "/onechatting/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { deleteSchedule } = await import(
+                "../services/oneChattingCampaignScheduleService.js"
+            );
+            const schedule_id = String(req.params.scheduleId || "").trim();
+            const result = await deleteSchedule(req.branch_id, schedule_id);
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule deleted",
+            });
+        } catch (error) {
+            console.error("DELETE ONECHATTING CAMPAIGN SCHEDULE ERROR:", error);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to delete recurring schedule",
+            });
+        }
+    }
+);
+
+router.post(
+    "/onechatting/campaign/schedules/:scheduleId/run",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { runScheduleNow } = await import(
+                "../services/oneChattingCampaignScheduleService.js"
+            );
+            const create_by =
+                req.headers.username ||
+                req.headers.Username ||
+                req.user?.username ||
+                null;
+            const schedule_id = String(req.params.scheduleId || "").trim();
+            const result = await runScheduleNow(req.branch_id, schedule_id, {
+                create_by,
+            });
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                    data: result.data,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Campaign created from schedule",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("RUN ONECHATTING CAMPAIGN SCHEDULE ERROR:", error);
+            return handleOneChattingAxiosError(
+                error,
+                res,
+                "Failed to run recurring schedule"
+            );
+        }
+    }
+);
 
 router.get("/onechatting/campaign/list", auth, validateBranch, async (req, res) => {
     try {
@@ -3336,4 +3592,5 @@ router.get("/whatsappweb/socket-config", auth, validateBranch, async (req, res) 
     }
 });
 
+export { createOneChattingCampaignInternal };
 export default router;

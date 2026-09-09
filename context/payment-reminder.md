@@ -43,6 +43,8 @@
 
 Returns per-client / aggregate status such as `sent` / `partial` / `skipped` / `failed` plus `details` array. Channels attempted according to request + availability.
 
+SMS uses Fast2SMS mapping type **`payment reminder`** via `sendPaymentReminderSms` — see [`sms-notifications.md`](./sms-notifications.md).
+
 ---
 
 ## Do not
