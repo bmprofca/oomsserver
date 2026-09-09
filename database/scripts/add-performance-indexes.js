@@ -78,6 +78,9 @@ const INDEXES = [
     { table: "branch_mapping", name: "idx_bm_username", columns: "(username, branch_id)" },
     { table: "profile", name: "idx_profile_username", columns: "(username)" },
     { table: "profile", name: "idx_profile_type_status", columns: "(user_type, status)" },
+    { table: "clients", name: "idx_clients_branch_type_deleted", columns: "(branch_id, user_type, is_deleted)" },
+    { table: "firms", name: "idx_firms_branch_deleted", columns: "(branch_id, is_deleted)" },
+    { table: "branch_mapping", name: "idx_bm_branch_type_deleted", columns: "(branch_id, type, is_deleted)" },
 ];
 
 async function tableExists(conn, tableName) {

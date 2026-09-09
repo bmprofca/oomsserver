@@ -387,4 +387,188 @@ router.get("/notification-availability", auth, validateBranch, async (req, res) 
     }
 });
 
+function likePattern(raw) {
+    const cleaned = String(raw || "").trim().replace(/[%_\\]/g, "");
+    return `%${cleaned}%`;
+}
+
+function mapPerson(row, pathPrefix) {
+    return {
+        id: row.username,
+        title: row.name || row.username,
+        subtitle: [row.mobile, row.email, row.pan_number].filter(Boolean).join(" · ") || row.username,
+        path: `${pathPrefix}${encodeURIComponent(row.username)}`,
+    };
+}
+
+function takeUnique(rows, key, limit) {
+    const seen = new Set();
+    const out = [];
+    for (const row of rows) {
+        const id = row[key];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push(row);
+        if (out.length >= limit) break;
+    }
+    return out;
+}
+
+async function searchOrEmpty(label, runner) {
+    try {
+        return await runner();
+    } catch (error) {
+        console.error(`Global search ${label} failed:`, error);
+        return [];
+    }
+}
+
+router.get("/global-search", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+        if (!q) {
+            return res.status(200).json({
+                success: true,
+                data: { clients: [], firms: [], tasks: [], staff: [], ca: [], agents: [] },
+            });
+        }
+
+        const pattern = likePattern(q);
+        if (pattern === "%%") {
+            return res.status(200).json({
+                success: true,
+                data: { clients: [], firms: [], tasks: [], staff: [], ca: [], agents: [] },
+            });
+        }
+
+        const limit = 6;
+
+        const [people, firms, tasks, staff] = await Promise.all([
+            searchOrEmpty("people", async () => {
+                const [rows] = await poolQuery(
+                    `(
+                        SELECT c.username, c.user_type, p.name, p.mobile, p.email, p.pan_number
+                        FROM clients c
+                        INNER JOIN profile p ON p.username = c.username
+                        WHERE c.branch_id = ?
+                          AND c.is_deleted = '0'
+                          AND c.user_type = 'client'
+                          AND (c.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR p.pan_number LIKE ?)
+                        LIMIT ?
+                     )
+                     UNION ALL
+                     (
+                        SELECT c.username, c.user_type, p.name, p.mobile, p.email, p.pan_number
+                        FROM clients c
+                        INNER JOIN profile p ON p.username = c.username
+                        WHERE c.branch_id = ?
+                          AND c.is_deleted = '0'
+                          AND c.user_type = 'ca'
+                          AND (c.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR p.pan_number LIKE ?)
+                        LIMIT ?
+                     )
+                     UNION ALL
+                     (
+                        SELECT c.username, c.user_type, p.name, p.mobile, p.email, p.pan_number
+                        FROM clients c
+                        INNER JOIN profile p ON p.username = c.username
+                        WHERE c.branch_id = ?
+                          AND c.is_deleted = '0'
+                          AND c.user_type = 'agent'
+                          AND (c.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ?)
+                        LIMIT ?
+                     )`,
+                    [
+                        branch_id, pattern, pattern, pattern, pattern, pattern, limit,
+                        branch_id, pattern, pattern, pattern, pattern, pattern, limit,
+                        branch_id, pattern, pattern, pattern, pattern, limit,
+                    ]
+                );
+                return rows;
+            }),
+            searchOrEmpty("firms", async () => {
+                const [rows] = await poolQuery(
+                    `SELECT f.firm_id, f.firm_name, f.username, f.pan_no
+                     FROM firms f
+                     WHERE f.branch_id = ?
+                       AND f.is_deleted = '0'
+                       AND (f.firm_name LIKE ? OR f.firm_id LIKE ? OR f.pan_no LIKE ? OR f.username LIKE ?)
+                     LIMIT ?`,
+                    [branch_id, pattern, pattern, pattern, pattern, limit]
+                );
+                return rows;
+            }),
+            searchOrEmpty("tasks", async () => {
+                const [rows] = await poolQuery(
+                    `SELECT t.task_id, t.status, t.username, f.firm_name, s.name AS service_name
+                     FROM tasks t
+                     LEFT JOIN firms f ON f.firm_id = t.firm_id
+                     LEFT JOIN services s ON s.service_id = t.service_id
+                     WHERE t.branch_id = ?
+                       AND (t.task_id LIKE ? OR t.username LIKE ? OR f.firm_name LIKE ? OR s.name LIKE ?)
+                     LIMIT ?`,
+                    [branch_id, pattern, pattern, pattern, pattern, limit]
+                );
+                return rows;
+            }),
+            searchOrEmpty("staff", async () => {
+                const [rows] = await poolQuery(
+                    `SELECT bm.username, bm.designation, p.name, p.mobile, p.email
+                     FROM branch_mapping bm
+                     INNER JOIN profile p ON p.username = bm.username
+                     WHERE bm.branch_id = ?
+                       AND bm.is_deleted = '0'
+                       AND bm.type = 'staff'
+                       AND (p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR bm.username LIKE ? OR bm.designation LIKE ?)
+                     LIMIT ?`,
+                    [branch_id, pattern, pattern, pattern, pattern, pattern, limit]
+                );
+                return rows;
+            }),
+        ]);
+
+        const clients = takeUnique(people.filter((row) => row.user_type === "client"), "username", limit)
+            .map((row) => mapPerson(row, "/client/profile/"));
+        const ca = takeUnique(people.filter((row) => row.user_type === "ca"), "username", limit)
+            .map((row) => mapPerson(row, "/staff/office-assistance/ca-profile/"));
+        const agents = takeUnique(people.filter((row) => row.user_type === "agent"), "username", limit)
+            .map((row) => mapPerson(row, "/settings/agent-profile/"));
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                clients,
+                firms: takeUnique(firms, "firm_id", limit).map((row) => ({
+                    id: row.firm_id,
+                    title: row.firm_name || row.firm_id,
+                    subtitle: [row.pan_no && `PAN ${row.pan_no}`, row.username].filter(Boolean).join(" · "),
+                    path: `/client/profile/${encodeURIComponent(row.username)}/firms`,
+                })),
+                tasks: takeUnique(tasks, "task_id", limit).map((row) => ({
+                    id: row.task_id,
+                    title: row.service_name || row.task_id,
+                    subtitle: [row.firm_name, row.status, row.task_id].filter(Boolean).join(" · "),
+                    path: `/task/${encodeURIComponent(row.task_id)}`,
+                })),
+                staff: takeUnique(staff, "username", limit).map((row) => ({
+                    id: row.username,
+                    title: row.name || row.username,
+                    subtitle: [row.designation, row.mobile, row.email].filter(Boolean).join(" · "),
+                    path: `/staff/view/profile/${encodeURIComponent(row.username)}`,
+                })),
+                ca,
+                agents,
+            },
+        });
+    } catch (error) {
+        console.error("Global search error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to search",
+            error: error.message,
+        });
+    }
+});
+
 export default router;

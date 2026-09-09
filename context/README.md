@@ -15,7 +15,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
 | [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |
 | [`account-profile.md`](./account-profile.md) | Logged-in user profile (`/account`), contact OTP, profile image |
-| [`utils.md`](./utils.md) | Shared utility routes like `/utils/states-and-districts` |
+| [`utils.md`](./utils.md) | Shared utility routes like `/utils/states-and-districts`, `/utils/global-search` |
 | [`wp_system.md`](./wp_system.md) | OOMS System WhatsApp channel: JSON templates, mappings, OneChatting send + header image URLs |
 | [`attendance.md`](./attendance.md) | Phase-1 punch/break APIs, `username` on `break`, IST timestamps (not MySQL `NOW()`), `breaks[]` |
 | [`salary.md`](./salary.md) | `staff_salaries` (merged), fixed/flexible, one active, set-salary / history |
@@ -24,6 +24,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`ledger-report.md`](./ledger-report.md) | Ledger PDF (`ledgerReport.js`), download/share endpoints, document sharing HEADER override |
 | [`proxy.md`](./proxy.md) | B2 media proxy URLs (`/proxy/media`), `mediaUrl.js`, local-dev → live host |
 | [`password-groups.md`](./password-groups.md) | Password groups + firm credentials, status `'1'`/`'0'`, select-all delete |
+| [`staff.md`](./staff.md) | `/settings/staff` invite (email/mobile), list image, status OTP |
 
 ## Pair with client
 
@@ -45,3 +46,4 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | `salary.md` | `CLIENT/context/salary.md` |
 | `invoice.md` | `CLIENT/context/invoice.md`, `CLIENT/context/ledger-tab.md`, `CLIENT/context/finance-registers.md` |
 | `password-groups.md` | `CLIENT/context/password-groups.md` |
+| `staff.md` | `CLIENT/context/staff.md` |

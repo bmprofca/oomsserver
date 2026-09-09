@@ -10,6 +10,7 @@ export const ADMIN_OTP_TYPE = "admin_login";
 export const REGISTER_OTP_TYPE = "register";
 export const CONTACT_CHANGE_OTP_TYPE = "contact_change";
 export const CLIENT_DELETE_OTP_TYPE = "client_delete";
+export const STAFF_STATUS_OTP_TYPE = "staff_status";
 
 export function getQueryExecutor(connOrPool) {
     return connOrPool?.query ? connOrPool : { query: connOrPool.execute?.bind(connOrPool) };

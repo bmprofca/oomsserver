@@ -4,11 +4,26 @@ const router = express.Router();
 import { checkSubscription, requirePlan } from "../middleware/auth.js";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
+import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA, FORMAT_DATE } from "../helpers/function.js";
 import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
 import { buildBranchLogoUrl, buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
-import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
+import { resolveSoftwareUserByContact, STAFF_STATUS_OTP_TYPE } from "../helpers/authProfile.js";
+import { normalizeCountryCode, normalizeMobileDigits } from "../helpers/clientPhone.js";
+import { sendSmsOtp } from "../helpers/smsOtp.js";
+import { generateOtp } from "../helpers/otp.js";
+
+const STAFF_STATUS_MOBILE_REGEX = /^\d{10}$/;
+
+function staffStatusOtpRemark(username, status) {
+    return `staff_status:${String(username || "").trim()}:${String(status || "").trim().toLowerCase()}`;
+}
+
+function maskMobileNumber(mobile) {
+    const digits = normalizeMobileDigits(mobile);
+    if (!digits || digits.length < 4) return "";
+    return `******${digits.slice(-4)}`;
+}
 
 const ALL_PAID_PLANS = ['Business', 'BusinessPlus', 'BusinessPro'];
 
@@ -599,6 +614,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 branch_id
             });
 
+            const profileImage = buildProfileImageUrl(element.image);
             const object = {
                 map_id: element.map_id,
                 username: element.username,
@@ -616,6 +632,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 profile: {
                     name: element.name,
                     email: element.email,
+                    image: profileImage,
                 },
                 balance: balance?.balance ?? 0,
                 permission_role_id: element.permission_role_id || null,
@@ -632,7 +649,7 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                     gender: element.gender,
                     care_of: element.care_of,
                     guardian_name: element.guardian_name,
-                    image: buildProfileImageUrl(element.image),
+                    image: profileImage,
                     address: {
                         address_line_1: element.address_line_1,
                         address_line_2: element.address_line_2,
@@ -747,24 +764,25 @@ router.get('/profile', auth, validateBranch, async (req, res) => {
 
 router.post('/check-user', auth, validateBranch, async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = String(req.body?.email || "").trim().toLowerCase();
+        const mobileDigits = String(req.body?.mobile || "").replace(/\D/g, "");
+        const mobile = mobileDigits.length >= 10 ? mobileDigits.slice(-10) : "";
+        const identifier = String(req.body?.identifier || email || mobile || "").trim();
         const branch_id = req.branch_id;
 
-        // Validate username is provided
-        if (!email || email.trim() === '') {
+        if (!identifier) {
             return res.status(400).json({
                 success: false,
-                message: 'Email is required'
+                message: 'Email or mobile number is required'
             });
         }
 
-
-        const resolvedUser = await resolveSoftwareUserByContact(pool, email.trim());
+        const resolvedUser = await resolveSoftwareUserByContact(pool, identifier);
 
         if (!resolvedUser) {
             return res.status(404).json({
                 success: false,
-                message: 'User not found'
+                message: 'User not found. Check the email address or mobile number.'
             });
         }
 
@@ -791,6 +809,8 @@ router.post('/check-user', auth, validateBranch, async (req, res) => {
                 username: staff_username,
                 email: staff_data?.email,
                 name: staff_data?.name,
+                mobile: staff_data?.mobile,
+                country_code: staff_data?.country_code,
             }
         })
     } catch (error) {
@@ -1166,10 +1186,11 @@ router.get('/profile/:username', auth, validateBranch, async (req, res) => {
 });
 
 router.put("/change-status", auth, validateBranch, async (req, res) => {
+    let conn;
     try {
-        const { username, status } = req.body;
+        const { username, status, otp } = req.body;
         const branch_id = req.branch_id;
-        const session_username = req.headers["username"] || "";
+        const session_username = String(req.headers["username"] || "").trim();
 
         if (!username || String(username).trim() === "") {
             return res.status(400).json({ success: false, message: "username is required" });
@@ -1179,9 +1200,14 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             return res.status(400).json({ success: false, message: "status must be 'active' or 'deactive'" });
         }
 
-        const normalizedStatus = String(status).trim().toLowerCase();
+        const otpValue = String(otp || "").trim();
+        if (!/^\d{6}$/.test(otpValue)) {
+            return res.status(400).json({ success: false, message: "A valid 6-digit OTP is required" });
+        }
 
-        // Check session user is admin on this branch
+        const normalizedStatus = String(status).trim().toLowerCase();
+        const targetUsername = String(username).trim();
+
         const [adminRows] = await pool.query(
             "SELECT id FROM branch_mapping WHERE username = ? AND branch_id = ? AND type = 'admin' AND is_deleted = '0' LIMIT 1",
             [session_username, branch_id]
@@ -1190,10 +1216,9 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             return res.status(403).json({ success: false, message: "Only branch admins can change staff status" });
         }
 
-        // Fetch current staff status
         const [staffRows] = await pool.query(
             "SELECT status FROM branch_mapping WHERE username = ? AND branch_id = ? AND type = 'staff' AND is_deleted = '0' LIMIT 1",
-            [username, branch_id]
+            [targetUsername, branch_id]
         );
         if (!staffRows.length) {
             return res.status(404).json({ success: false, message: "Staff not found in this branch" });
@@ -1207,29 +1232,190 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const newStatusValue = normalizedStatus === "active" ? "1" : "0";
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
 
-        await pool.query(
-            "UPDATE branch_mapping SET status = ?, modify_by = ?, modify_date = NOW() WHERE username = ? AND branch_id = ? AND type = 'staff' AND is_deleted = '0'",
-            [newStatusValue, session_username, username, branch_id]
+        const remark = staffStatusOtpRemark(targetUsername, normalizedStatus);
+        const [otpRows] = await conn.query(
+            `SELECT id
+             FROM otps
+             WHERE type = ?
+               AND otp = ?
+               AND status = ?
+               AND username = ?
+               AND remark = ?
+               AND expire_date >= CURRENT_TIMESTAMP
+             ORDER BY id DESC
+             LIMIT 1`,
+            [STAFF_STATUS_OTP_TYPE, otpValue, "0", session_username, remark]
         );
+
+        if (!otpRows.length) {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: "Invalid or expired OTP. Please try again.",
+            });
+        }
+
+        await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
+
+        const newStatusValue = normalizedStatus === "active" ? "1" : "0";
+        await conn.query(
+            "UPDATE branch_mapping SET status = ?, modify_by = ?, modify_date = NOW() WHERE username = ? AND branch_id = ? AND type = 'staff' AND is_deleted = '0'",
+            [newStatusValue, session_username, targetUsername, branch_id]
+        );
+
+        await conn.commit();
 
         return res.status(200).json({
             success: true,
             message: `Staff status updated to ${normalizedStatus} successfully`,
             data: {
-                username,
+                username: targetUsername,
                 status: normalizedStatus
             }
         });
 
     } catch (error) {
+        if (conn) {
+            try { await conn.rollback(); } catch (_) {}
+        }
         console.error('Error updating staff status:', error);
         return res.status(500).json({
             success: false,
             message: 'Failed to update staff status',
             error: error.message
         });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+router.post("/change-status/send-otp", auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const { username, status } = req.body || {};
+        const branch_id = req.branch_id;
+        const session_username = String(req.headers["username"] || "").trim();
+
+        if (!session_username) {
+            return res.status(401).json({ success: false, message: "Authentication required" });
+        }
+        if (!username || String(username).trim() === "") {
+            return res.status(400).json({ success: false, message: "username is required" });
+        }
+        if (!status || !["active", "deactive"].includes(String(status).trim().toLowerCase())) {
+            return res.status(400).json({ success: false, message: "status must be 'active' or 'deactive'" });
+        }
+
+        const normalizedStatus = String(status).trim().toLowerCase();
+        const targetUsername = String(username).trim();
+
+        const [adminRows] = await pool.query(
+            "SELECT id FROM branch_mapping WHERE username = ? AND branch_id = ? AND type = 'admin' AND is_deleted = '0' LIMIT 1",
+            [session_username, branch_id]
+        );
+        if (!adminRows.length) {
+            return res.status(403).json({ success: false, message: "Only branch admins can change staff status" });
+        }
+
+        const [staffRows] = await pool.query(
+            "SELECT status FROM branch_mapping WHERE username = ? AND branch_id = ? AND type = 'staff' AND is_deleted = '0' LIMIT 1",
+            [targetUsername, branch_id]
+        );
+        if (!staffRows.length) {
+            return res.status(404).json({ success: false, message: "Staff not found in this branch" });
+        }
+
+        const currentStatus = staffRows[0].status === "1" ? "active" : "deactive";
+        if (currentStatus === normalizedStatus) {
+            return res.status(400).json({
+                success: false,
+                message: `Staff is already ${normalizedStatus}`
+            });
+        }
+
+        const [adminProfileRows] = await pool.query(
+            `SELECT mobile, country_code FROM profile WHERE username = ? AND status = '1' ORDER BY id DESC LIMIT 1`,
+            [session_username]
+        );
+        const otpCountryCode = normalizeCountryCode(adminProfileRows[0]?.country_code);
+        const otpMobile = normalizeMobileDigits(adminProfileRows[0]?.mobile);
+
+        if (!otpMobile || !STAFF_STATUS_MOBILE_REGEX.test(otpMobile)) {
+            return res.status(400).json({
+                success: false,
+                message: "A registered mobile number on your profile is required to receive the OTP.",
+            });
+        }
+
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        await conn.execute(
+            `UPDATE otps
+             SET status = ?
+             WHERE username = ?
+               AND type = ?
+               AND status = ?`,
+            ["1", session_username, STAFF_STATUS_OTP_TYPE, "0"]
+        );
+
+        const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
+        const otp = generateOtp(6);
+        const remark = staffStatusOtpRemark(targetUsername, normalizedStatus);
+
+        await conn.execute(
+            `INSERT INTO otps
+             (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
+             VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
+            [otp_id, STAFF_STATUS_OTP_TYPE, otp, session_username, otpCountryCode, otpMobile, "0", remark]
+        );
+
+        const [otpMeta] = await conn.query(
+            "SELECT expire_date FROM otps WHERE otp_id = ? ORDER BY id DESC LIMIT 1",
+            [otp_id]
+        );
+
+        await conn.commit();
+
+        try {
+            await sendSmsOtp({
+                country_code: otpCountryCode,
+                mobile: otpMobile,
+                otp,
+            });
+        } catch (sendError) {
+            console.error("STAFF STATUS OTP SMS ERROR:", sendError?.message || sendError);
+            return res.status(502).json({
+                success: false,
+                message: sendError?.message || "Failed to send OTP SMS. Please try again in a moment.",
+            });
+        }
+
+        const mobileMasked = maskMobileNumber(otpMobile);
+        return res.status(200).json({
+            success: true,
+            message: "OTP sent to your registered mobile number.",
+            channel: "mobile",
+            destination_masked: mobileMasked,
+            mobile_masked: mobileMasked,
+            expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,
+            data: { username: targetUsername, status: normalizedStatus },
+        });
+    } catch (error) {
+        if (conn) {
+            try { await conn.rollback(); } catch (_) {}
+        }
+        console.error("Staff status send-otp error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to send OTP",
+            error: error.message,
+        });
+    } finally {
+        if (conn) conn.release();
     }
 });
 

@@ -67,3 +67,8 @@ ALTER TABLE `branch_mapping` ADD INDEX `idx_bm_branch_active` (`branch_id`, `is_
 ALTER TABLE `branch_mapping` ADD INDEX `idx_bm_username` (`username`, `branch_id`);
 ALTER TABLE `profile` ADD INDEX `idx_profile_username` (`username`);
 ALTER TABLE `profile` ADD INDEX `idx_profile_type_status` (`user_type`, `status`);
+
+-- global search
+ALTER TABLE `clients` ADD INDEX `idx_clients_branch_type_deleted` (`branch_id`, `user_type`, `is_deleted`);
+ALTER TABLE `firms` ADD INDEX `idx_firms_branch_deleted` (`branch_id`, `is_deleted`);
+ALTER TABLE `branch_mapping` ADD INDEX `idx_bm_branch_type_deleted` (`branch_id`, `type`, `is_deleted`);

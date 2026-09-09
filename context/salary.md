@@ -1,5 +1,7 @@
 # Staff salary (server)
 
+Staff **invite / list / status OTP** (not salary tables): [`staff.md`](./staff.md).
+
 ## Table
 
 | Table | Role |
