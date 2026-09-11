@@ -2938,7 +2938,7 @@ router.get("/wp-system/templates", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const templates = listTemplatesByType(type);
+        const templates = await listTemplatesByType(type);
         const activeMapping = await getActiveMapping(req.branch_id, type);
 
         return res.status(200).json({

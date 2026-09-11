@@ -82,7 +82,7 @@ async function getOppositePartySnippet(branch_id, party_type, party_id) {
         );
         const r = rows?.[0];
         if (!r) return {};
-        return {
+    return {
             branch: {
                 branch_id: r.branch_id,
                 name: r.name ?? null,

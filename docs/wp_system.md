@@ -30,7 +30,7 @@ flowchart TB
     subgraph config [Configuration]
         A[branch_list.whatsapp_channel = ooms system]
         B[wp_system_template_mapping per branch + type]
-        C[utils/WP_SYSTEM_TEMPLATES.json]
+        C[wp_system_templates DB]
         D[.env OneChatting tokens]
     end
 
@@ -72,11 +72,13 @@ flowchart TB
 
 | File                                      | Role                                                                                                      |
 | ----------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `utils/WP_SYSTEM_TEMPLATES.json`          | Master list of system template definitions (type, template_name, Meta-style components, preview examples) |
-| `services/wpSystemTemplateService.js`     | Load JSON, list by type, get/set/unset branch mappings in DB                                              |
+| `wp_system_templates` (DB)                | Master list of system template definitions (type, template_name, Meta-style components, preview examples) |
+| `helpers/wpSystemTemplateSeedData.json`   | Initial seed for migration                                                                                |
+| `services/wpSystemTemplateService.js`     | Load DB, list by type, get/set/unset branch mappings, admin CRUD                                          |
 | `services/wpSystemWhatsappSendService.js` | Resolve `template_id`, build `component`, send via OneChatting                                            |
 | `helpers/whatsappNotification.js`         | Channel router; builds variables; calls send on task/payment events                                       |
 | `routes/whatsapp.js`                      | HTTP endpoints for channel + OOMS system template mapping                                                 |
+| `routes_admin/wpSystemTemplates.js`       | Admin CRUD for global template content                                                                    |
 | `media/wp_system/`                        | Optional local assets (not required when header URLs are absolute OneChatting links)                      |
 | `server.js`                               | Serves static files at `/media/wp_system`                                                                 |
 | `.env`                                    | `ONECHATTING_SYSTEM_DEVELOPER_TOKEN`, `ONECHATTING_PROJECT_DEVELOPER_TOKEN`                               |
@@ -101,17 +103,21 @@ enum('disabled','ooms system','ooms web','onechatting')
 | `branch_id`                                            | Branch                                                       |
 | `map_id`                                               | e.g. `WSTM_<hex>`                                            |
 | `type`                                                 | Activity type string, e.g. `task create`, `payment reminder` |
-| `template_name`                                        | Variant from JSON, e.g. `task_create`                        |
+| `template_name`                                        | Variant from DB, e.g. `task_create`                          |
 | `status`                                               | `1` = active, `0` = unset                                    |
 | `create_by`, `modify_by`, `create_date`, `modify_date` | Audit                                                        |
 
-Type matching is **case-insensitive** in queries (`LOWER(TRIM(type))`). On set, the canonical `type` from JSON is stored.
+Type matching is **case-insensitive** in queries (`LOWER(TRIM(type))`). On set, the canonical `type` from `TEMPLATELIST` is stored.
+
+### `wp_system_templates`
+
+Global template content (admin-managed). Unique on `(type, template_name)`.
 
 ---
 
-## Template JSON (`WP_SYSTEM_TEMPLATES.json`)
+## Template content (`wp_system_templates`)
 
-Each entry:
+Each row stores Meta-style JSON:
 
 ```json
 {
@@ -131,18 +137,9 @@ Each entry:
 
 **Header images** use the full absolute URL from each template’s `header_handle` (typically the OneChatting proxy URL from the approved template). That same URL is sent as the header `image.link` for every notification type — no `{BASE_DOMAIN}` rewriting.
 
-### Currently defined templates
+Map-list types always come from `TEMPLATELIST` (same as OneChatting Templates). Manage content in ADMIN → Settings → System WhatsApp.
 
-| type               | template_name      | Image                     |
-| ------------------ | ------------------ | ------------------------- |
-| `payment reminder` | `payment_reminder` | `payment-reminder-1.jpg`  |
-| `task create`      | `task_create`      | `task-create-1.png`       |
-| `payment receive`  | `payment_receive`  | `payment-receive-1.jpg`   |
-| `payment`          | `payment`          | `payment-1.jpg`           |
-| `birthday wish`    | `birthday_wish`    | `birthday-wish-1.jpg`     |
-| `task complete`    | `task_complete`    | `task-complete-1.png`     |
-
-To add a new type: add entry to `WP_SYSTEM_TEMPLATES.json`, ensure matching template is **APPROVED** in OneChatting portal under the same `template_name`, then branches map it via API.
+To add a new type: add to `TEMPLATELIST`, create a DB row (Admin UI), ensure matching template is **APPROVED** in OneChatting under the same `template_name`, then branches map it via API.
 
 ---
 
@@ -189,7 +186,7 @@ After `.env` changes: `pm2 restart 0 --update-env`
 | `PUT`  | `/wp-system/template-map/set`           | `{ "type": "task create", "template_name": "task_create" }` |
 | `PUT`  | `/wp-system/template-map/unset`         | `{ "type": "task create" }`                                 |
 
-User does **not** submit `component` JSON (unlike OneChatting channel). Backend builds it from JSON + variables.
+User does **not** submit `component` JSON (unlike OneChatting channel). Backend builds it from DB template + variables.
 
 ---
 
@@ -198,7 +195,7 @@ User does **not** submit `component` JSON (unlike OneChatting channel). Backend 
 1. Validate `branch_id`, `systemType`, `recipientNumber`
 2. Load **system** + **project** tokens from env
 3. `getActiveMapping(branch_id, systemType)` → `template_name`
-4. `findSystemTemplate(type, template_name)` from JSON
+4. `findSystemTemplate(type, template_name)` from DB
 5. `resolveTemplateId(projectToken, template_name)` — paginated APPROVED list
 6. Build `component` array (header image + body text parameters)
 7. Substitute variables (`{{name}}`, `{{branch_name}}`, …); `{{branch_name}}` from `branch_list.name` if not provided
@@ -272,7 +269,7 @@ Implemented in `helpers/whatsappNotification.js`. Fired asynchronously via `noti
 | ------------------------- | -------------------------- | ------------------------------------ | ----------------------- |
 | User token setup          | No                         | Yes                                  | Session/QR              |
 | User provides `component` | No                         | Yes                                  | Custom content in DB    |
-| Template source           | `WP_SYSTEM_TEMPLATES.json` | User's OneChatting account           | Branch static templates |
+| Template source           | `wp_system_templates` DB   | User's OneChatting account           | Branch static templates |
 | Mapping API body          | `{ type, template_name }`  | `{ name, template_name, component }` | Different service       |
 
 ---
@@ -308,20 +305,20 @@ Preview from API response:
 
 ### Pending / future work
 
-- Add more template variants (designs) per type in JSON
-- Replace placeholder header images in `media/wp_system/` with production artwork
-- Optional: admin API to hot-reload templates without deploy
+- Add more template variants (designs) per type in Admin
+- Replace stub BODY/header content for new types with Meta-approved copy
+- Optional: richer Admin UI for components (without raw JSON)
 
 ---
 
 ## Adding a new template type (checklist)
 
-1. Create Meta-approved template in OneChatting portal; note exact `template_name`
-2. Add entry to `utils/WP_SYSTEM_TEMPLATES.json` (match `template_name`, define `type`, components, variables)
-3. Add absolute `header_handle` URL from the OneChatting approved template (no `{BASE_DOMAIN}`)
-4. Expose in frontend via existing list/set endpoints (types auto-discovered from JSON)
-5. Call `sendOomsSystemTemplateMessage({ branch_id, systemType: "<type>", recipientNumber, variables })` from the relevant event hook, or rely on `sendWhatsappByChannel` if `systemTemplateName` matches the type string
-6. Restart PM2 if only code changed; JSON is read at runtime (cached in memory until process restart)
+1. Add the type to `TEMPLATELIST` in `utils/WhatsAppTemplates.js` if new
+2. Create Meta-approved template in OneChatting portal; note exact `template_name`
+3. Add row via Admin System WhatsApp UI (match `template_name`, define `type`, components, variables)
+4. Add absolute `header_handle` URL from the OneChatting approved template (no `{BASE_DOMAIN}`)
+5. Ensure `whatsappNotification.js` (or caller) supplies all BODY keys
+6. Call `sendOomsSystemTemplateMessage({ branch_id, systemType: "<type>", recipientNumber, variables })` from the relevant event hook, or rely on `sendWhatsappByChannel` if `systemTemplateName` matches the type string
 
 ---
 
@@ -331,7 +328,7 @@ Preview from API response:
 | -------------------------------- | ------------------------------------------------------------------------------- |
 | No message on task create        | Channel not `ooms system`, no mapping, no client mobile, or template not mapped |
 | `Invalid token` on template list | Using system token instead of project token for list                            |
-| `template_id_not_found`          | `template_name` in JSON ≠ OneChatting approved template name                    |
+| `template_id_not_found`          | `template_name` in DB ≠ OneChatting approved template name                      |
 | Message fails on send            | System token invalid, or `component` / image URL not accessible publicly        |
 | Wrong channel path               | Branch still on `onechatting` — check `GET /channel`                            |
 

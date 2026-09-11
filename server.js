@@ -70,7 +70,6 @@ app.use("/media/invoice", express.static(path.join(__dirname, "media", "invoice"
 app.use("/media/logo", express.static(path.join(__dirname, "media", "logo")));
 app.use("/media/sign", express.static(path.join(__dirname, "media", "sign")));
 app.use("/media/quotation", express.static(path.join(__dirname, "media", "quotation")));
-app.use("/media/wp_system", express.static(path.join(__dirname, "media", "wp_system")));
 
 app.use("/api/v1", apiRoutes);
 app.use("/admin", adminRoutes);

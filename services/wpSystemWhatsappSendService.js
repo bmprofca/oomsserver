@@ -45,20 +45,47 @@ function buildSendComponent(templateEntry, variables) {
     const templateComponents = templateEntry?.template?.components || [];
 
     for (const comp of templateComponents) {
-        if (comp.type === "HEADER" && comp.format === "IMAGE") {
+        if (comp.type === "HEADER") {
+            const format = String(comp.format || "").toUpperCase();
             const link = String(comp.example?.header_handle?.[0] || "").trim();
             if (!link) {
                 continue;
             }
-            components.push({
-                type: "header",
-                parameters: [
-                    {
-                        type: "image",
-                        image: { link },
-                    },
-                ],
-            });
+
+            if (format === "IMAGE") {
+                components.push({
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "image",
+                            image: { link },
+                        },
+                    ],
+                });
+            } else if (format === "VIDEO") {
+                components.push({
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "video",
+                            video: { link },
+                        },
+                    ],
+                });
+            } else if (format === "DOCUMENT") {
+                const filename =
+                    String(comp.example?.filename || "").trim() ||
+                    String(link.split("/").pop() || "document.pdf");
+                components.push({
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "document",
+                            document: { link, filename },
+                        },
+                    ],
+                });
+            }
             continue;
         }
 
@@ -105,6 +132,85 @@ async function resolveTemplateId(projectToken, templateName) {
     return null;
 }
 
+/**
+ * List OneChatting project templates using the same PROJECT token as OOMS System send.
+ * Used by Admin to import APPROVED templates into wp_system_templates.
+ */
+async function listOneChattingProjectTemplates({
+    status = "APPROVED",
+    category = "",
+    page_no = 1,
+    limit = 100,
+    fetch_all = false,
+} = {}) {
+    const projectToken = getProjectDeveloperToken();
+    if (!projectToken) {
+        const err = new Error(
+            "ONECHATTING_PROJECT_DEVELOPER_TOKEN is not configured"
+        );
+        err.code = "MISSING_PROJECT_TOKEN";
+        throw err;
+    }
+    if (!ONECHATTING_TEMPLATE_LIST_URL || !ONECHATTING_BASE_URL) {
+        const err = new Error("ONECHATTING_BASE_URL is not configured");
+        err.code = "MISSING_BASE_URL";
+        throw err;
+    }
+
+    const pageSize = Math.min(100, Math.max(1, Number(limit) || 100));
+    const startPage = Math.max(1, Number(page_no) || 1);
+    const all = [];
+    let currentPage = startPage;
+    let meta = null;
+
+    while (currentPage <= 50) {
+        const params = { page_no: currentPage, limit: pageSize };
+        if (status) params.status = String(status).trim();
+        if (category) params.category = String(category).trim();
+
+        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL, {
+            headers: { token: projectToken },
+            params,
+        });
+
+        const items = Array.isArray(response.data?.data)
+            ? response.data.data
+            : [];
+        all.push(...items);
+        meta = response.data?.meta || null;
+
+        if (!fetch_all) {
+            return {
+                data: items,
+                count: Number(response.data?.count) || items.length,
+                meta: meta || {
+                    page_no: currentPage,
+                    limit: pageSize,
+                    total_records: items.length,
+                    total_pages: 1,
+                    has_more: false,
+                },
+            };
+        }
+
+        const hasMore = meta?.has_more === true;
+        if (!hasMore || items.length === 0) break;
+        currentPage += 1;
+    }
+
+    return {
+        data: all,
+        count: all.length,
+        meta: {
+            page_no: 1,
+            limit: all.length,
+            total_records: all.length,
+            total_pages: 1,
+            has_more: false,
+        },
+    };
+}
+
 async function getBranchName(branch_id) {
     const [rows] = await pool.query(
         `SELECT name
@@ -142,7 +248,10 @@ async function sendOomsSystemTemplateMessage({
         return { ok: false, reason: "template_not_mapped" };
     }
 
-    const templateEntry = findSystemTemplate(systemType, mapping.template_name);
+    const templateEntry = await findSystemTemplate(
+        systemType,
+        mapping.template_name
+    );
     if (!templateEntry) {
         return { ok: false, reason: "template_not_found" };
     }
@@ -191,5 +300,6 @@ export {
     buildSendComponent,
     getSystemDeveloperToken,
     getProjectDeveloperToken,
+    listOneChattingProjectTemplates,
     sendOomsSystemTemplateMessage,
 };
