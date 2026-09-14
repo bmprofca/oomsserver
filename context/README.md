@@ -12,6 +12,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`payment-reminder.md`](./payment-reminder.md) | `POST /client/payment-reminder`, debit eligibility, channels |
 | [`birthday-reminder.md`](./birthday-reminder.md) | `POST /client/birthday-reminder`, availability aliases, WhatsApp `{{…}}` only |
 | [`sms-notifications.md`](./sms-notifications.md) | Fast2SMS mapped notifications (`smsNotification.js`), template types, availability |
+| [`sms_system.md`](./sms_system.md) | OOMS System SMS channel: platform Fast2SMS config, templates, branch maps, campaigns |
 | [`task-list.md`](./task-list.md) | `/task/list` + report payloads: `complete_date`, compliance fields |
 | [`gst-change.md`](./gst-change.md) | Branch GST, tax rates, fees/totals, dropped tax columns, `helpers/gst.js` |
 | [`firm-delete.md`](./firm-delete.md) | Soft-delete firm blocked by tasks/sales/docs/compliance/etc. |

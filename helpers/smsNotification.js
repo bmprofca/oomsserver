@@ -3,15 +3,21 @@ import { USER_SNIPPED_DATA } from "./function.js";
 import { normalizeFast2SmsRoute } from "./fast2sms.js";
 import { sendFast2Sms } from "./fast2smsSend.js";
 import {
-    getBranchSmsChannel,
     SMS_CHANNEL_DISABLED,
     SMS_CHANNEL_FAST2SMS,
+    SMS_CHANNEL_OOMS_SYSTEM,
+    getBranchSmsChannel,
 } from "./smsChannel.js";
-import { resolveVariablesValuesTemplate } from "./smsCampaignVariables.js";
 import {
-    deriveVariableKeysFromMessageBody,
     getFast2SmsConfigForSend,
+    deriveVariableKeysFromMessageBody,
 } from "../services/smsFast2smsService.js";
+import {
+    loadActiveSystemMapping,
+    buildVariablesValuesFromKeys,
+} from "../services/smsSystemTemplateService.js";
+import { resolveSystemSmsConfigForSend } from "./smsSystemConfig.js";
+import { resolveVariablesValuesTemplate } from "./smsCampaignVariables.js";
 import {
     buildPaymentReceiveVariables,
     buildPaymentVariables,
@@ -108,8 +114,8 @@ async function loadActiveSmsTemplateMapping(branch_id, templateType) {
 }
 
 /**
- * Shared Fast2SMS send using an active type → template mapping.
- * @throws on misconfiguration / invalid mobile when `throwOnError` (default true)
+ * Shared SMS send using an active type → template mapping.
+ * Supports branch Fast2SMS and OOMS System channels.
  */
 export async function sendMappedFast2Sms({
     branch_id,
@@ -130,18 +136,11 @@ export async function sendMappedFast2Sms({
     if (!channel || channel === SMS_CHANNEL_DISABLED) {
         throw new Error("SMS channel is disabled");
     }
-    if (channel !== SMS_CHANNEL_FAST2SMS) {
+    if (
+        channel !== SMS_CHANNEL_FAST2SMS &&
+        channel !== SMS_CHANNEL_OOMS_SYSTEM
+    ) {
         throw new Error("Unsupported SMS channel");
-    }
-
-    const mapping = await loadActiveSmsTemplateMapping(branch_id, templateType);
-    if (!mapping?.template_id) {
-        throw new Error(`${typeLabel} SMS template is not mapped`);
-    }
-
-    const config = await getFast2SmsConfigForSend(branch_id);
-    if (!config?.auth_token) {
-        throw new Error("Fast2SMS is not configured for this branch");
     }
 
     let mobile = mobileOverride;
@@ -155,6 +154,82 @@ export async function sendMappedFast2Sms({
         throw new Error("Recipient does not have a valid mobile number");
     }
 
+    const braced = toBracedVariables(bracedVariables);
+
+    if (channel === SMS_CHANNEL_OOMS_SYSTEM) {
+        const mapping = await loadActiveSystemMapping(branch_id, templateType);
+        if (!mapping?.template_id) {
+            throw new Error(`${typeLabel} SMS template is not mapped`);
+        }
+
+        const config = await resolveSystemSmsConfigForSend();
+        if (!config?.auth_token) {
+            throw new Error("OOMS System SMS is not configured");
+        }
+
+        const variableKeys = (() => {
+            try {
+                const parsed = mapping.variable_keys
+                    ? JSON.parse(mapping.variable_keys)
+                    : [];
+                return Array.isArray(parsed) ? parsed : [];
+            } catch {
+                return [];
+            }
+        })();
+        const slotCount = deriveVariableKeysFromMessageBody(mapping.message_body).length;
+        const variablesValues = buildVariablesValuesFromKeys(variableKeys, braced);
+
+        if (slotCount > 0) {
+            const parts = variablesValues.split("|");
+            if (
+                parts.length !== slotCount ||
+                parts.some((part) => !String(part || "").trim())
+            ) {
+                throw new Error(`${typeLabel} SMS variable mapping is incomplete`);
+            }
+        }
+
+        const route = normalizeFast2SmsRoute(mapping.route || config.route);
+        const senderId = mapping.sender_id || config.sender_id;
+        const messagePayload =
+            route === "dlt" || route === "otp"
+                ? mapping.dlt_message_id
+                : mapping.message_body;
+
+        if ((route === "dlt" || route === "otp") && !String(messagePayload || "").trim()) {
+            throw new Error(`${typeLabel} DLT message ID is not configured`);
+        }
+
+        const result = await sendFast2Sms({
+            authToken: config.auth_token,
+            route,
+            numbers: [mobile],
+            senderId,
+            message: messagePayload,
+            variablesValues: variablesValues || undefined,
+            entityId: config.entity_id,
+        });
+
+        return {
+            status: "sent",
+            request_id: result.request_id || null,
+            mobile,
+            template_type: templateType,
+            channel,
+        };
+    }
+
+    const mapping = await loadActiveSmsTemplateMapping(branch_id, templateType);
+    if (!mapping?.template_id) {
+        throw new Error(`${typeLabel} SMS template is not mapped`);
+    }
+
+    const config = await getFast2SmsConfigForSend(branch_id);
+    if (!config?.auth_token) {
+        throw new Error("Fast2SMS is not configured for this branch");
+    }
+
     const variableKeys = deriveVariableKeysFromMessageBody(mapping.message_body);
     const variablesTemplate = String(mapping.variables_values || "").trim();
 
@@ -162,7 +237,6 @@ export async function sendMappedFast2Sms({
         throw new Error(`${typeLabel} SMS variable mapping is incomplete`);
     }
 
-    const braced = toBracedVariables(bracedVariables);
     const variablesValues = resolveVariablesValuesTemplate(
         variablesTemplate,
         braced
@@ -204,6 +278,7 @@ export async function sendMappedFast2Sms({
         request_id: result.request_id || null,
         mobile,
         template_type: templateType,
+        channel,
     };
 }
 

@@ -28,11 +28,16 @@ function mapScheduleRow(row) {
     };
 }
 
-async function listSchedules(branch_id, { active_only = false } = {}) {
+async function listSchedules(branch_id, { active_only = false, channel_source = "" } = {}) {
     let sql = `SELECT * FROM sms_fast2sms_campaign_schedules WHERE branch_id = ?`;
+    const params = [branch_id];
+    if (channel_source) {
+        sql += ` AND channel_source = ?`;
+        params.push(String(channel_source).trim());
+    }
     if (active_only) sql += ` AND is_active = 1`;
     sql += ` ORDER BY create_date DESC, id DESC`;
-    const [rows] = await pool.query(sql, [branch_id]);
+    const [rows] = await pool.query(sql, params);
     return rows.map(mapScheduleRow);
 }
 
@@ -57,6 +62,7 @@ async function createSchedule({
     schedule_type,
     schedule_config,
     timezone = "Asia/Kolkata",
+    channel_source = "fast2sms",
     create_by = null,
 }) {
     const scheduleError = validateScheduleConfig(schedule_type, schedule_config);
@@ -73,15 +79,22 @@ async function createSchedule({
         return { ok: false, status: 400, message: "audience is required" };
     }
 
+    const source =
+        String(channel_source || "fast2sms").trim().toLowerCase() === "ooms_system" ||
+        String(channel_source || "").trim().toLowerCase() === "ooms system"
+            ? "ooms_system"
+            : "fast2sms";
+
     const schedule_id = newId("scs");
     await pool.query(
         `INSERT INTO sms_fast2sms_campaign_schedules
-         (schedule_id, branch_id, name, template_id, template_name, variables_values, audience,
+         (schedule_id, branch_id, channel_source, name, template_id, template_name, variables_values, audience,
           schedule_type, schedule_config, timezone, is_active, create_by, create_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW())`,
         [
             schedule_id,
             branch_id,
+            source,
             String(name).trim(),
             String(template_id).trim(),
             template_name ? String(template_name).trim() : null,
@@ -206,6 +219,7 @@ async function fireSchedule(schedule, { run_key, create_by = null, manual = fals
                 template_id: schedule.template_id,
                 variables_values: schedule.variables_values || "",
                 audience: schedule.audience,
+                channel_source: schedule.channel_source || "fast2sms",
             }
         );
         const campaign_id = campaign?.campaign_id || null;

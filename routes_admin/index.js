@@ -5,6 +5,7 @@ import branchRoutes from "./branch.js";
 import serviceRoutes from "./service.js";
 import mailRoutes from "./mail.js";
 import wpSystemTemplatesRoutes from "./wpSystemTemplates.js";
+import smsSystemRoutes from "./smsSystem.js";
 
 const router = express.Router();
 
@@ -14,5 +15,6 @@ router.use("/branch", branchRoutes);
 router.use("/service", serviceRoutes);
 router.use("/mail", mailRoutes);
 router.use("/wp-system-templates", wpSystemTemplatesRoutes);
+router.use("/sms-system", smsSystemRoutes);
 
 export default router;

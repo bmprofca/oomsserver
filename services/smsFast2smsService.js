@@ -11,6 +11,73 @@ import {
     variablesTemplateHasPlaceholders,
     buildSmsPreviewForRecipient,
 } from "../helpers/smsCampaignVariables.js";
+import { resolveSystemSmsConfigForSend } from "../helpers/smsSystemConfig.js";
+import { getActiveSystemTemplateRow } from "./smsSystemTemplateService.js";
+
+export const CAMPAIGN_SOURCE_FAST2SMS = "fast2sms";
+export const CAMPAIGN_SOURCE_OOMS_SYSTEM = "ooms_system";
+
+export function normalizeCampaignSource(source) {
+    const key = String(source || "").trim().toLowerCase();
+    if (
+        key === "ooms_system" ||
+        key === "ooms system" ||
+        key === "oomssystem" ||
+        key === "system"
+    ) {
+        return CAMPAIGN_SOURCE_OOMS_SYSTEM;
+    }
+    return CAMPAIGN_SOURCE_FAST2SMS;
+}
+
+async function resolveCampaignConfig(branch_id, channelSource) {
+    const source = normalizeCampaignSource(channelSource);
+    if (source === CAMPAIGN_SOURCE_OOMS_SYSTEM) {
+        const config = await resolveSystemSmsConfigForSend();
+        if (!config) {
+            throw Object.assign(new Error("OOMS System SMS is not configured"), {
+                status: 400,
+            });
+        }
+        return { source, config };
+    }
+    const config = await getFast2SmsConfigForSend(branch_id);
+    if (!config) {
+        throw Object.assign(new Error("Fast2SMS is not configured for this branch"), {
+            status: 400,
+        });
+    }
+    return { source, config };
+}
+
+async function loadCampaignTemplate(branch_id, template_id, channelSource) {
+    const source = normalizeCampaignSource(channelSource);
+    if (source === CAMPAIGN_SOURCE_OOMS_SYSTEM) {
+        const template = await getActiveSystemTemplateRow(template_id);
+        if (!template) {
+            throw Object.assign(new Error("System template not found or inactive"), {
+                status: 404,
+            });
+        }
+        if (String(template.type || "").trim().toLowerCase() !== "campaign") {
+            throw Object.assign(
+                new Error("Only campaign-type system templates can be used for broadcasts"),
+                { status: 400 }
+            );
+        }
+        return template;
+    }
+    const [tplRows] = await pool.query(
+        `SELECT * FROM sms_fast2sms_templates
+         WHERE template_id = ? AND branch_id = ? AND status = 'active'
+         LIMIT 1`,
+        [template_id, branch_id]
+    );
+    if (!tplRows.length) {
+        throw Object.assign(new Error("Template not found or inactive"), { status: 404 });
+    }
+    return tplRows[0];
+}
 
 function newShortId(prefix) {
     return `${prefix}${crypto.randomBytes(8).toString("hex")}`;
@@ -405,7 +472,10 @@ export async function unsetTemplateMap(branch_id, username, { type } = {}) {
     return { type: template_type, status: 0 };
 }
 
-export async function listCampaigns(branch_id, { page_no = 1, limit = 20, status = "all" } = {}) {
+export async function listCampaigns(
+    branch_id,
+    { page_no = 1, limit = 20, status = "all", channel_source = "" } = {}
+) {
     const page = Math.max(1, Number(page_no) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(limit) || 20));
     const offset = (page - 1) * pageSize;
@@ -418,6 +488,11 @@ export async function listCampaigns(branch_id, { page_no = 1, limit = 20, status
         params.push(statusFilter);
     }
 
+    if (channel_source) {
+        where += " AND channel_source = ?";
+        params.push(normalizeCampaignSource(channel_source));
+    }
+
     const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) AS total FROM sms_fast2sms_campaigns ${where}`,
         params
@@ -425,7 +500,8 @@ export async function listCampaigns(branch_id, { page_no = 1, limit = 20, status
 
     const [rows] = await pool.query(
         `SELECT campaign_id, name, template_id, template_name, route, status,
-                schedule_at, total_count, sent_count, failed_count, create_date, modify_date
+                channel_source, schedule_at, total_count, sent_count, failed_count,
+                create_date, modify_date
          FROM sms_fast2sms_campaigns
          ${where}
          ORDER BY create_date DESC
@@ -781,23 +857,12 @@ export async function createCampaign(branch_id, username, body = {}) {
         throw Object.assign(new Error("template_id is required"), { status: 400 });
     }
 
-    const [tplRows] = await pool.query(
-        `SELECT * FROM sms_fast2sms_templates
-         WHERE template_id = ? AND branch_id = ? AND status = 'active'
-         LIMIT 1`,
-        [template_id, branch_id]
+    const channel_source = normalizeCampaignSource(
+        body.channel_source || CAMPAIGN_SOURCE_FAST2SMS
     );
-    if (!tplRows.length) {
-        throw Object.assign(new Error("Template not found or inactive"), { status: 404 });
-    }
-    const template = tplRows[0];
 
-    const config = await getFast2SmsConfigForSend(branch_id);
-    if (!config) {
-        throw Object.assign(new Error("Fast2SMS is not configured for this branch"), {
-            status: 400,
-        });
-    }
+    const template = await loadCampaignTemplate(branch_id, template_id, channel_source);
+    const { config } = await resolveCampaignConfig(branch_id, channel_source);
 
     let recipients = [];
     if (Array.isArray(body.numbers) && body.numbers.length) {
@@ -852,13 +917,14 @@ export async function createCampaign(branch_id, username, body = {}) {
 
     await pool.query(
         `INSERT INTO sms_fast2sms_campaigns
-         (campaign_id, branch_id, name, template_id, template_name, dlt_message_id, message_body,
+         (campaign_id, branch_id, channel_source, name, template_id, template_name, dlt_message_id, message_body,
           route, sender_id, variables_values, audience_json, status, schedule_at,
           total_count, sent_count, failed_count, create_by, modify_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
         [
             campaign_id,
             branch_id,
+            channel_source,
             name,
             template.template_id,
             template.name,
@@ -927,13 +993,18 @@ export async function processCampaign(branch_id, campaign_id) {
         }
     }
 
-    const config = await getFast2SmsConfigForSend(branch_id);
-    if (!config) {
+    let config;
+    try {
+        ({ config } = await resolveCampaignConfig(
+            branch_id,
+            campaign.channel_source || CAMPAIGN_SOURCE_FAST2SMS
+        ));
+    } catch (error) {
         await pool.query(
             `UPDATE sms_fast2sms_campaigns
              SET status = 'failed', error_message = ?, modify_date = CURRENT_TIMESTAMP
              WHERE campaign_id = ? AND branch_id = ?`,
-            ["Fast2SMS is not configured", campaign_id, branch_id]
+            [error.message || "SMS is not configured", campaign_id, branch_id]
         );
         return getCampaignDetails(branch_id, campaign_id);
     }

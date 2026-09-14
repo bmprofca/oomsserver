@@ -110,7 +110,7 @@ router.put("/channel", auth, validateBranch, async (req, res) => {
         if (!SMS_CHANNELS.includes(channelValue)) {
             return res.status(400).json({
                 success: false,
-                message: "channel must be one of: disabled, fast2sms",
+                message: "channel must be one of: disabled, fast2sms, ooms system",
             });
         }
 
@@ -375,7 +375,7 @@ router.post("/fast2sms/campaign/create", auth, validateBranch, async (req, res) 
         const data = await fast2smsService.createCampaign(
             req.branch_id,
             usernameFromReq(req),
-            req.body || {}
+            { ...(req.body || {}), channel_source: "fast2sms" }
         );
         return res.status(200).json({
             success: true,
@@ -394,6 +394,7 @@ router.get("/fast2sms/campaign/list", auth, validateBranch, async (req, res) => 
             page_no: req.query.page_no,
             limit: req.query.limit,
             status: req.query.status,
+            channel_source: "fast2sms",
         });
         return res.status(200).json({
             success: true,
@@ -550,7 +551,10 @@ router.get("/fast2sms/campaign/schedules", auth, validateBranch, async (req, res
         const activeOnly =
             String(req.query.active_only || "").trim() === "1" ||
             String(req.query.active_only || "").toLowerCase() === "true";
-        const data = await listSchedules(req.branch_id, { active_only: activeOnly });
+        const data = await listSchedules(req.branch_id, {
+            active_only: activeOnly,
+            channel_source: "fast2sms",
+        });
         return res.status(200).json({ success: true, data });
     } catch (error) {
         console.error("GET SMS CAMPAIGN SCHEDULES ERROR:", error);
@@ -573,6 +577,7 @@ router.post("/fast2sms/campaign/schedules", auth, validateBranch, async (req, re
             schedule_type: req.body?.schedule_type,
             schedule_config: req.body?.schedule_config,
             timezone: req.body?.timezone || "Asia/Kolkata",
+            channel_source: "fast2sms",
             create_by: usernameFromReq(req),
         });
         if (!result.ok) {
@@ -688,6 +693,448 @@ router.post(
             });
         } catch (error) {
             console.error("RUN SMS CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to run recurring schedule");
+        }
+    }
+);
+
+// ─── OOMS System SMS (platform Fast2SMS) ───────────────────────────────────
+
+router.get("/ooms-system/templates", auth, validateBranch, async (req, res) => {
+    try {
+        const { listActiveSystemTemplatesByType, listAdminSystemTemplates } =
+            await import("../services/smsSystemTemplateService.js");
+        const type = String(req.query.type || "").trim();
+        if (type) {
+            const data = await listActiveSystemTemplatesByType(type);
+            return res.status(200).json({
+                success: true,
+                message: "System SMS templates retrieved",
+                data,
+            });
+        }
+        const result = await listAdminSystemTemplates({
+            status: "active",
+            search: req.query.search,
+            page_no: req.query.page_no,
+            limit: req.query.limit || 100,
+        });
+        return res.status(200).json({
+            success: true,
+            message: "System SMS templates retrieved",
+            data: result.data,
+            pagination: result.pagination,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM SMS TEMPLATES ERROR:", error);
+        return httpError(res, error, "Failed to list system SMS templates");
+    }
+});
+
+router.get("/ooms-system/template-map-list", auth, validateBranch, async (req, res) => {
+    try {
+        const { listBranchSystemTemplateMaps } = await import(
+            "../services/smsSystemTemplateService.js"
+        );
+        const data = await listBranchSystemTemplateMaps(req.branch_id);
+        return res.status(200).json({
+            success: true,
+            message: "System SMS template mappings retrieved",
+            data,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM SMS MAP LIST ERROR:", error);
+        return httpError(res, error, "Failed to list template mappings");
+    }
+});
+
+router.put("/ooms-system/template-map/set", auth, validateBranch, async (req, res) => {
+    try {
+        const { setBranchSystemTemplateMap } = await import(
+            "../services/smsSystemTemplateService.js"
+        );
+        const data = await setBranchSystemTemplateMap(
+            req.branch_id,
+            usernameFromReq(req),
+            req.body || {}
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Template mapped successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("PUT OOMS SYSTEM SMS MAP SET ERROR:", error);
+        return httpError(res, error, "Failed to set template mapping");
+    }
+});
+
+router.put("/ooms-system/template-map/unset", auth, validateBranch, async (req, res) => {
+    try {
+        const { unsetBranchSystemTemplateMap } = await import(
+            "../services/smsSystemTemplateService.js"
+        );
+        const data = await unsetBranchSystemTemplateMap(
+            req.branch_id,
+            usernameFromReq(req),
+            req.body || {}
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Template mapping cleared",
+            data,
+        });
+    } catch (error) {
+        console.error("PUT OOMS SYSTEM SMS MAP UNSET ERROR:", error);
+        return httpError(res, error, "Failed to unset template mapping");
+    }
+});
+
+router.post("/ooms-system/campaign/resolve-recipients", auth, validateBranch, async (req, res) => {
+    try {
+        const audience = req.body && typeof req.body === "object" ? req.body : {};
+        const resolved = await fast2smsService.resolveSmsCampaignRecipients(
+            req.branch_id,
+            audience
+        );
+        if (!resolved.ok) {
+            return res.status(resolved.status).json(resolved.data);
+        }
+        return res.status(200).json({
+            success: true,
+            count: resolved.count,
+            data: resolved.data,
+            meta: resolved.meta,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM RESOLVE RECIPIENTS ERROR:", error);
+        return httpError(res, error, "Failed to resolve recipients");
+    }
+});
+
+router.post("/ooms-system/campaign/create", auth, validateBranch, async (req, res) => {
+    try {
+        const data = await fast2smsService.createCampaign(
+            req.branch_id,
+            usernameFromReq(req),
+            { ...(req.body || {}), channel_source: "ooms_system" }
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Campaign created successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM CAMPAIGN CREATE ERROR:", error);
+        return httpError(res, error, "Failed to create campaign");
+    }
+});
+
+router.get("/ooms-system/campaign/list", auth, validateBranch, async (req, res) => {
+    try {
+        const result = await fast2smsService.listCampaigns(req.branch_id, {
+            page_no: req.query.page_no,
+            limit: req.query.limit,
+            status: req.query.status,
+            channel_source: "ooms_system",
+        });
+        return res.status(200).json({
+            success: true,
+            message: "Campaigns retrieved successfully",
+            data: result.data,
+            pagination: result.pagination,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM CAMPAIGN LIST ERROR:", error);
+        return httpError(res, error, "Failed to list campaigns");
+    }
+});
+
+router.get("/ooms-system/campaign/details", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.query.campaign_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        const data = await fast2smsService.getCampaignDetails(req.branch_id, campaign_id, {
+            includePreview: true,
+        });
+        return res.status(200).json({
+            success: true,
+            message: "Campaign details retrieved successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM CAMPAIGN DETAILS ERROR:", error);
+        return httpError(res, error, "Failed to fetch campaign details");
+    }
+});
+
+router.get("/ooms-system/campaign/messages", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.query.campaign_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        const result = await fast2smsService.listCampaignMessages(req.branch_id, campaign_id, {
+            page_no: req.query.page_no,
+            limit: req.query.limit,
+            status: req.query.status,
+        });
+        return res.status(200).json({
+            success: true,
+            message: "Campaign messages retrieved",
+            data: result.data,
+            pagination: result.pagination,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM CAMPAIGN MESSAGES ERROR:", error);
+        return httpError(res, error, "Failed to list campaign messages");
+    }
+});
+
+router.get("/ooms-system/campaign/message-detail", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.query.campaign_id || "").trim();
+        const message_id = String(req.query.message_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        if (!message_id) {
+            return res.status(400).json({ success: false, message: "message_id is required" });
+        }
+        const data = await fast2smsService.getCampaignMessageDetail(
+            req.branch_id,
+            campaign_id,
+            message_id
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Message details retrieved successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM CAMPAIGN MESSAGE DETAIL ERROR:", error);
+        return httpError(res, error, "Failed to fetch message details");
+    }
+});
+
+router.post("/ooms-system/campaign/message-retry", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.body?.campaign_id || "").trim();
+        const message_id = String(req.body?.message_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        if (!message_id) {
+            return res.status(400).json({ success: false, message: "message_id is required" });
+        }
+        const data = await fast2smsService.retryCampaignMessage(
+            req.branch_id,
+            campaign_id,
+            message_id
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Message resent successfully",
+            data,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM MESSAGE RETRY ERROR:", error);
+        return httpError(res, error, "Failed to retry message");
+    }
+});
+
+router.post("/ooms-system/campaign/delete", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.body?.campaign_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        const data = await fast2smsService.deleteCampaign(
+            req.branch_id,
+            usernameFromReq(req),
+            campaign_id
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Campaign deleted",
+            data,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM CAMPAIGN DELETE ERROR:", error);
+        return httpError(res, error, "Failed to delete campaign");
+    }
+});
+
+router.post("/ooms-system/campaign/process", auth, validateBranch, async (req, res) => {
+    try {
+        const campaign_id = String(req.body?.campaign_id || "").trim();
+        if (!campaign_id) {
+            return res.status(400).json({ success: false, message: "campaign_id is required" });
+        }
+        const data = await fast2smsService.processCampaign(req.branch_id, campaign_id);
+        return res.status(200).json({
+            success: true,
+            message: "Campaign processing started",
+            data,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM CAMPAIGN PROCESS ERROR:", error);
+        return httpError(res, error, "Failed to process campaign");
+    }
+});
+
+router.get("/ooms-system/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { listSchedules } = await import(
+            "../services/smsFast2smsCampaignScheduleService.js"
+        );
+        const activeOnly =
+            String(req.query.active_only || "").trim() === "1" ||
+            String(req.query.active_only || "").toLowerCase() === "true";
+        const data = await listSchedules(req.branch_id, {
+            active_only: activeOnly,
+            channel_source: "ooms_system",
+        });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("GET OOMS SYSTEM CAMPAIGN SCHEDULES ERROR:", error);
+        return httpError(res, error, "Failed to list recurring schedules");
+    }
+});
+
+router.post("/ooms-system/campaign/schedules", auth, validateBranch, async (req, res) => {
+    try {
+        const { createSchedule } = await import(
+            "../services/smsFast2smsCampaignScheduleService.js"
+        );
+        const result = await createSchedule({
+            branch_id: req.branch_id,
+            name: req.body?.name,
+            template_id: req.body?.template_id,
+            template_name: req.body?.template_name,
+            variables_values: req.body?.variables_values,
+            audience: req.body?.audience,
+            schedule_type: req.body?.schedule_type,
+            schedule_config: req.body?.schedule_config,
+            timezone: req.body?.timezone || "Asia/Kolkata",
+            channel_source: "ooms_system",
+            create_by: usernameFromReq(req),
+        });
+        if (!result.ok) {
+            return res.status(result.status || 400).json({
+                success: false,
+                message: result.message,
+            });
+        }
+        return res.status(201).json({
+            success: true,
+            message: "Schedule created",
+            data: result.data,
+        });
+    } catch (error) {
+        console.error("POST OOMS SYSTEM CAMPAIGN SCHEDULE ERROR:", error);
+        return httpError(res, error, "Failed to create recurring schedule");
+    }
+});
+
+router.put(
+    "/ooms-system/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { updateSchedule } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await updateSchedule(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim(),
+                {
+                    name: req.body?.name,
+                    schedule_type: req.body?.schedule_type,
+                    schedule_config: req.body?.schedule_config,
+                    is_active: req.body?.is_active,
+                },
+                usernameFromReq(req)
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule updated",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("PUT OOMS SYSTEM CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to update recurring schedule");
+        }
+    }
+);
+
+router.delete(
+    "/ooms-system/campaign/schedules/:scheduleId",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { deleteSchedule } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await deleteSchedule(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim()
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Schedule deleted",
+            });
+        } catch (error) {
+            console.error("DELETE OOMS SYSTEM CAMPAIGN SCHEDULE ERROR:", error);
+            return httpError(res, error, "Failed to delete recurring schedule");
+        }
+    }
+);
+
+router.post(
+    "/ooms-system/campaign/schedules/:scheduleId/run",
+    auth,
+    validateBranch,
+    async (req, res) => {
+        try {
+            const { runScheduleNow } = await import(
+                "../services/smsFast2smsCampaignScheduleService.js"
+            );
+            const result = await runScheduleNow(
+                req.branch_id,
+                String(req.params.scheduleId || "").trim(),
+                { create_by: usernameFromReq(req) }
+            );
+            if (!result.ok) {
+                return res.status(result.status || 400).json({
+                    success: false,
+                    message: result.message,
+                    data: result.data,
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                message: "Campaign created from schedule",
+                data: result.data,
+            });
+        } catch (error) {
+            console.error("RUN OOMS SYSTEM CAMPAIGN SCHEDULE ERROR:", error);
             return httpError(res, error, "Failed to run recurring schedule");
         }
     }
