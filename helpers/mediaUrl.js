@@ -101,6 +101,15 @@ export function buildProfileDocumentUrl(categoryFolder, filename) {
 }
 
 /**
+ * Staff expense attachment stored as filename in DB -> proxied URL (B2: media/expense/attachment/).
+ */
+export function buildExpenseAttachmentUrl(filename) {
+    const clean = String(filename || "").trim();
+    if (!clean) return null;
+    return buildMediaProxyUrl("expense", "attachment", clean);
+}
+
+/**
  * Parse request path into B2 object key under `media/`.
  * Accepts `/proxy/media/profile/image/x.png`, `profile/image/x.png`, etc.
  */
