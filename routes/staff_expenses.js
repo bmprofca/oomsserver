@@ -82,6 +82,34 @@ async function resolveIndirectExpenseItem(conn, branch_id, item_id) {
     return rows[0] || null;
 }
 
+/** One profile row per username (profile can have duplicates). */
+function latestProfileJoin(alias, usernameExpr) {
+    return `LEFT JOIN profile ${alias}
+              ON ${alias}.username = ${usernameExpr}
+             AND ${alias}.id = (
+                  SELECT MAX(p_inner.id)
+                  FROM profile p_inner
+                  WHERE p_inner.username = ${usernameExpr}
+             )`;
+}
+
+/**
+ * Prefer branch-specific expense_items, otherwise shared (NULL branch).
+ * Avoids row multiplication when both exist for the same item_id.
+ */
+function expenseItemJoin(alias = "ei") {
+    return `LEFT JOIN expense_items ${alias}
+              ON ${alias}.id = (
+                  SELECT ei2.id
+                  FROM expense_items ei2
+                  WHERE ei2.item_id = se.item_id
+                    AND ei2.is_deleted = '0'
+                    AND (ei2.branch_id IS NULL OR ei2.branch_id = se.branch_id)
+                  ORDER BY (ei2.branch_id = se.branch_id) DESC, ei2.id DESC
+                  LIMIT 1
+              )`;
+}
+
 /**
  * Approve a pending staff expense inside an open transaction:
  * creates invoice + expense transaction (staff credit) + expense_entries.
@@ -573,10 +601,7 @@ router.get('/list/:username', auth, validateBranch, async (req, res) => {
                     WHEN se.status = '2' THEN 'rejected'
                 END as status_text
             FROM staff_expenses se
-            LEFT JOIN expense_items ei
-              ON ei.item_id = se.item_id
-             AND ei.is_deleted = '0'
-             AND (ei.branch_id IS NULL OR ei.branch_id = se.branch_id)
+            ${expenseItemJoin("ei")}
             WHERE se.branch_id = ? AND se.staff_username = ? AND se.is_deleted = '0'
         `;
 
@@ -603,7 +628,10 @@ router.get('/list/:username', auth, validateBranch, async (req, res) => {
             queryParams.push(toDateVal);
         }
 
-        const countQuery = query.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM');
+        const countQuery = query.replace(
+            /SELECT[\s\S]*?FROM/,
+            'SELECT COUNT(DISTINCT se.expense_id) as total FROM'
+        );
         const [countResult] = await pool.query(countQuery, queryParams);
         const total = countResult[0]?.total || 0;
 
@@ -719,12 +747,9 @@ router.get('/admin-list', auth, validateBranch, async (req, res) => {
                     WHEN se.status = '2' THEN 'rejected'
                 END as status_text
             FROM staff_expenses se
-            LEFT JOIN expense_items ei
-              ON ei.item_id = se.item_id
-             AND ei.is_deleted = '0'
-             AND (ei.branch_id IS NULL OR ei.branch_id = se.branch_id)
-            LEFT JOIN profile p ON se.staff_username = p.username
-            LEFT JOIN profile ap ON se.approved_by = ap.username
+            ${expenseItemJoin("ei")}
+            ${latestProfileJoin("p", "se.staff_username")}
+            ${latestProfileJoin("ap", "se.approved_by")}
             WHERE se.branch_id = ? AND se.is_deleted = '0'
         `;
 
@@ -756,7 +781,10 @@ router.get('/admin-list', auth, validateBranch, async (req, res) => {
             queryParams.push(to_date);
         }
 
-        const countQuery = query.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM');
+        const countQuery = query.replace(
+            /SELECT[\s\S]*?FROM/,
+            'SELECT COUNT(DISTINCT se.expense_id) as total FROM'
+        );
         const [countResult] = await pool.query(countQuery, queryParams);
         const total = countResult[0]?.total || 0;
 
@@ -781,19 +809,33 @@ router.get('/admin-list', auth, validateBranch, async (req, res) => {
             });
         }
 
-        // Get summary
-        const [summaryRows] = await pool.query(
-            `SELECT 
+        // Summary for same date/staff filters (status filter does not apply to cards)
+        let summarySql = `
+            SELECT 
                 COUNT(*) as total_expenses,
                 SUM(CASE WHEN status = '0' THEN 1 ELSE 0 END) as pending_count,
                 SUM(CASE WHEN status = '1' THEN 1 ELSE 0 END) as approved_count,
                 SUM(CASE WHEN status = '2' THEN 1 ELSE 0 END) as rejected_count,
+                SUM(amount) as total_amount,
                 SUM(CASE WHEN status = '1' THEN amount ELSE 0 END) as total_approved_amount,
-                SUM(CASE WHEN status = '0' THEN amount ELSE 0 END) as total_pending_amount
+                SUM(CASE WHEN status = '0' THEN amount ELSE 0 END) as total_pending_amount,
+                SUM(CASE WHEN status = '2' THEN amount ELSE 0 END) as total_rejected_amount
              FROM staff_expenses 
-             WHERE branch_id = ? AND is_deleted = '0'`,
-            [branch_id]
-        );
+             WHERE branch_id = ? AND is_deleted = '0'`;
+        const summaryParams = [branch_id];
+        if (staff_username && staff_username.trim() !== '') {
+            summarySql += ` AND staff_username = ?`;
+            summaryParams.push(staff_username.trim());
+        }
+        if (from_date && from_date.trim() !== '') {
+            summarySql += ` AND expense_date >= ?`;
+            summaryParams.push(from_date.trim());
+        }
+        if (to_date && to_date.trim() !== '') {
+            summarySql += ` AND expense_date <= ?`;
+            summaryParams.push(to_date.trim());
+        }
+        const [summaryRows] = await pool.query(summarySql, summaryParams);
 
         return res.status(200).json({
             success: true,
@@ -840,12 +882,9 @@ router.get('/details/:expense_id', auth, validateBranch, async (req, res) => {
                 ap.name as approved_by_name,
                 ap.email as approved_by_email
              FROM staff_expenses se
-             LEFT JOIN expense_items ei
-               ON ei.item_id = se.item_id
-              AND ei.is_deleted = '0'
-              AND (ei.branch_id IS NULL OR ei.branch_id = se.branch_id)
-             LEFT JOIN profile p ON se.staff_username = p.username
-             LEFT JOIN profile ap ON se.approved_by = ap.username
+             ${expenseItemJoin("ei")}
+             ${latestProfileJoin("p", "se.staff_username")}
+             ${latestProfileJoin("ap", "se.approved_by")}
              WHERE se.expense_id = ? AND se.branch_id = ? AND se.is_deleted = '0'`,
             [expense_id.trim(), branch_id]
         );

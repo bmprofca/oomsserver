@@ -1913,6 +1913,26 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
         );
         const totalServices = totalServicesResult[0]?.total || 0;
 
+        // 13. Pending staff expenses (count + amount)
+        let pendingStaffExpense = 0;
+        let pendingStaffExpenseAmount = 0;
+        try {
+            const [pendingStaffExpenseResult] = await pool.query(
+                `SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(amount), 0) AS total_amount
+                 FROM staff_expenses
+                 WHERE branch_id = ?
+                   AND is_deleted = '0'
+                   AND status = '0'`,
+                [branch_id]
+            );
+            pendingStaffExpense = Number(pendingStaffExpenseResult[0]?.total_count) || 0;
+            pendingStaffExpenseAmount = parseFloat(pendingStaffExpenseResult[0]?.total_amount || 0);
+        } catch (err) {
+            console.log("Could not load pending staff expenses:", err.message);
+        }
+
         // Additional helpful metrics
         // Pending tasks (not complete or cancel)
         const [pendingTasksResult] = await pool.query(
@@ -2072,6 +2092,8 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
                 total_agent: totalAgent,
                 total_firms: totalFirms,
                 total_services: totalServices,
+                pending_staff_expense: pendingStaffExpense,
+                pending_staff_expense_amount: pendingStaffExpenseAmount,
                 recurring_task_summary: {
                     total_tasks: totalRecurringTasks,
                     overdue_tasks: overdueRecurringTasks,
