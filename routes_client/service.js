@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
+import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import { validateClientSession } from "../middleware/validateClientSession.js";
 
 const router = express.Router();
@@ -34,9 +35,9 @@ function parseQueryArray(value) {
     return toCleanStringArray(raw.split(","));
 }
 
-function formatServiceListItem(row) {
+function formatServiceListItem(row, gst) {
     const fees = Number(row.fees) || 0;
-    const gst_value = Number(row.gst_value) || 0;
+    const gst_value = Number(gst?.tax_value) || 0;
     const isCompliance = row.type === "compliance";
 
     const item = {
@@ -45,7 +46,7 @@ function formatServiceListItem(row) {
         sac_code: row.sac_code,
         type: row.type,
         charges: {
-            total: Number((fees + gst_value).toFixed(2)),
+            total: Number((gst?.total ?? fees + gst_value).toFixed(2)),
         },
     };
 
@@ -58,10 +59,9 @@ function formatServiceListItem(row) {
     return item;
 }
 
-function formatServiceDetails(row) {
+function formatServiceDetails(row, gst) {
     const fees = Number(row.fees) || 0;
-    const gst_rate = Number(row.gst_rate) || 0;
-    const gst_value = Number(row.gst_value) || 0;
+    const gst_value = Number(gst?.tax_value) || 0;
     const isCompliance = row.type === "compliance";
 
     const serviceBlock = {
@@ -88,7 +88,7 @@ function formatServiceDetails(row) {
         branch: branchBlock,
         charges: {
             fees,
-            total: Number((fees + gst_value).toFixed(2)),
+            total: Number((gst?.total ?? fees + gst_value).toFixed(2)),
         },
     };
 }
@@ -103,17 +103,15 @@ const SERVICE_SELECT_FIELDS = `
     s.default_amount,
     s.remark AS service_remark,
     bs.fees,
-    0,
-    bs.gst_value,
     bs.remark,
     bs.due_date
 `;
 
 const SERVICE_REQUEST_STATUSES = ["pending", "approved", "rejected"];
 
-function formatServiceRequestListItem(row) {
+function formatServiceRequestListItem(row, gst) {
     const fees = Number(row.fees) || 0;
-    const tax_value = Number(row.tax_value) || 0;
+    const tax_value = Number(gst?.tax_value) || 0;
 
     return {
         request_id: row.request_id,
@@ -125,18 +123,17 @@ function formatServiceRequestListItem(row) {
         client_remark: row.client_remark,
         charges: {
             fees,
-            tax_rate: Number(row.tax_rate) || 0,
+            tax_rate: Number(gst?.tax_rate) || 0,
             tax_value,
-            amount: Number(row.amount) || Number((fees + tax_value).toFixed(2)),
+            amount: Number(row.amount) || Number((gst?.total ?? fees + tax_value).toFixed(2)),
         },
         create_date: row.create_date,
     };
 }
 
-function formatServiceRequestDetails(row) {
+function formatServiceRequestDetails(row, gst) {
     const fees = Number(row.fees) || 0;
-    const tax_rate = Number(row.tax_rate) || 0;
-    const tax_value = Number(row.tax_value) || 0;
+    const tax_value = Number(gst?.tax_value) || 0;
 
     return {
         request_id: row.request_id,
@@ -157,7 +154,7 @@ function formatServiceRequestDetails(row) {
         },
         charges: {
             fees,
-            amount: Number(row.amount) || Number((fees + tax_value).toFixed(2)),
+            amount: Number(row.amount) || Number((gst?.total ?? fees + tax_value).toFixed(2)),
         },
         create_date: row.create_date,
         modify_date: row.modify_date,
@@ -169,8 +166,6 @@ const SERVICE_REQUEST_SELECT_FIELDS = `
     sr.firm_id,
     sr.service_id,
     sr.fees,
-    sr.tax_rate,
-    sr.tax_value,
     sr.amount,
     sr.task_id,
     sr.client_remark,
@@ -250,7 +245,6 @@ router.get("/list", validateClientSession, async (req, res) => {
                 s.frequency,
                 s.default_due_date,
                 bs.fees,
-                bs.gst_value,
                 bs.due_date
              ${baseQuery}
              ORDER BY s.name ASC, bs.id DESC
@@ -258,7 +252,13 @@ router.get("/list", validateClientSession, async (req, res) => {
             [...params, limitNum, offset]
         );
 
-        const data = rows.map((row) => formatServiceListItem(row));
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const asOfDate = toDateOnly(new Date());
+        const data = rows.map((row) => {
+            const fees = Number(row.fees) || 0;
+            const gst = resolveGst({ fees, asOfDate, settings: gstSettings });
+            return formatServiceListItem(row, gst);
+        });
 
         return res.status(200).json({
             success: true,
@@ -312,10 +312,17 @@ router.get("/details/:service_id", validateClientSession, async (req, res) => {
             });
         }
 
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const gst = resolveGst({
+            fees: Number(rows[0].fees) || 0,
+            asOfDate: toDateOnly(new Date()),
+            settings: gstSettings,
+        });
+
         return res.status(200).json({
             success: true,
             message: "Service details retrieved successfully",
-            data: formatServiceDetails(rows[0]),
+            data: formatServiceDetails(rows[0], gst),
         });
     } catch (error) {
         console.error("CLIENT SERVICE DETAILS ERROR:", error);
@@ -372,8 +379,6 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
         const [serviceRows] = await pool.query(
             `SELECT
                 bs.fees,
-                0,
-                bs.gst_value,
                 s.type
              FROM branch_services bs
              INNER JOIN services s ON s.service_id = bs.service_id
@@ -399,9 +404,13 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
         }
 
         const fees = Number(serviceRows[0].fees) || 0;
-        const tax_rate = Number(serviceRows[0].gst_rate) || 0;
-        const tax_value = Number(serviceRows[0].gst_value) || 0;
-        const amount = Number((fees + tax_value).toFixed(2));
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const gst = resolveGst({
+            fees,
+            asOfDate: toDateOnly(new Date()),
+            settings: gstSettings,
+        });
+        const amount = Number(gst.total.toFixed(2));
         const request_id = await UNIQUE_RANDOM_STRING("service_requests", "request_id", { length: ID_LENGTH });
 
         await pool.query(
@@ -417,7 +426,7 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
                 status,
                 create_by,
                 modify_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
             [
                 request_id,
                 branch_id,
@@ -532,10 +541,20 @@ router.get("/service-request/list", validateClientSession, async (req, res) => {
             [...params, limitNum, offset]
         );
 
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const data = rows.map((row) => {
+            const gst = resolveGst({
+                fees: Number(row.fees) || 0,
+                asOfDate: toDateOnly(row.create_date) || toDateOnly(new Date()),
+                settings: gstSettings,
+            });
+            return formatServiceRequestListItem(row, gst);
+        });
+
         return res.status(200).json({
             success: true,
             message: "Service request list retrieved successfully",
-            data: rows.map((row) => formatServiceRequestListItem(row)),
+            data,
             pagination: {
                 page_no: pageNum,
                 limit: limitNum,
@@ -588,10 +607,17 @@ router.get("/service-request/details/:request_id", validateClientSession, async 
             });
         }
 
+        const gstSettings = await fetchBranchGstSettings(pool, branch_id);
+        const gst = resolveGst({
+            fees: Number(rows[0].fees) || 0,
+            asOfDate: toDateOnly(rows[0].create_date) || toDateOnly(new Date()),
+            settings: gstSettings,
+        });
+
         return res.status(200).json({
             success: true,
             message: "Service request details retrieved successfully",
-            data: formatServiceRequestDetails(rows[0]),
+            data: formatServiceRequestDetails(rows[0], gst),
         });
     } catch (error) {
         console.error("CLIENT SERVICE REQUEST DETAILS ERROR:", error);
