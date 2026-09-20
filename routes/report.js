@@ -2737,21 +2737,22 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
             date_of_birth: row.date_of_birth
         }));
 
-        // CA Report: pending + completed approval counts (CA-assigned tasks only)
+        // CA Report: sent + complete approval counts for open tasks only
+        // (task status not cancel/complete)
         const [caReportRows] = await pool.query(
             `SELECT
                 SUM(CASE
-                    WHEN LOWER(TRIM(COALESCE(ca_approval, 'pending'))) = 'pending'
-                         AND status NOT IN ('cancel', 'complete')
-                    THEN 1 ELSE 0 END) AS pending_count,
+                    WHEN LOWER(TRIM(COALESCE(ca_approval, 'pending'))) = 'sent'
+                    THEN 1 ELSE 0 END) AS sent_count,
                 SUM(CASE
                     WHEN LOWER(TRIM(COALESCE(ca_approval, 'pending'))) = 'complete'
-                    THEN 1 ELSE 0 END) AS completed_count
+                    THEN 1 ELSE 0 END) AS complete_count
              FROM tasks
              WHERE branch_id = ?
                AND has_ca = '1'
                AND ca_id IS NOT NULL
-               AND TRIM(ca_id) <> ''`,
+               AND TRIM(ca_id) <> ''
+               AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('cancel', 'complete')`,
             [branch_id]
         );
 
@@ -2827,8 +2828,8 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
                     list: birthdays
                 },
                 ca_report: {
-                    pending: Number(caReportRows[0]?.pending_count) || 0,
-                    completed: Number(caReportRows[0]?.completed_count) || 0
+                    sent: Number(caReportRows[0]?.sent_count) || 0,
+                    complete: Number(caReportRows[0]?.complete_count) || 0
                 },
                 recurring_task_summary: {
                     total_tasks: totalRecurringTasks,
