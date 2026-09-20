@@ -1,5 +1,5 @@
 /** Party types supported on sale/purchase create and edit. */
-export const TRANSACTION_PARTY_TYPES = ["client", "ca", "staff", "agent", "bank", "capital"];
+export const TRANSACTION_PARTY_TYPES = ["client", "ca", "staff", "bank", "capital"];
 
 /**
  * Validate party_id exists for the given party_type within the branch context.

@@ -508,7 +508,7 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
         if (!q) {
             return res.status(200).json({
                 success: true,
-                data: { clients: [], firms: [], tasks: [], staff: [], ca: [], agents: [] },
+                data: { clients: [], firms: [], tasks: [], staff: [], ca: [] },
             });
         }
 
@@ -516,7 +516,7 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
         if (pattern === "%%") {
             return res.status(200).json({
                 success: true,
-                data: { clients: [], firms: [], tasks: [], staff: [], ca: [], agents: [] },
+                data: { clients: [], firms: [], tasks: [], staff: [], ca: [] },
             });
         }
 
@@ -545,22 +545,10 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
                           AND c.user_type = 'ca'
                           AND (c.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR p.pan_number LIKE ?)
                         LIMIT ?
-                     )
-                     UNION ALL
-                     (
-                        SELECT c.username, c.user_type, p.name, p.mobile, p.email, p.pan_number
-                        FROM clients c
-                        INNER JOIN profile p ON p.username = c.username
-                        WHERE c.branch_id = ?
-                          AND c.is_deleted = '0'
-                          AND c.user_type = 'agent'
-                          AND (c.username LIKE ? OR p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ?)
-                        LIMIT ?
                      )`,
                     [
                         branch_id, pattern, pattern, pattern, pattern, pattern, limit,
                         branch_id, pattern, pattern, pattern, pattern, pattern, limit,
-                        branch_id, pattern, pattern, pattern, pattern, limit,
                     ]
                 );
                 return rows;
@@ -610,8 +598,6 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
             .map((row) => mapPerson(row, "/client/profile/"));
         const ca = takeUnique(people.filter((row) => row.user_type === "ca"), "username", limit)
             .map((row) => mapPerson(row, "/staff/office-assistance/ca-profile/"));
-        const agents = takeUnique(people.filter((row) => row.user_type === "agent"), "username", limit)
-            .map((row) => mapPerson(row, "/settings/agent-profile/"));
 
         return res.status(200).json({
             success: true,
@@ -636,7 +622,6 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
                     path: `/staff/view/profile/${encodeURIComponent(row.username)}`,
                 })),
                 ca,
-                agents,
             },
         });
     } catch (error) {

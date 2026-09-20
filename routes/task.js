@@ -313,13 +313,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const total = gst.total;
 
                 const ca_id = assignmentPayload.ca_id ?? assignmentPayload.ca ?? null;
-                const agent_id = assignmentPayload.agent_id ?? assignmentPayload.agent ?? null;
                 const has_ca = ca_id ? "1" : "0";
-                const has_agent = agent_id ? "1" : "0";
                 const assignmentForDb = {
                     staff: assignmentPayload.staff ?? [],
                     ca_id: ca_id,
-                    agent_id: agent_id
                 };
 
                 const notesText = notesPayload?.text ?? null;
@@ -368,8 +365,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         service_id,
                         has_ca,
                         ca_id,
-                        has_agent,
-                        agent_id,
                         fees: finalFees,
                         total,
                         create_by: username,
@@ -646,9 +641,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
             const task_id = await UNIQUE_RANDOM_STRING("tasks", "task_id", { length: ID_LENGTH, conn });
             const ca_id = legacyAssignment?.ca_id ?? legacyAssignment?.ca ?? null;
-            const agent_id = legacyAssignment?.agent_id ?? legacyAssignment?.agent ?? null;
             const has_ca = ca_id ? "1" : "0";
-            const has_agent = agent_id ? "1" : "0";
             const legacyStaffIds = Array.isArray(legacyAssignment?.staff) ? legacyAssignment.staff : [];
             const taskStatusLegacy = "in process";
 
@@ -660,8 +653,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 service_id: service_id_legacy,
                 has_ca,
                 ca_id,
-                has_agent,
-                agent_id,
                 fees: finalFees,
                 total,
                 create_by: username,
@@ -869,7 +860,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             status,
             service_ids,
             ca,
-            agent,
             ca_approval,
         } = req.query || {};
 
@@ -933,12 +923,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             baseQuery += " AND t.has_ca = '1' AND t.ca_id = ?";
             params.push(String(ca).trim());
         }
-        if (agent && String(agent).trim() !== "") {
-            baseQuery += " AND t.has_agent = '1' AND t.agent_id = ?";
-            params.push(String(agent).trim());
-        }
         if (caApprovalList.length > 0) {
             const caApprovalPlaceholders = caApprovalList.map(() => "?").join(", ");
+            // CA approval filter only applies to tasks that have a CA assigned
+            baseQuery += ` AND t.has_ca = '1' AND t.ca_id IS NOT NULL AND TRIM(t.ca_id) <> ''`;
             baseQuery += ` AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) IN (${caApprovalPlaceholders})`;
             params.push(...caApprovalList);
         }
@@ -983,8 +971,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.has_ca,
                 t.ca_id,
                 t.ca_approval,
-                t.has_agent,
-                t.agent_id,
                 t.fees,
                 t.total,
                 t.due_date,
@@ -1081,13 +1067,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             if (has_ca) {
                 const ca_data = await USER_SNIPPED_DATA(element?.ca_id);
                 object.ca = ca_data;
-            }
-
-            const has_agent = element?.has_agent == '1';
-            object.has_agent = has_agent;
-            if (has_agent) {
-                const agent_data = await USER_SNIPPED_DATA(element?.agent_id);
-                object.agent = agent_data;
             }
 
             const inUser = normalizeInUser(element?.in_user);
@@ -1314,7 +1293,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             service_id,
             fees,
             ca,
-            agent,
             due_date,
             target_date,
             complete_date
@@ -1351,7 +1329,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         let AllowFeesChange = false;
         let AllowCaChange = false;
-        let AllowAgentChange = false;
         let AllowDueDateChange = false;
         let AllowTargetDateChange = false;
         let AllowCompleteDateChange = false;
@@ -1385,7 +1362,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         if (isBillingPending) {
             AllowFeesChange = true;
             AllowCaChange = true;
-            AllowAgentChange = true;
             AllowDueDateChange = true;
             AllowTargetDateChange = true;
         } else if (isBillingComplete || isNonBillable) {
@@ -1432,27 +1408,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
                 if (String(task_data.has_ca) === "1" || task_data.ca_id) {
                     await conn.query(
                         "UPDATE tasks SET has_ca = '0', ca_id = NULL, ca_approval = 'pending' WHERE task_id = ? AND branch_id = ?",
-                        [task_id, branch_id]
-                    );
-                }
-            }
-        }
-        // Keep has_agent / agent_id in sync
-        if (agent && AllowAgentChange) {
-            if (agent.has_agent && agent.agent_id) {
-                const nextAgentId = String(agent.agent_id).trim();
-                const prevAgentId = task_data.agent_id != null ? String(task_data.agent_id).trim() : "";
-                const prevHasAgent = String(task_data.has_agent) === "1";
-                if (nextAgentId && (!prevHasAgent || nextAgentId !== prevAgentId)) {
-                    await conn.query(
-                        "UPDATE tasks SET has_agent = '1', agent_id = ? WHERE task_id = ? AND branch_id = ?",
-                        [nextAgentId, task_id, branch_id]
-                    );
-                }
-            } else if (!agent.has_agent) {
-                if (String(task_data.has_agent) === "1" || task_data.agent_id) {
-                    await conn.query(
-                        "UPDATE tasks SET has_agent = '0', agent_id = NULL WHERE task_id = ? AND branch_id = ?",
                         [task_id, branch_id]
                     );
                 }
@@ -1597,8 +1552,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
           t.ca_id,
           t.ca_approval,
           t.udin,
-          t.has_agent,
-          t.agent_id,
           t.fees,
           t.total,
           t.due_date,
@@ -1733,12 +1686,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
         object.udin = element?.udin ?? null;
         if (has_ca) {
             object.ca = await USER_SNIPPED_DATA(element?.ca_id);
-        }
-
-        const has_agent = element?.has_agent == "1";
-        object.has_agent = has_agent;
-        if (has_agent) {
-            object.agent = await USER_SNIPPED_DATA(element?.agent_id);
         }
 
         if (element?.billing_status == "1") {

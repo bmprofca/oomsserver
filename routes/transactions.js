@@ -273,7 +273,7 @@ async function resolvePartySnippet(party_type, party_id) {
     return (await USER_SNIPPED_DATA(id)) || {};
 }
 
-const SEARCH_PARTY_TYPES = ["client", "ca", "agent", "staff", "bank", "capital", "expense", "admin"];
+const SEARCH_PARTY_TYPES = ["client", "ca", "staff", "bank", "capital", "expense", "admin"];
 
 function normalizeSearchPartyTypes(party_types) {
     if (!Array.isArray(party_types)) return [];

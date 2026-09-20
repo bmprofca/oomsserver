@@ -6,7 +6,7 @@ import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA, BANK_SN
 const router = express.Router();
 
 const EXPENSE_ITEM_TYPES_ALLOWED = ["direct", "indirect", "reimbursement"];
-const ALLOWED_DISCOUNT_PARTY_TYPES = ["client", "ca", "staff", "agent"];
+const ALLOWED_DISCOUNT_PARTY_TYPES = ["client", "ca", "staff"];
 const DISCOUNT_RESERVED_ITEM_NAME = "Discount";
 
 const ensureDiscountExpenseItem = async (connection, branch_id, username) => {

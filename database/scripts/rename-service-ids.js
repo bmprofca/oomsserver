@@ -26,7 +26,6 @@ const CHILD_TABLES = [
     "compliance_assignments",
     "compliance_firms",
     "service_requests",
-    "agent_margin",
 ];
 
 function loadMapping() {

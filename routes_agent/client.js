@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../db.js";
-import { GET_FIRMS_BY_USERNAME, UNIQUE_RANDOM_STRING, ID_LENGTH, GET_FIRM_DELETE_BLOCKERS, FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { validateAgentSession } from "../middleware/validateAgentSession.js";
 import {
     deleteProfileImage,
@@ -70,20 +70,10 @@ function formatFirmStatus(status) {
     return String(status) === "1" ? "active" : "inactive";
 }
 
-async function getAgentManagedClient(username, branch_id, agent_username) {
-    const [rows] = await pool.query(
-        `SELECT c.username, c.branch_id, c.status, c.agent, c.create_date
-         FROM clients c
-         WHERE c.username = ?
-           AND c.branch_id = ?
-           AND c.user_type = 'client'
-           AND c.agent = ?
-           AND (c.is_deleted = '0' OR c.is_deleted = 0)
-         LIMIT 1`,
-        [username, branch_id, agent_username]
-    );
+const AGENT_ASSIGNMENT_REMOVED_MSG = "Agent portal assignment removed";
 
-    return rows[0] || null;
+async function getAgentManagedClient() {
+    return null;
 }
 
 async function getAgentClientProfile(username, branch_id) {
@@ -92,7 +82,6 @@ async function getAgentClientProfile(username, branch_id) {
             c.username,
             c.branch_id,
             c.status,
-            c.agent,
             c.create_date,
             p.profile_id,
             p.name,
@@ -135,7 +124,6 @@ async function buildClientDetailsResponse(row) {
         username: row.username,
         profile_id: row.profile_id,
         branch_id: row.branch_id,
-        agent: row.agent,
         status: formatClientStatus(row.status),
         create_date: row.create_date,
         profile: {
@@ -204,115 +192,21 @@ function validateBusinessPayload(biz) {
 
 router.get("/list", validateAgentSession, async (req, res) => {
     try {
-        const branch_id = req.branch_id;
-        const agent_username = req.agent_username;
-        const { page_no = 1, limit = 20, search, status } = req.query || {};
+        const { page_no = 1, limit = 20 } = req.query || {};
 
         const pageNum = Math.max(1, Number(page_no) || 1);
         const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
-        const offset = (pageNum - 1) * limitNum;
-
-        const statusFilter = parseClientStatusFilter(status);
-        if (statusFilter.error) {
-            return res.status(400).json({
-                success: false,
-                message: statusFilter.error,
-            });
-        }
-
-        let query = `
-            SELECT
-                c.id,
-                c.username,
-                c.branch_id,
-                c.create_date,
-                c.status,
-                c.agent,
-                p.profile_id,
-                p.name,
-                p.care_of,
-                p.guardian_name,
-                p.date_of_birth,
-                p.gender,
-                p.mobile,
-                p.country_code,
-                p.email,
-                p.pan_number,
-                p.state,
-                p.district,
-                p.city,
-                p.village_town,
-                p.address_line_1,
-                p.address_line_2,
-                p.pincode,
-                p.image
-            FROM clients c
-            LEFT JOIN profile p ON c.username = p.username
-                AND p.id = (
-                    SELECT MAX(p2.id)
-                    FROM profile p2
-                    WHERE p2.username = c.username
-                )
-            WHERE c.user_type = 'client'
-              AND (c.is_deleted = '0' OR c.is_deleted = 0)
-              AND c.branch_id = ?
-              AND c.agent = ?
-        `;
-
-        const queryParams = [branch_id, agent_username];
-
-        if (statusFilter.dbStatus !== null) {
-            query += ` AND c.status = ?`;
-            queryParams.push(statusFilter.dbStatus);
-        }
-
-        if (search && String(search).trim() !== "") {
-            const searchPattern = `%${String(search).trim()}%`;
-            query += ` AND (p.name LIKE ? OR p.mobile LIKE ? OR p.email LIKE ? OR p.pan_number LIKE ?)`;
-            queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
-        }
-
-        const countQuery = query.replace(
-            /SELECT[\s\S]*?FROM/,
-            "SELECT COUNT(*) AS total FROM"
-        );
-        const [countResult] = await pool.query(countQuery, queryParams);
-        const total = Number(countResult[0]?.total || 0);
-
-        query += ` ORDER BY c.id DESC LIMIT ? OFFSET ?`;
-        queryParams.push(limitNum, offset);
-
-        const [rows] = await pool.query(query, queryParams);
-
-        const transformedRows = await Promise.all(rows.map(async (row) => {
-            const transformedRow = { ...row };
-            transformedRow.status = formatClientStatus(transformedRow.status);
-
-            if (transformedRow.image && String(transformedRow.image).trim() !== "") {
-                transformedRow.image = resolveProfileImageUrl(transformedRow.image);
-            } else {
-                transformedRow.image = null;
-            }
-
-            const firms = await GET_FIRMS_BY_USERNAME({
-                username: transformedRow.username,
-                branch_id,
-            });
-            transformedRow.firms = firms || [];
-
-            return transformedRow;
-        }));
 
         return res.status(200).json({
             success: true,
-            message: "Client list retrieved successfully",
-            data: transformedRows,
+            message: AGENT_ASSIGNMENT_REMOVED_MSG,
+            data: [],
             pagination: {
                 page_no: pageNum,
                 limit: limitNum,
-                total,
-                total_pages: Math.ceil(total / limitNum) || 1,
-                is_last_page: offset + rows.length >= total,
+                total: 0,
+                total_pages: 1,
+                is_last_page: true,
             },
         });
     } catch (error) {
@@ -437,7 +331,6 @@ router.post("/create", validateAgentSession, async (req, res) => {
         await insertRow("clients", {
             username,
             user_type: "client",
-            agent: createdBy,
             branch_id,
             create_by: createdBy,
             status: "2",
@@ -530,7 +423,6 @@ router.post("/create", validateAgentSession, async (req, res) => {
                 pan_number,
                 branch_id,
                 status: formatClientStatus("2"),
-                agent: createdBy,
             },
         });
     } catch (error) {
@@ -568,11 +460,11 @@ router.get("/details/:username", validateAgentSession, async (req, res) => {
             });
         }
 
-        const client = await getAgentManagedClient(username, branch_id, agent_username);
+        const client = await getAgentManagedClient();
         if (!client) {
             return res.status(404).json({
                 success: false,
-                message: "Client not found",
+                message: AGENT_ASSIGNMENT_REMOVED_MSG,
             });
         }
 
@@ -613,11 +505,11 @@ router.get("/details/:username/firms", validateAgentSession, async (req, res) =>
             });
         }
 
-        const client = await getAgentManagedClient(username, branch_id, agent_username);
+        const client = await getAgentManagedClient();
         if (!client) {
             return res.status(404).json({
                 success: false,
-                message: "Client not found",
+                message: AGENT_ASSIGNMENT_REMOVED_MSG,
             });
         }
 
@@ -721,11 +613,11 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
             });
         }
 
-        const client = await getAgentManagedClient(username, branch_id, agent_username);
+        const client = await getAgentManagedClient();
         if (!client) {
             return res.status(404).json({
                 success: false,
-                message: "Client not found",
+                message: AGENT_ASSIGNMENT_REMOVED_MSG,
             });
         }
 
@@ -867,7 +759,6 @@ router.put("/details/:username", validateAgentSession, async (req, res) => {
                 pan_number,
                 branch_id,
                 status: formatClientStatus(client.status),
-                agent: agent_username,
             },
         });
     } catch (error) {
@@ -916,116 +807,9 @@ router.put("/details/firms/:firm_id", validateAgentSession, async (req, res) => 
             });
         }
 
-        const [firmRows] = await pool.query(
-            `SELECT f.firm_id, f.username, c.status AS client_status
-             FROM firms f
-             INNER JOIN clients c ON c.username = f.username
-                AND c.branch_id = f.branch_id
-                AND c.user_type = 'client'
-                AND c.agent = ?
-                AND (c.is_deleted = '0' OR c.is_deleted = 0)
-             WHERE f.firm_id = ?
-               AND f.branch_id = ?
-               AND (f.is_deleted = '0' OR f.is_deleted = 0)
-             LIMIT 1`,
-            [agent_username, firm_id, branch_id]
-        );
-
-        if (!firmRows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Firm not found",
-            });
-        }
-
-        if (String(firmRows[0].client_status) !== "2") {
-            return res.status(403).json({
-                success: false,
-                message: "Firm can only be edited while client is under review",
-            });
-        }
-
-        const username = firmRows[0].username;
-        const {
-            type: business_type,
-            pan: business_pan,
-            firm: firm_name,
-            gst: gst_number,
-            tan: tan_number,
-            vat: vat_number,
-            cin: cin_number,
-            address: bizAddress = {},
-        } = biz;
-
-        const isIndividual = business_type.toLowerCase() === "individual";
-        let resolvedFirmName = isIndividual ? null : (firm_name || null);
-
-        if (isIndividual) {
-            const [profileRows] = await pool.query(
-                `SELECT name FROM profile
-                 WHERE username = ? AND status = '1'
-                 ORDER BY id DESC LIMIT 1`,
-                [username]
-            );
-            resolvedFirmName = profileRows[0]?.name || null;
-        }
-
-        await conn.beginTransaction();
-
-        await conn.query(
-            `UPDATE firms
-             SET firm_name = ?,
-                 firm_type = ?,
-                 pan_no = ?,
-                 gst_no = ?,
-                 tan_no = ?,
-                 vat_no = ?,
-                 cin_no = ?,
-                 file_no = ?,
-                 state = ?,
-                 district = ?,
-                 city = ?,
-                 pincode = ?,
-                 address_line_1 = ?,
-                 address_line_2 = ?,
-                 modify_by = ?,
-                 modify_date = NOW()
-             WHERE firm_id = ?
-               AND username = ?
-               AND branch_id = ?
-               AND (is_deleted = '0' OR is_deleted = 0)`,
-            [
-                resolvedFirmName,
-                business_type,
-                business_pan,
-                isIndividual ? null : (gst_number || null),
-                isIndividual ? null : (tan_number || null),
-                isIndividual ? null : (vat_number || null),
-                isIndividual ? null : (cin_number || null),
-                null,
-                isIndividual ? null : (bizAddress.state || null),
-                isIndividual ? null : (bizAddress.district || null),
-                isIndividual ? null : (bizAddress.town || null),
-                isIndividual ? null : (bizAddress.pincode || null),
-                isIndividual ? null : (bizAddress.address_line_1 || null),
-                isIndividual ? null : (bizAddress.address_line_2 || null),
-                agent_username,
-                firm_id,
-                username,
-                branch_id,
-            ]
-        );
-
-        await conn.commit();
-
-        return res.status(200).json({
-            success: true,
-            message: "Firm updated successfully",
-            data: {
-                firm_id,
-                firm_name: resolvedFirmName,
-                business_type,
-            },
+        return res.status(404).json({
+            success: false,
+            message: AGENT_ASSIGNMENT_REMOVED_MSG,
         });
     } catch (error) {
         await conn.rollback();
@@ -1053,11 +837,11 @@ router.delete("/:username", validateAgentSession, async (req, res) => {
             });
         }
 
-        const client = await getAgentManagedClient(username, branch_id, agent_username);
+        const client = await getAgentManagedClient();
         if (!client) {
             return res.status(404).json({
                 success: false,
-                message: "Client not found",
+                message: AGENT_ASSIGNMENT_REMOVED_MSG,
             });
         }
 
@@ -1106,63 +890,9 @@ router.delete("/client/firms/:firm_id", validateAgentSession, async (req, res) =
             });
         }
 
-        const [firmRows] = await pool.query(
-            `SELECT f.firm_id, f.username, c.status AS client_status
-             FROM firms f
-             INNER JOIN clients c ON c.username = f.username
-                AND c.branch_id = f.branch_id
-                AND c.user_type = 'client'
-                AND c.agent = ?
-                AND (c.is_deleted = '0' OR c.is_deleted = 0)
-             WHERE f.firm_id = ?
-               AND f.branch_id = ?
-               AND (f.is_deleted = '0' OR f.is_deleted = 0)
-             LIMIT 1`,
-            [agent_username, firm_id, branch_id]
-        );
-
-        if (!firmRows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Firm not found",
-            });
-        }
-
-        if (String(firmRows[0].client_status) !== "2") {
-            return res.status(403).json({
-                success: false,
-                message: "Firm can only be deleted while client is under review",
-            });
-        }
-
-        const blockers = await GET_FIRM_DELETE_BLOCKERS({
-            firm_id,
-            branch_id,
-        });
-        if (blockers.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: FORMAT_FIRM_DELETE_BLOCKERS_MESSAGE(blockers),
-                data: { firm_id, blockers },
-            });
-        }
-
-        await pool.query(
-            `UPDATE firms
-             SET is_deleted = '1',
-                 deleted_by = ?,
-                 modify_by = ?,
-                 modify_date = NOW()
-             WHERE firm_id = ? AND branch_id = ?`,
-            [agent_username, agent_username, firm_id, branch_id]
-        );
-
-        return res.status(200).json({
-            success: true,
-            message: "Firm deleted successfully",
-            data: {
-                firm_id,
-            },
+        return res.status(404).json({
+            success: false,
+            message: AGENT_ASSIGNMENT_REMOVED_MSG,
         });
     } catch (error) {
         console.error("AGENT FIRM DELETE ERROR:", error);

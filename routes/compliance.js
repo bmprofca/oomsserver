@@ -379,9 +379,7 @@ async function formatComplianceTaskListRow(row, task) {
         0;
 
     const caId = task?.ca_id ?? splitCsvFirst(row.ca);
-    const agentId = task?.agent_id ?? splitCsvFirst(row.agent);
     const has_ca = task ? task.has_ca === "1" : Boolean(caId);
-    const has_agent = task ? task.has_agent === "1" : Boolean(agentId);
 
     const dueDate = task?.due_date ?? computedDueDate;
     const targetDate = task?.target_date ?? dueDate;
@@ -435,14 +433,10 @@ async function formatComplianceTaskListRow(row, task) {
             ? await SINGLE_TASK_STAFF_LIST(task.task_id)
             : await resolveAssignedStaffList(null, row.staffs),
         has_ca,
-        has_agent,
     };
 
     if (has_ca) {
         object.ca = await USER_SNIPPED_DATA(caId);
-    }
-    if (has_agent) {
-        object.agent = await USER_SNIPPED_DATA(agentId);
     }
 
     const inUser = normalizeInUser(task?.in_user);
@@ -454,7 +448,6 @@ async function formatComplianceTaskListRow(row, task) {
 function formatComplianceFirmRow(row) {
     const staffs = splitCsvList(row.staffs);
     const caList = splitCsvList(row.ca);
-    const agentList = splitCsvList(row.agent);
 
     return {
         id: row.id,
@@ -481,8 +474,6 @@ function formatComplianceFirmRow(row) {
         staffs_csv: row.staffs ?? null,
         ca: caList,
         ca_csv: row.ca ?? null,
-        agent: agentList,
-        agent_csv: row.agent ?? null,
         create_date: row.create_date,
         create_by: row.create_by ?? null,
         modify_date: row.modify_date,
@@ -490,7 +481,7 @@ function formatComplianceFirmRow(row) {
     };
 }
 
-/** Enrich staff/CA/agent usernames into profile snippets for UI (task-display style). */
+/** Enrich staff/CA usernames into profile snippets for UI (task-display style). */
 async function enrichComplianceFirmRow(row) {
     const base = formatComplianceFirmRow(row);
     const staffs = await resolveAssignedStaffList(null, row.staffs);
@@ -508,26 +499,11 @@ async function enrichComplianceFirmRow(row) {
             : { username: base.ca[0], name: base.ca[0] };
     }
 
-    let agent = null;
-    if (base.agent?.[0]) {
-        const profile = await USER_SNIPPED_DATA(base.agent[0]);
-        agent = profile
-            ? {
-                username: profile.username ?? base.agent[0],
-                name: profile.name ?? base.agent[0],
-                mobile: profile.mobile ?? "",
-                email: profile.email ?? "",
-            }
-            : { username: base.agent[0], name: base.agent[0] };
-    }
-
     return {
         ...base,
         staffs,
         ca,
-        agent,
         has_ca: Boolean(ca),
-        has_agent: Boolean(agent),
     };
 }
 
@@ -541,7 +517,6 @@ const COMPLIANCE_FIRM_SELECT = `
     
     cf.staffs,
     cf.ca,
-    cf.agent,
     cf.due_date,
     cf.visibility_offset,
     cf.effective_from,
@@ -642,7 +617,6 @@ function buildComplianceFirmFilters(query, branch_id) {
         username,
         staff,
         ca,
-        agent,
         search,
         effective_from,
     } = query || {};
@@ -680,12 +654,6 @@ function buildComplianceFirmFilters(query, branch_id) {
         params.push(caUsername);
     }
 
-    const agentUsername = agent != null ? String(agent).trim() : "";
-    if (agentUsername) {
-        where.push(csvFieldMatches("cf.agent", agentUsername));
-        params.push(agentUsername);
-    }
-
     const effectiveFrom = effective_from != null ? String(effective_from).trim() : "";
     if (effectiveFrom) {
         where.push("cf.effective_from = ?");
@@ -700,7 +668,6 @@ function buildComplianceFirmFilters(query, branch_id) {
             OR cf.username LIKE ?
             OR cf.staffs LIKE ?
             OR cf.ca LIKE ?
-            OR cf.agent LIKE ?
             OR cf.effective_from LIKE ?
             OR f.firm_name LIKE ?
             OR f.username LIKE ?
@@ -731,7 +698,6 @@ function buildComplianceFirmFilters(query, branch_id) {
             searchPattern,
             searchPattern,
             searchPattern,
-            searchPattern,
             searchPattern
         );
     }
@@ -740,7 +706,7 @@ function buildComplianceFirmFilters(query, branch_id) {
 }
 
 function buildComplianceTaskFilters(query, branch_id, { complianceYear, complianceYearMax, compliancePeriod }) {
-    const { service_id, firm_id, username, search, ca, agent } = query || {};
+    const { service_id, firm_id, username, search, ca } = query || {};
 
     const where = [
         "t.branch_id = ?",
@@ -773,12 +739,6 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
         params.push(caUsername);
     }
 
-    const agentUsername = agent != null ? String(agent).trim() : "";
-    if (agentUsername) {
-        where.push("t.agent_id = ?");
-        params.push(agentUsername);
-    }
-
     if (complianceYear) {
         where.push("t.compliance_year = ?");
         params.push(complianceYear);
@@ -802,7 +762,6 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
             OR t.firm_id LIKE ?
             OR t.username LIKE ?
             OR t.ca_id LIKE ?
-            OR t.agent_id LIKE ?
             OR f.firm_name LIKE ?
             OR f.username LIKE ?
             OR f.firm_type LIKE ?
@@ -816,7 +775,6 @@ function buildComplianceTaskFilters(query, branch_id, { complianceYear, complian
             OR p.pan_number LIKE ?
         )`);
         params.push(
-            searchPattern,
             searchPattern,
             searchPattern,
             searchPattern,
@@ -856,7 +814,6 @@ async function fetchExistingComplianceTaskRows(branch_id, query, { complianceYea
                 t.compliance_period,
                 t.create_date,
                 t.ca_id AS ca,
-                t.agent_id AS agent,
                 s.name AS service_name,
                 s.frequency,
                 f.firm_name
@@ -927,7 +884,7 @@ async function fetchComplianceTasksMap(branch_id, rows) {
         `SELECT task_id, service_id, firm_id, compliance_year, compliance_period, username,
                 fees, total, status, due_date, target_date,
                 complete_date, complete_by, create_date, create_by, in_user,
-                billing_status, has_ca, ca_id, has_agent, agent_id, is_recurring
+                billing_status, has_ca, ca_id, is_recurring
          FROM tasks
          WHERE branch_id = ?
            AND task_type = 'compliance'
@@ -958,7 +915,6 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
             effective_from,
             staffs,
             ca,
-            agent,
         } = req.body || {};
 
         const serviceId = parseServiceId(service_id);
@@ -1071,13 +1027,12 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
 
         const staffsVal = normalizeCommaSeparated(staffs);
         const caVal = normalizeCommaSeparated(ca);
-        const agentVal = normalizeCommaSeparated(agent);
         const clientUsername = firmRows[0].username ? String(firmRows[0].username).trim() : null;
 
         const [insertResult] = await pool.query(
             `INSERT INTO compliance_firms
-             (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
+             (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, due_date, visibility_offset, create_by, modify_by, is_deleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
             [
                 branch_id,
                 serviceId,
@@ -1087,7 +1042,6 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 feesNum,
                 staffsVal,
                 caVal,
-                agentVal,
                 dueDateVal,
                 visibilityOffsetVal,
                 createdBy,
@@ -1115,7 +1069,6 @@ router.post("/add-firm", auth, validateBranch, async (req, res) => {
                 visibility_offset: visibilityOffsetVal,
                 staffs: staffsVal,
                 ca: caVal,
-                agent: agentVal,
             },
         });
     } catch (error) {
@@ -1147,7 +1100,6 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
             effective_from,
             staffs,
             ca,
-            agent,
         } = req.body || {};
 
         const serviceId = parseServiceId(service_id);
@@ -1308,7 +1260,6 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
 
         const staffsVal = normalizeCommaSeparated(staffs);
         const caVal = normalizeCommaSeparated(ca);
-        const agentVal = normalizeCommaSeparated(agent);
 
         const result = {
             added: [],
@@ -1345,8 +1296,8 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
 
             const [insertResult] = await conn.query(
                 `INSERT INTO compliance_firms
-                 (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, agent, due_date, visibility_offset, create_by, modify_by, is_deleted)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
+                 (branch_id, service_id, username, firm_id, effective_from, fees, staffs, ca, due_date, visibility_offset, create_by, modify_by, is_deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0')`,
                 [
                     branch_id,
                     serviceId,
@@ -1356,7 +1307,6 @@ router.post("/add-firms", auth, validateBranch, async (req, res) => {
                     feesNum,
                     staffsVal,
                     caVal,
-                    agentVal,
                     dueDateVal,
                     visibilityOffsetVal,
                     createdBy,
@@ -1525,7 +1475,6 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
             taskId = await UNIQUE_RANDOM_STRING("tasks", "task_id", { conn });
 
             const caId = splitCsvFirst(complianceFirm.ca);
-            const agentId = splitCsvFirst(complianceFirm.agent);
             const feesNum = Number(complianceFirm.fees) || 0;
             const gstSettingsSpawn = await fetchBranchGstSettings(conn, branch_id);
             const spawnGst = resolveGst({
@@ -1543,9 +1492,9 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
             await conn.query(
                 `INSERT INTO tasks
                  (branch_id, task_id, task_type, compliance_year, compliance_period, username, firm_id, service_id,
-                  has_ca, ca_id, has_agent, agent_id, fees, total, create_by, is_recurring,
+                  has_ca, ca_id, fees, total, create_by, is_recurring,
                   due_date, target_date, billing_status, status, complete_date, complete_by, cancelled_date, cancelled_by)
-                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     taskId,
@@ -1556,8 +1505,6 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                     serviceId,
                     caId ? "1" : "0",
                     caId,
-                    agentId ? "1" : "0",
-                    agentId,
                     feesNum,
                     totalNum,
                     username || null,
@@ -1708,7 +1655,7 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const { pageNum, limitNum, offset } = parseListPagination(req.query);
-        const { service_id, firm_id, username, compliance_year, compliance_period, search, ca, agent, status } = req.query || {};
+        const { service_id, firm_id, username, compliance_year, compliance_period, search, ca, status } = req.query || {};
         const statusFilter = parseStatusFilterList(status);
 
         const serviceId = parseServiceId(service_id);
@@ -1769,7 +1716,7 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
         }
 
         const { whereClause, params } = buildComplianceFirmFilters(
-            { service_id, firm_id, username, search, ca, agent },
+            { service_id, firm_id, username, search, ca },
             branch_id
         );
 
@@ -1793,7 +1740,7 @@ router.get("/task-list", auth, validateBranch, async (req, res) => {
 
         const existingTaskRows = await fetchExistingComplianceTaskRows(
             branch_id,
-            { service_id, firm_id, username, search, ca, agent },
+            { service_id, firm_id, username, search, ca },
             {
                 complianceYear: targetYear,
                 complianceYearMax: targetYear ? null : currentFy,
@@ -1886,7 +1833,6 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
             compliance_period,
             search,
             ca,
-            agent,
         } = req.query || {};
 
         const serviceId = parseServiceId(service_id);
@@ -1951,7 +1897,7 @@ router.get("/yet-not-started", auth, validateBranch, async (req, res) => {
         }
 
         const { whereClause, params } = buildComplianceFirmFilters(
-            { service_id, firm_id, username, search, ca, agent },
+            { service_id, firm_id, username, search, ca },
             branch_id
         );
 
@@ -2169,7 +2115,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
             effective_from,
             staffs,
             ca,
-            agent,
         } = req.body || {};
 
         const serviceId = parseServiceId(service_id);
@@ -2281,7 +2226,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
 
         const staffsVal = normalizeCommaSeparated(staffs);
         const caVal = normalizeCommaSeparated(ca);
-        const agentVal = normalizeCommaSeparated(agent);
         const clientUsername = firmRows[0].username ? String(firmRows[0].username).trim() : null;
 
         await pool.query(
@@ -2295,7 +2239,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                  effective_from = ?,
                  staffs = ?,
                  ca = ?,
-                 agent = ?,
                  modify_by = ?,
                  modify_date = NOW()
              WHERE id = ?
@@ -2311,7 +2254,6 @@ router.put("/edit-firm", auth, validateBranch, async (req, res) => {
                 parsedEffectiveFrom.value,
                 staffsVal,
                 caVal,
-                agentVal,
                 modifyBy,
                 existing.id,
                 branch_id,

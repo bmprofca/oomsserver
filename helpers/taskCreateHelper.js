@@ -82,9 +82,7 @@ async function createSingleTask(conn, options) {
     } = options;
 
     const ca_id = assignmentPayload.ca_id ?? assignmentPayload.ca ?? null;
-    const agent_id = assignmentPayload.agent_id ?? assignmentPayload.agent ?? null;
     const has_ca = ca_id ? "1" : "0";
-    const has_agent = agent_id ? "1" : "0";
     const staffIds = Array.isArray(assignmentPayload.staff) ? assignmentPayload.staff : [];
     const taskStatus = staffIds.length > 0 ? "in process" : "pending from department";
 
@@ -123,8 +121,6 @@ async function createSingleTask(conn, options) {
         service_id,
         has_ca,
         ca_id,
-        has_agent,
-        agent_id,
         fees,
         total,
         create_by: createdBy,
@@ -263,7 +259,6 @@ async function createSingleTask(conn, options) {
         assignment: {
             staff: staffIds,
             ca_id,
-            agent_id,
         },
         subtasks: subtasksPayload,
         notes: notesPayload ?? { text: [], attachments: [], voice: [] },
