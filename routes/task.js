@@ -9,6 +9,7 @@ import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEma
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
 import { notifyTaskCreatedSms, notifyTaskCompletedSms } from "../helpers/smsNotification.js";
 import { notifyCaApprovalSent } from "../helpers/caApprovalEmail.js";
+import { notifyTaskStatusPush } from "../helpers/fcmPush.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
@@ -3658,6 +3659,14 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
 
         await conn.commit();
         conn.release();
+
+        // Dispatch FCM push notifications asynchronously to affected client & staff
+        notifyTaskStatusPush({
+            branch_id,
+            task_ids: targetIds,
+            status: statusVal,
+            updated_by: username,
+        }).catch((err) => console.error("[FCM] Task status push notification error:", err?.message || err));
 
         const blockedTaskIds = blockedBySubtasks.map((row) => String(row.task_id));
         const successMessage = blockedTaskIds.length > 0
