@@ -4970,95 +4970,302 @@ router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
 });
 
 /**
- * Header notifications: CA approval complete but task still open.
- * GET /task/notifications
- * Query: limit? (default 20, max 50)
+ * Header notifications:
+ * - CA approval complete while task still open
+ * - Incoming (SHARABLE) documents uploaded by end clients
  *
- * Filters:
- * - ca_approval = 'complete'
- * - status NOT IN ('complete', 'cancel')
+ * GET  /task/notifications?limit=
+ * POST /task/notifications/read  { notification_ids?: string[], notification_id?: string, mark_all?: boolean }
  */
+const NOTIF_READS_ENSURE_SQL = `
+CREATE TABLE IF NOT EXISTS staff_notification_reads (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  branch_id VARCHAR(50) NOT NULL,
+  username VARCHAR(100) NOT NULL,
+  notification_id VARCHAR(100) NOT NULL,
+  read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_staff_notif_read (branch_id, username, notification_id),
+  KEY idx_staff_notif_branch_user (branch_id, username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const NOTIF_READS_COLLATION_SQL = `
+ALTER TABLE staff_notification_reads
+  CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+`;
+
+let staffNotificationReadsReady = false;
+async function ensureStaffNotificationReadsTable() {
+    if (staffNotificationReadsReady) return;
+    await pool.query(NOTIF_READS_ENSURE_SQL);
+    try {
+        await pool.query(NOTIF_READS_COLLATION_SQL);
+    } catch (_) {
+        /* ignore if already matching / no permission */
+    }
+    staffNotificationReadsReady = true;
+}
+
+function notificationStaffUsername(req) {
+    return String(req.headers["username"] || req.headers["Username"] || "").trim();
+}
+
+async function buildUnreadHeaderNotifications(branch_id, staffUsername, limitNum) {
+    await ensureStaffNotificationReadsTable();
+
+    const caWhereSql = `
+        FROM tasks t
+        LEFT JOIN services s ON s.service_id = t.service_id
+        LEFT JOIN firms f
+            ON f.firm_id = t.firm_id
+           AND (f.is_deleted = '0' OR f.is_deleted = 0)
+        LEFT JOIN profile cp
+            ON cp.username = t.username
+           AND cp.id = (
+                SELECT MAX(cp2.id)
+                FROM profile cp2
+                WHERE cp2.username = t.username
+           )
+        WHERE t.branch_id = ?
+          AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
+          AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM staff_notification_reads r
+            WHERE r.branch_id = ?
+              AND r.username = ?
+              AND r.notification_id = CONCAT('ca-complete-', t.task_id)
+          )
+    `;
+
+    const incomingWhereSql = `
+        FROM documents d
+        LEFT JOIN firms f
+            ON f.firm_id = d.firm_id
+           AND f.branch_id = d.branch_id
+           AND (f.is_deleted = '0' OR f.is_deleted = 0)
+        LEFT JOIN profile cp
+            ON cp.username = d.username
+           AND cp.id = (
+                SELECT MAX(cp2.id)
+                FROM profile cp2
+                WHERE cp2.username = d.username
+           )
+        WHERE d.branch_id = ?
+          AND d.category_id = 'SHARABLE'
+          AND (d.is_deleted = '0' OR d.is_deleted = 0)
+          AND d.create_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM staff_notification_reads r
+            WHERE r.branch_id = ?
+              AND r.username = ?
+              AND r.notification_id = CONCAT('incoming-doc-', d.document_id)
+          )
+    `;
+
+    const caParams = [branch_id, branch_id, staffUsername];
+    const incomingParams = [branch_id, branch_id, staffUsername];
+
+    const [caCountResult, incomingCountResult, caListResult, incomingListResult] =
+        await Promise.all([
+            pool.query(`SELECT COUNT(*) AS total ${caWhereSql}`, caParams),
+            pool.query(`SELECT COUNT(*) AS total ${incomingWhereSql}`, incomingParams),
+            pool.query(
+                `SELECT
+                    t.task_id,
+                    t.username,
+                    t.status,
+                    t.ca_approval,
+                    t.udin,
+                    t.create_date,
+                    t.due_date,
+                    s.name AS service_name,
+                    f.firm_name,
+                    cp.name AS client_name
+                 ${caWhereSql}
+                 ORDER BY t.create_date DESC, t.id DESC
+                 LIMIT ?`,
+                [...caParams, limitNum]
+            ),
+            pool.query(
+                `SELECT
+                    d.document_id,
+                    d.username,
+                    d.name AS document_name,
+                    d.remark,
+                    d.firm_id,
+                    d.create_date,
+                    f.firm_name,
+                    cp.name AS client_name
+                 ${incomingWhereSql}
+                 ORDER BY d.create_date DESC, d.id DESC
+                 LIMIT ?`,
+                [...incomingParams, limitNum]
+            ),
+        ]);
+
+    const caCountRow = caCountResult?.[0]?.[0] || {};
+    const incomingCountRow = incomingCountResult?.[0]?.[0] || {};
+    const caRows = caListResult?.[0] || [];
+    const incomingRows = incomingListResult?.[0] || [];
+
+    const caNotifications = (caRows || []).map((row) => {
+        const serviceName = row.service_name || "Task";
+        const clientName = row.client_name || row.username || "Client";
+        const firmName = row.firm_name || "";
+        return {
+            id: `ca-complete-${row.task_id}`,
+            type: "ca_approval_complete",
+            title: "CA approval complete",
+            message: `${serviceName} for ${clientName} is CA-approved but the task is still ${row.status || "open"}.`,
+            task_id: row.task_id,
+            document_id: null,
+            username: row.username || null,
+            status: row.status || null,
+            ca_approval: row.ca_approval || "complete",
+            udin: row.udin || null,
+            service_name: serviceName,
+            document_name: null,
+            client_name: clientName,
+            firm_name: firmName,
+            path: `/task/profile/${encodeURIComponent(row.task_id)}/details`,
+            at: row.create_date || null,
+            is_read: false,
+        };
+    });
+
+    const incomingNotifications = (incomingRows || []).map((row) => {
+        const clientName = row.client_name || row.username || "Client";
+        const docName = row.document_name || "Document";
+        const firmName = row.firm_name || "";
+        const username = row.username || "";
+        return {
+            id: `incoming-doc-${row.document_id}`,
+            type: "incoming_document",
+            title: "Incoming document uploaded",
+            message: `${clientName} uploaded "${docName}"${firmName ? ` (${firmName})` : ""}.`,
+            task_id: null,
+            document_id: row.document_id,
+            username,
+            status: null,
+            ca_approval: null,
+            udin: null,
+            service_name: null,
+            document_name: docName,
+            client_name: clientName,
+            firm_name: firmName,
+            path: username
+                ? `/client/profile/${encodeURIComponent(username)}/documents?docTab=sharable`
+                : null,
+            at: row.create_date || null,
+            is_read: false,
+        };
+    });
+
+    const merged = [...caNotifications, ...incomingNotifications].sort((a, b) => {
+        const aTime = a.at ? new Date(a.at).getTime() : 0;
+        const bTime = b.at ? new Date(b.at).getTime() : 0;
+        return bTime - aTime;
+    });
+
+    return {
+        count:
+            (Number(caCountRow?.total) || 0) +
+            (Number(incomingCountRow?.total) || 0),
+        notifications: merged.slice(0, limitNum),
+    };
+}
+
 router.get("/notifications", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
+        const staffUsername = notificationStaffUsername(req);
+        if (!staffUsername) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired",
+            });
+        }
+
         const limitNum = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
-
-        const whereSql = `
-            FROM tasks t
-            LEFT JOIN services s ON s.service_id = t.service_id
-            LEFT JOIN firms f
-                ON f.firm_id = t.firm_id
-               AND (f.is_deleted = '0' OR f.is_deleted = 0)
-            LEFT JOIN profile cp
-                ON cp.username = t.username
-               AND cp.id = (
-                    SELECT MAX(cp2.id)
-                    FROM profile cp2
-                    WHERE cp2.username = t.username
-               )
-            WHERE t.branch_id = ?
-              AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
-              AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
-        `;
-
-        const [[countRow]] = await pool.query(
-            `SELECT COUNT(*) AS total ${whereSql}`,
-            [branch_id]
-        );
-        const total = Number(countRow?.total) || 0;
-
-        const [rows] = await pool.query(
-            `SELECT
-                t.task_id,
-                t.username,
-                t.status,
-                t.ca_approval,
-                t.udin,
-                t.create_date,
-                t.due_date,
-                s.name AS service_name,
-                f.firm_name,
-                cp.name AS client_name
-             ${whereSql}
-             ORDER BY t.create_date DESC, t.id DESC
-             LIMIT ?`,
-            [branch_id, limitNum]
-        );
-
-        const notifications = (rows || []).map((row) => {
-            const serviceName = row.service_name || "Task";
-            const clientName = row.client_name || row.username || "Client";
-            const firmName = row.firm_name || "";
-            return {
-                id: `ca-complete-${row.task_id}`,
-                type: "ca_approval_complete",
-                title: "CA approval complete",
-                message: `${serviceName} for ${clientName} is CA-approved but the task is still ${row.status || "open"}.`,
-                task_id: row.task_id,
-                status: row.status || null,
-                ca_approval: row.ca_approval || "complete",
-                udin: row.udin || null,
-                service_name: serviceName,
-                client_name: clientName,
-                firm_name: firmName,
-                path: `/task/profile/${encodeURIComponent(row.task_id)}/details`,
-                at: row.create_date || null,
-            };
-        });
+        const data = await buildUnreadHeaderNotifications(branch_id, staffUsername, limitNum);
 
         return res.status(200).json({
             success: true,
             message: "Notifications fetched successfully",
-            data: {
-                count: total,
-                notifications,
-            },
+            data,
         });
     } catch (error) {
         console.error("Task notifications error:", error);
         return res.status(500).json({
             success: false,
             message: "Failed to fetch notifications",
+            error: error.message,
+        });
+    }
+});
+
+router.post("/notifications/read", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = notificationStaffUsername(req);
+        if (!staffUsername) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired",
+            });
+        }
+
+        await ensureStaffNotificationReadsTable();
+
+        const body = req.body || {};
+        let ids = [];
+
+        if (body.mark_all === true || body.mark_all === "1" || body.mark_all === 1) {
+            const { notifications } = await buildUnreadHeaderNotifications(
+                branch_id,
+                staffUsername,
+                50
+            );
+            ids = (notifications || []).map((n) => n.id).filter(Boolean);
+        } else if (Array.isArray(body.notification_ids)) {
+            ids = body.notification_ids;
+        } else if (body.notification_id != null) {
+            ids = [body.notification_id];
+        }
+
+        ids = [...new Set(
+            ids
+                .map((id) => String(id || "").trim())
+                .filter((id) => id.length > 0 && id.length <= 100)
+        )];
+
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No notification ids provided",
+            });
+        }
+
+        const values = ids.map((id) => [branch_id, staffUsername, id]);
+        await pool.query(
+            `INSERT IGNORE INTO staff_notification_reads (branch_id, username, notification_id)
+             VALUES ?`,
+            [values]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Notifications marked as read",
+            data: { marked: ids.length, notification_ids: ids },
+        });
+    } catch (error) {
+        console.error("Mark notifications read error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to mark notifications as read",
             error: error.message,
         });
     }

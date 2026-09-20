@@ -3186,7 +3186,7 @@ router.post("/details/documents/create/general", auth, validateBranch, async (re
                 });
             }
 
-            const reserved = ["IT", "GST", "MCA", "TASK"];
+            const reserved = ["IT", "GST", "MCA", "TASK", "SHARABLE"];
             if (reserved.includes(String(category_id).trim().toUpperCase())) {
                 await conn.rollback();
                 conn.release();
@@ -3497,7 +3497,7 @@ async function getGeneralDocumentList(branch_id, query) {
     const conditions = [
         "d.branch_id = ?",
         "d.is_deleted = '0'",
-        "d.category_id NOT IN ('IT', 'GST', 'MCA', 'TASK')",
+        "d.category_id NOT IN ('IT', 'GST', 'MCA', 'TASK', 'SHARABLE')",
     ];
     const params = [branch_id];
 
@@ -3563,6 +3563,10 @@ async function getGeneralDocumentList(branch_id, query) {
     })));
 
     return { data, total, page, limitNum, offset, rowCount: rows.length };
+}
+
+async function getSharableDocumentList(branch_id, query) {
+    return getDocumentListByCategory(branch_id, "SHARABLE", "sharable", query);
 }
 
 async function getClientTaskDocumentList(branch_id, query) {
@@ -3675,6 +3679,39 @@ router.get("/details/documents/list/general", auth, validateBranch, async (req, 
         return res.status(500).json({
             success: false,
             message: "Failed to fetch general documents",
+            error: error.message,
+        });
+    }
+});
+
+router.get("/details/documents/list/sharable", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const username = req.query.username != null ? String(req.query.username).trim() : "";
+        if (!username) {
+            return res.status(400).json({ success: false, message: "Username is required" });
+        }
+        if (!(await assertClientInBranch(branch_id, username))) {
+            return res.status(403).json({ success: false, message: "User not found or does not belong to this branch" });
+        }
+        const result = await getSharableDocumentList(branch_id, req.query);
+        return res.status(200).json({
+            success: true,
+            message: "Sharable documents fetched successfully",
+            data: result.data,
+            pagination: {
+                page: result.page,
+                limit: result.limitNum,
+                total: result.total,
+                total_pages: Math.ceil(result.total / result.limitNum) || 1,
+                is_last_page: result.offset + result.rowCount >= result.total,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching sharable documents:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch sharable documents",
             error: error.message,
         });
     }
@@ -3982,6 +4019,7 @@ function documentCategoryFolder(category_id) {
     if (id === "IT") return "it";
     if (id === "MCA") return "mca";
     if (id === "TASK") return "task";
+    if (id === "SHARABLE") return "sharable";
     return "general";
 }
 
@@ -4349,6 +4387,366 @@ router.post("/details/documents/delete/send-otp", auth, validateBranch, async (r
         return res.status(status).json({
             success: false,
             message: error.message || "Failed to send OTP",
+        });
+    }
+});
+
+const DOCUMENT_EDIT_RESERVED_CATEGORIES = new Set(["IT", "GST", "MCA", "TASK", "SHARABLE"]);
+
+function sharableEditHasForbiddenFields(body) {
+    const forbidden = ["firm_id", "url", "type", "year", "month", "category_id"];
+    return forbidden.some((key) => {
+        if (body[key] === undefined || body[key] === null) return false;
+        if (typeof body[key] === "string" && body[key].trim() === "") return false;
+        return true;
+    });
+}
+
+function categoryFolderForDocumentCategory(categoryId) {
+    const id = String(categoryId || "").trim().toUpperCase();
+    if (id === "GST") return "gst";
+    if (id === "IT") return "it";
+    if (id === "MCA") return "mca";
+    if (id === "SHARABLE") return "sharable";
+    return "general";
+}
+
+async function buildDocumentEditSummary(row, categoryFolder) {
+    const [firmRows] = await pool.query(
+        `SELECT firm_name FROM firms WHERE firm_id = ? AND branch_id = ? LIMIT 1`,
+        [row.firm_id, row.branch_id]
+    );
+    let category_name = null;
+    if (row.category_id && !DOCUMENT_EDIT_RESERVED_CATEGORIES.has(String(row.category_id).trim().toUpperCase())) {
+        const [catRows] = await pool.query(
+            `SELECT name FROM document_categories WHERE category_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1`,
+            [row.category_id, row.branch_id]
+        );
+        category_name = catRows[0]?.name || null;
+    }
+    return {
+        document_id: row.document_id,
+        branch_id: row.branch_id,
+        firm_id: row.firm_id,
+        firm_name: firmRows[0]?.firm_name || null,
+        username: row.username,
+        category_id: row.category_id,
+        category_name,
+        name: row.name,
+        f_year: row.f_year,
+        type: row.type,
+        remark: row.remark,
+        month: row.month,
+        file: row.file ? await getProfileDocumentAccessUrl(categoryFolder, row.file) : null,
+        size: row.size,
+        mime_type: row.mime_type,
+        create_date: row.create_date,
+        modify_date: row.modify_date,
+    };
+}
+
+async function assertFirmInBranch(firm_id, branch_id) {
+    const trimmed = String(firm_id || "").trim();
+    if (!trimmed) {
+        return { ok: false, status: 400, message: "Firm ID is required" };
+    }
+    const [firmCheck] = await pool.query(
+        "SELECT firm_id FROM firms WHERE firm_id = ? AND branch_id = ? AND is_deleted = '0'",
+        [trimmed, branch_id]
+    );
+    if (firmCheck.length === 0) {
+        return { ok: false, status: 404, message: "Firm not found or does not belong to this branch" };
+    }
+    return { ok: true, firm_id: trimmed };
+}
+
+/**
+ * PUT /details/documents/edit
+ * Body: { username, document_id, ...fields by category }
+ */
+router.put("/details/documents/edit", auth, validateBranch, async (req, res) => {
+    let conn;
+    const branch_id = req.branch_id;
+    const modifyBy = req.headers["username"] || "";
+    const body = req.body || {};
+    const clientUsername = String(body.username || "").trim();
+    const documentId = String(body.document_id || "").trim();
+
+    if (!clientUsername) {
+        return res.status(400).json({ success: false, message: "Username is required" });
+    }
+    if (!documentId) {
+        return res.status(400).json({ success: false, message: "document_id is required" });
+    }
+    if (!(await assertClientInBranch(branch_id, clientUsername))) {
+        return res.status(403).json({
+            success: false,
+            message: "User not found or does not belong to this branch",
+        });
+    }
+
+    const [existingRows] = await pool.query(
+        `SELECT * FROM documents
+         WHERE document_id = ? AND branch_id = ? AND username = ? AND is_deleted = '0'
+         LIMIT 1`,
+        [documentId, branch_id, clientUsername]
+    );
+    if (existingRows.length === 0) {
+        return res.status(404).json({ success: false, message: "Document not found" });
+    }
+    const existing = existingRows[0];
+    const categoryId = String(existing.category_id || "").trim().toUpperCase();
+
+    if (categoryId === "TASK") {
+        return res.status(400).json({ success: false, message: "Task documents are not editable" });
+    }
+
+    const savedFiles = [];
+    let uploadedFile = null;
+    let uploadedFolder = null;
+    let oldFileToDelete = null;
+    let oldFileFolder = null;
+
+    try {
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        if (categoryId === "SHARABLE") {
+            if (sharableEditHasForbiddenFields(body)) {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Sharable documents can only update name and remark",
+                });
+            }
+            const nextName = body.name !== undefined ? body.name : existing.name;
+            const nextRemark = body.remark !== undefined ? body.remark : existing.remark;
+            await conn.query(
+                `UPDATE documents
+                 SET name = ?, remark = ?, modify_by = ?, modify_date = NOW()
+                 WHERE document_id = ? AND branch_id = ? AND username = ? AND is_deleted = '0'`,
+                [nextName, nextRemark, modifyBy, documentId, branch_id, clientUsername]
+            );
+        } else if (categoryId === "GST" || categoryId === "IT" || categoryId === "MCA") {
+            const folder = categoryFolderForDocumentCategory(categoryId);
+            const firmCheck = await assertFirmInBranch(body.firm_id ?? existing.firm_id, branch_id);
+            if (!firmCheck.ok) {
+                await conn.rollback();
+                conn.release();
+                return res.status(firmCheck.status).json({ success: false, message: firmCheck.message });
+            }
+
+            const nextFirmId = body.firm_id !== undefined ? firmCheck.firm_id : existing.firm_id;
+            const nextName = body.name !== undefined ? body.name : existing.name;
+            const nextRemark = body.remark !== undefined ? body.remark : existing.remark;
+            const nextType = body.type !== undefined ? body.type : existing.type;
+            const nextYear = body.year !== undefined ? body.year : existing.f_year;
+            let nextMonth = existing.month;
+            if (categoryId === "GST") {
+                nextMonth = body.month !== undefined ? body.month : existing.month;
+            } else if (body.month !== undefined && String(body.month).trim() !== "") {
+                await conn.rollback();
+                conn.release();
+                return res.status(400).json({
+                    success: false,
+                    message: "Month can only be updated for GST documents",
+                });
+            }
+
+            let nextFile = existing.file;
+            let nextSize = existing.size;
+            let nextMime = existing.mime_type;
+
+            const url = body.url;
+            if (url !== undefined && url !== null && String(url).trim() !== "") {
+                let uploadResult;
+                try {
+                    uploadResult = await downloadAndUploadProfileDocument(String(url).trim(), folder);
+                } catch (downloadErr) {
+                    await conn.rollback();
+                    await rollbackUploadedDocuments(savedFiles);
+                    conn.release();
+                    return res.status(400).json({
+                        success: false,
+                        message: `Failed to download document: ${downloadErr.message}`,
+                    });
+                }
+                uploadedFile = uploadResult.filename;
+                uploadedFolder = folder;
+                savedFiles.push({ filename: uploadedFile, categoryFolder: folder });
+                if (existing.file) {
+                    oldFileToDelete = String(existing.file);
+                    oldFileFolder = folder;
+                }
+                nextFile = uploadedFile;
+                nextSize = uploadResult.size;
+                nextMime = uploadResult.mimeType;
+            }
+
+            await conn.query(
+                `UPDATE documents
+                 SET firm_id = ?, name = ?, f_year = ?, type = ?, remark = ?, month = ?,
+                     file = ?, size = ?, mime_type = ?, modify_by = ?, modify_date = NOW()
+                 WHERE document_id = ? AND branch_id = ? AND username = ? AND is_deleted = '0'`,
+                [
+                    nextFirmId,
+                    nextName,
+                    nextYear,
+                    nextType,
+                    nextRemark,
+                    nextMonth,
+                    nextFile,
+                    nextSize,
+                    nextMime,
+                    modifyBy,
+                    documentId,
+                    branch_id,
+                    clientUsername,
+                ]
+            );
+        } else {
+            const folder = "general";
+            const firmCheck = await assertFirmInBranch(body.firm_id ?? existing.firm_id, branch_id);
+            if (!firmCheck.ok) {
+                await conn.rollback();
+                conn.release();
+                return res.status(firmCheck.status).json({ success: false, message: firmCheck.message });
+            }
+
+            const nextFirmId = body.firm_id !== undefined ? firmCheck.firm_id : existing.firm_id;
+            const nextName = body.name !== undefined ? body.name : existing.name;
+            const nextRemark = body.remark !== undefined ? body.remark : existing.remark;
+            let nextCategoryId = existing.category_id;
+
+            if (body.category_id !== undefined) {
+                const catId = String(body.category_id || "").trim();
+                if (!catId) {
+                    await conn.rollback();
+                    conn.release();
+                    return res.status(400).json({ success: false, message: "category_id is required" });
+                }
+                if (DOCUMENT_EDIT_RESERVED_CATEGORIES.has(catId.toUpperCase())) {
+                    await conn.rollback();
+                    conn.release();
+                    return res.status(400).json({ success: false, message: "Invalid category for general documents" });
+                }
+                const [catCheck] = await conn.query(
+                    `SELECT category_id FROM document_categories
+                     WHERE category_id = ? AND branch_id = ? AND is_deleted = '0' LIMIT 1`,
+                    [catId, branch_id]
+                );
+                if (catCheck.length === 0) {
+                    await conn.rollback();
+                    conn.release();
+                    return res.status(404).json({ success: false, message: "Category not found" });
+                }
+                nextCategoryId = catId;
+            }
+
+            if (body.type !== undefined || body.year !== undefined || body.month !== undefined) {
+                const hasExtra =
+                    (body.type !== undefined && String(body.type).trim() !== "") ||
+                    (body.year !== undefined && String(body.year).trim() !== "") ||
+                    (body.month !== undefined && String(body.month).trim() !== "");
+                if (hasExtra) {
+                    await conn.rollback();
+                    conn.release();
+                    return res.status(400).json({
+                        success: false,
+                        message: "General documents cannot update type, year, or month",
+                    });
+                }
+            }
+
+            let nextFile = existing.file;
+            let nextSize = existing.size;
+            let nextMime = existing.mime_type;
+
+            const url = body.url;
+            if (url !== undefined && url !== null && String(url).trim() !== "") {
+                let uploadResult;
+                try {
+                    uploadResult = await downloadAndUploadProfileDocument(String(url).trim(), folder);
+                } catch (downloadErr) {
+                    await conn.rollback();
+                    await rollbackUploadedDocuments(savedFiles);
+                    conn.release();
+                    return res.status(400).json({
+                        success: false,
+                        message: `Failed to download document: ${downloadErr.message}`,
+                    });
+                }
+                uploadedFile = uploadResult.filename;
+                uploadedFolder = folder;
+                savedFiles.push({ filename: uploadedFile, categoryFolder: folder });
+                if (existing.file) {
+                    oldFileToDelete = String(existing.file);
+                    oldFileFolder = folder;
+                }
+                nextFile = uploadedFile;
+                nextSize = uploadResult.size;
+                nextMime = uploadResult.mimeType;
+            }
+
+            await conn.query(
+                `UPDATE documents
+                 SET firm_id = ?, category_id = ?, name = ?, remark = ?,
+                     file = ?, size = ?, mime_type = ?, modify_by = ?, modify_date = NOW()
+                 WHERE document_id = ? AND branch_id = ? AND username = ? AND is_deleted = '0'`,
+                [
+                    nextFirmId,
+                    nextCategoryId,
+                    nextName,
+                    nextRemark,
+                    nextFile,
+                    nextSize,
+                    nextMime,
+                    modifyBy,
+                    documentId,
+                    branch_id,
+                    clientUsername,
+                ]
+            );
+        }
+
+        await conn.commit();
+        conn.release();
+        conn = null;
+
+        if (oldFileToDelete && oldFileFolder) {
+            try {
+                await deleteProfileDocument(oldFileFolder, oldFileToDelete);
+            } catch (_) { }
+        }
+
+        const [updatedRows] = await pool.query(
+            `SELECT * FROM documents WHERE document_id = ? AND branch_id = ? LIMIT 1`,
+            [documentId, branch_id]
+        );
+        const summary = await buildDocumentEditSummary(
+            updatedRows[0],
+            categoryFolderForDocumentCategory(updatedRows[0].category_id)
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Document updated successfully",
+            data: summary,
+        });
+    } catch (error) {
+        if (conn) {
+            try {
+                await conn.rollback();
+            } catch (_) { }
+            conn.release();
+        }
+        await rollbackUploadedDocuments(savedFiles);
+        console.error("Error editing document:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update document",
+            error: error.message,
         });
     }
 });
