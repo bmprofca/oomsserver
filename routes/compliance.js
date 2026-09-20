@@ -1494,7 +1494,7 @@ router.post("/change-task-status", auth, validateBranch, async (req, res) => {
                  (branch_id, task_id, task_type, compliance_year, compliance_period, username, firm_id, service_id,
                   has_ca, ca_id, fees, total, create_by, is_recurring,
                   due_date, target_date, billing_status, status, complete_date, complete_by, cancelled_date, cancelled_by)
-                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, 'compliance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, '0', ?, ?, ?, ?, ?)`,
                 [
                     branch_id,
                     taskId,
