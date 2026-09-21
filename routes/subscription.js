@@ -111,11 +111,11 @@ router.post("/verify-payment", auth, validateBranch, async (req, res) => {
             });
         }
 
-        if (!verifyRazorpayPaymentSignature({
+        if (!(await verifyRazorpayPaymentSignature({
             orderId: razorpay_order_id,
             paymentId: razorpay_payment_id,
             signature: razorpay_signature,
-        })) {
+        }))) {
             return res.status(400).json({
                 success: false,
                 message: "Payment signature verification failed. Untrusted request.",
@@ -245,7 +245,7 @@ router.post("/pay-from-wallet", auth, validateBranch, async (req, res) => {
         await debitWallet({
             branch_id: branchId,
             amount: amountRupees,
-            purpose: `Subscription: ${planName} (${cycle}, incl. GST)`,
+            remark: `Subscription: ${planName} (${cycle}, incl. GST)`,
             details: `Subscribed via wallet payment for branch ${branchId} by ${username}. Base ₹${baseAmountRupees}, GST ${GST_RATE * 100}%, total ₹${amountRupees}`,
             connection: conn,
         });

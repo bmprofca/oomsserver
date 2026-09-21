@@ -569,7 +569,7 @@ router.get("/:branch_id/subscriptions", authAdmin, async (req, res) => {
                 plan_name,
                 billing_cycle,
                 order_type,
-                purpose,
+                remark,
                 amount,
                 status
              FROM razorpay_orders
@@ -587,7 +587,7 @@ router.get("/:branch_id/subscriptions", authAdmin, async (req, res) => {
             plan_name: row.plan_name,
             billing_cycle: row.billing_cycle,
             order_type: row.order_type || "subscription",
-            purpose: row.purpose || null,
+            remark: row.remark || null,
             amount_paise: Number(row.amount) || 0,
             amount_rupees: Math.round(((Number(row.amount) || 0) / 100) * 100) / 100,
             status: row.status || "pending",

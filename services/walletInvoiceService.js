@@ -41,7 +41,7 @@ async function getBranchIssuer(branchId) {
 
 export async function generateWalletTransactionInvoice({ branchId, transactionId }) {
     const [rows] = await pool.query(
-        `SELECT transaction_id, branch_id, amount, type, purpose, details, create_date
+        `SELECT transaction_id, branch_id, amount, type, remark, details, create_date
          FROM wallet_transactions
          WHERE transaction_id = ? AND branch_id = ?
          LIMIT 1`,
@@ -67,13 +67,13 @@ export async function generateWalletTransactionInvoice({ branchId, transactionId
         amount: tx.amount,
         grand_total: tx.amount,
         tax_amount: 0,
-        remark: tx.details || "",
+        remark: tx.remark || tx.details || "",
     };
 
     const lines = [
         { label: "Transaction ID", value: tx.transaction_id },
         { label: "Type", value: typeLabel },
-        { label: "Purpose", value: tx.purpose || "-" },
+        { label: "Remark", value: tx.remark || "-" },
         { label: "Branch ID", value: branchId },
         { label: "Details", value: tx.details || "-" },
     ];
