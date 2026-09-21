@@ -14,3 +14,5 @@ project-context.txt
 exports/
 scratch/
 .well-known/
+*-firebase-adminsdk-*.json
+firebase-service-account*.json

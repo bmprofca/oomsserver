@@ -1,25 +1,81 @@
-﻿import "dotenv/config";
-import axios from "axios";
+import "dotenv/config";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { initializeApp, getApps, cert } from "firebase-admin/app";
+import { getMessaging } from "firebase-admin/messaging";
 import pool from "../db.js";
 
 /**
- * FCM Push Notification Helper (Legacy HTTP API)
+ * FCM Push Notification Helper (Firebase Admin SDK / HTTP v1 API)
  *
- * Uses FIREBASE_SERVER_KEY from .env to send push notifications
- * via the Firebase Cloud Messaging legacy HTTP endpoint.
+ * Uses Firebase Service Account JSON credentials to send push notifications.
  *
- * To get your server key:
- *   Firebase Console → Project Settings → Cloud Messaging → Server key
+ * Credentials can be provided via:
+ *   - FIREBASE_SERVICE_ACCOUNT_PATH (in .env, relative or absolute path)
+ *   - GOOGLE_APPLICATION_CREDENTIALS (in .env)
+ *   - FIREBASE_SERVICE_ACCOUNT_KEY (in .env, raw JSON string)
+ *   - Fallback to ooms-e7b32-firebase-adminsdk-fbsvc-ff7d1d9126.json in project root
  */
 
-const FCM_ENDPOINT = "https://fcm.googleapis.com/fcm/send";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, "..");
 
-function getServerKey() {
-    const key = process.env.FIREBASE_SERVER_KEY;
-    if (!key) {
-        console.warn("[FCM] FIREBASE_SERVER_KEY is not set in .env – push notifications will be skipped.");
+let messagingInstance = null;
+
+function getFirebaseMessaging() {
+    if (messagingInstance) {
+        return messagingInstance;
     }
-    return key || null;
+
+    try {
+        let serviceAccount = null;
+
+        // 1. Direct JSON string from env (useful for container/serverless deployments)
+        if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+            try {
+                serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+            } catch (e) {
+                console.error("[FCM] Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY JSON:", e.message);
+            }
+        }
+
+        // 2. Service account JSON file path
+        if (!serviceAccount) {
+            const credentialPath =
+                process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
+                process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+                "ooms-e7b32-firebase-adminsdk-fbsvc-ff7d1d9126.json";
+
+            const resolvedPath = path.isAbsolute(credentialPath)
+                ? credentialPath
+                : path.resolve(projectRoot, credentialPath);
+
+            if (fs.existsSync(resolvedPath)) {
+                const raw = fs.readFileSync(resolvedPath, "utf-8");
+                serviceAccount = JSON.parse(raw);
+            } else {
+                console.warn(`[FCM] Firebase service account file not found at: ${resolvedPath}`);
+            }
+        }
+
+        if (!serviceAccount) {
+            console.warn("[FCM] Firebase service account credentials not found – push notifications will be skipped.");
+            return null;
+        }
+
+        const app = getApps().length === 0
+            ? initializeApp({ credential: cert(serviceAccount) })
+            : getApps()[0];
+
+        messagingInstance = getMessaging(app);
+        console.log(`[FCM] Firebase Admin Messaging initialized for project: ${serviceAccount.project_id || "default"}`);
+        return messagingInstance;
+    } catch (err) {
+        console.error("[FCM] Failed to initialize Firebase Admin SDK:", err.message || err);
+        return null;
+    }
 }
 
 /**
@@ -30,8 +86,8 @@ function getServerKey() {
  * @param {object} payload   - { title, body, data? }
  */
 export async function sendPushToUser(username, panel, { title, body, data = {} }) {
-    const serverKey = getServerKey();
-    if (!serverKey) return;
+    const messaging = getFirebaseMessaging();
+    if (!messaging) return;
 
     try {
         // Fetch all tokens for this username+panel (multiple devices)
@@ -45,28 +101,36 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
         const tokens = rows.map((r) => String(r.fcm_token)).filter(Boolean);
         if (tokens.length === 0) return;
 
-        // FCM allows up to 1000 tokens per batch; split if needed
-        const BATCH_SIZE = 1000;
+        // Ensure all values in data payload are strings for FCM HTTP v1 / Admin SDK
+        const stringData = {};
+        if (data && typeof data === "object") {
+            for (const [k, v] of Object.entries(data)) {
+                if (v !== undefined && v !== null) {
+                    stringData[String(k)] = typeof v === "object" ? JSON.stringify(v) : String(v);
+                }
+            }
+        }
+        if (!stringData.click_action) {
+            stringData.click_action = "FLUTTER_NOTIFICATION_CLICK";
+        }
+
+        // FCM Admin SDK allows up to 500 tokens per batch with sendEachForMulticast
+        const BATCH_SIZE = 500;
         for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
             const batch = tokens.slice(i, i + BATCH_SIZE);
 
-            const payload = {
-                registration_ids: batch,
+            const message = {
+                tokens: batch,
                 notification: {
                     title: String(title || ""),
                     body: String(body || ""),
-                    sound: "default",
                 },
-                data: {
-                    ...data,
-                    click_action: "FLUTTER_NOTIFICATION_CLICK",
-                },
-                priority: "high",
+                data: stringData,
                 android: {
                     priority: "high",
                     notification: {
                         sound: "default",
-                        channel_id: "ooms_task_updates",
+                        channelId: "ooms_task_updates",
                     },
                 },
                 apns: {
@@ -76,23 +140,20 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
                 },
             };
 
-            const response = await axios.post(FCM_ENDPOINT, payload, {
-                headers: {
-                    Authorization: `key=${serverKey}`,
-                    "Content-Type": "application/json",
-                },
-                timeout: 10000,
-            });
+            const response = await messaging.sendEachForMulticast(message);
 
-            // Clean up stale tokens (NotRegistered / InvalidRegistration)
-            const results = response.data?.results || [];
+            // Clean up stale or unregistered tokens
             const staleTokens = [];
-            results.forEach((result, idx) => {
-                if (
-                    result.error === "NotRegistered" ||
-                    result.error === "InvalidRegistration"
-                ) {
-                    staleTokens.push(batch[idx]);
+            response.responses.forEach((resp, idx) => {
+                if (!resp.success && resp.error) {
+                    const errCode = resp.error.code;
+                    if (
+                        errCode === "messaging/registration-token-not-registered" ||
+                        errCode === "messaging/invalid-registration-token" ||
+                        errCode === "messaging/invalid-argument"
+                    ) {
+                        staleTokens.push(batch[idx]);
+                    }
                 }
             });
 
@@ -108,11 +169,11 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
             }
 
             console.log(
-                `[FCM] Sent to ${batch.length} token(s) for [${panel}] ${username} – success: ${response.data?.success}, failure: ${response.data?.failure}`
+                `[FCM] Sent to ${batch.length} token(s) for [${panel}] ${username} – success: ${response.successCount}, failure: ${response.failureCount}`
             );
         }
     } catch (err) {
-        console.error(`[FCM] Push to ${username}/${panel} failed:`, err?.response?.data || err?.message || err);
+        console.error(`[FCM] Push to ${username}/${panel} failed:`, err?.message || err);
     }
 }
 
