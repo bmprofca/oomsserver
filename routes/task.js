@@ -9,7 +9,7 @@ import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEma
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
 import { notifyTaskCreatedSms, notifyTaskCompletedSms } from "../helpers/smsNotification.js";
 import { notifyCaApprovalSent } from "../helpers/caApprovalEmail.js";
-import { notifyTaskStatusPush } from "../helpers/fcmPush.js";
+import { notifyTaskStatusPush, notifyTaskActionPush } from "../helpers/fcmPush.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
@@ -525,6 +525,19 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     notifyTaskCreatedEmail({ branch_id, task_id: item.task_id });
                     notifyTaskCreatedWhatsapp({ branch_id, task_id: item.task_id, created_by: username });
                     notifyTaskCreatedSms({ branch_id, task_id: item.task_id });
+
+                    notifyTaskActionPush({
+                        branch_id,
+                        task_id: item.task_id,
+                        task_username: item.assignment?.staff?.[0] || null,
+                        client_username: item.firm_id ? null : null,
+                        ca_username: item.assignment?.ca_id || null,
+                        action: "TASK_CREATED",
+                        title: "New Task Assigned",
+                        body: `A new task has been created for your account (${item.task_id}).`,
+                        status: "in process",
+                        updated_by: username,
+                    }).catch((err) => console.error("[FCM] Task create push error:", err?.message || err));
                 }
 
                 return res.status(200).json({
@@ -785,6 +798,19 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             notifyTaskCreatedEmail({ branch_id, task_id });
             notifyTaskCreatedWhatsapp({ branch_id, task_id, created_by: username });
             notifyTaskCreatedSms({ branch_id, task_id });
+
+            notifyTaskActionPush({
+                branch_id,
+                task_id,
+                task_username: legacyAssignment?.staff?.[0] || null,
+                client_username: firm_username || null,
+                ca_username: legacyAssignment?.ca_id || legacyAssignment?.ca || null,
+                action: "TASK_CREATED",
+                title: "New Task Assigned",
+                body: `A new task has been created for your account (${task_id}).`,
+                status: "in process",
+                updated_by: username,
+            }).catch((err) => console.error("[FCM] Task create push error:", err?.message || err));
 
             return res.status(200).json({
                 success: true,
@@ -3552,6 +3578,18 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
                         task_id: taskId,
                         completed_by: username || "system",
                     });
+                    notifyTaskActionPush({
+                        branch_id,
+                        task_id: taskId,
+                        task_username: null,
+                        client_username: null,
+                        ca_username: null,
+                        action: "TASK_COMPLETED",
+                        title: "Task Completed",
+                        body: `Task #${taskId} has been completed successfully.`,
+                        status: "complete",
+                        updated_by: username || "system",
+                    }).catch((err) => console.error("[FCM] Task complete push error:", err?.message || err));
                 } catch (emailError) {
                     console.error(`Failed to send completion notification for task ${taskId}:`, emailError);
                 }
@@ -3570,6 +3608,18 @@ router.put("/change-status", auth, validateBranch, async (req, res) => {
                         cancelled_by: username || "system",
                         cancel_reason: cancel_reason || null
                     });
+                    notifyTaskActionPush({
+                        branch_id,
+                        task_id: taskId,
+                        task_username: null,
+                        client_username: null,
+                        ca_username: null,
+                        action: "TASK_CANCELLED",
+                        title: "Task Cancelled",
+                        body: `Task #${taskId} has been cancelled.`,
+                        status: "cancel",
+                        updated_by: username || "system",
+                    }).catch((err) => console.error("[FCM] Task cancel push error:", err?.message || err));
                 } catch (emailError) {
                     console.error(`Failed to send cancellation email for task ${taskId}:`, emailError);
                 }

@@ -78,6 +78,102 @@ function getFirebaseMessaging() {
     }
 }
 
+export function buildPushNotificationPayload({
+    action,
+    title,
+    body,
+    panel = "enduser",
+    taskId,
+    requestId,
+    status,
+    type,
+    data = {},
+}) {
+    const safeType = String((type || action || "GENERIC_NOTIFICATION")).trim().toUpperCase();
+    const normalizedPanel = String(panel || "enduser").trim().toLowerCase();
+    const payloadData = { ...data, type: safeType, panel: normalizedPanel };
+
+    if (taskId !== undefined && taskId !== null && taskId !== "") {
+        payloadData.taskId = String(taskId);
+    }
+    if (requestId !== undefined && requestId !== null && requestId !== "") {
+        payloadData.requestId = String(requestId);
+    }
+    if (status !== undefined && status !== null && status !== "") {
+        payloadData.status = String(status);
+    }
+
+    return {
+        title: String(title || "OOMS Notification"),
+        body: String(body || "You have a new update."),
+        data: payloadData,
+    };
+}
+
+export function resolveNotificationTargets(action, context = {}) {
+    const {
+        clientUsername,
+        assignedUsername,
+        caUsername,
+        staffUsernames = [],
+        updatedBy,
+        username,
+        panel,
+    } = context;
+
+    const targets = [];
+    const seen = new Set();
+
+    const addTarget = (targetUsername, targetPanel) => {
+        if (!targetUsername) return;
+        const value = `${String(targetUsername).trim()}::${String(targetPanel || "enduser").trim().toLowerCase()}`;
+        if (seen.has(value)) return;
+        seen.add(value);
+        targets.push({ username: String(targetUsername).trim(), panel: String(targetPanel || "enduser").trim().toLowerCase() });
+    };
+
+    const shouldSkip = (targetUsername) => {
+        if (!targetUsername) return true;
+        return targetUsername === updatedBy || targetUsername === username;
+    };
+
+    switch (String(action || "").toUpperCase()) {
+        case "TASK_CREATED":
+        case "TASK_STATUS_UPDATED":
+        case "TASK_COMPLETED":
+        case "TASK_CANCELLED":
+            if (clientUsername && !shouldSkip(clientUsername)) addTarget(clientUsername, "client");
+            if (assignedUsername && !shouldSkip(assignedUsername)) addTarget(assignedUsername, "enduser");
+            if (caUsername && !shouldSkip(caUsername)) addTarget(caUsername, "ca");
+            for (const staffUsername of Array.isArray(staffUsernames) ? staffUsernames : []) {
+                if (!shouldSkip(staffUsername)) addTarget(staffUsername, "enduser");
+            }
+            break;
+
+        case "CA_APPROVAL_UPDATE":
+            if (clientUsername && !shouldSkip(clientUsername)) addTarget(clientUsername, "client");
+            if (caUsername && !shouldSkip(caUsername)) addTarget(caUsername, "ca");
+            if (assignedUsername && !shouldSkip(assignedUsername)) addTarget(assignedUsername, "enduser");
+            break;
+
+        case "DOCUMENT_SHARED":
+        case "SERVICE_REQUEST_UPDATE":
+        case "PAYMENT_REMINDER":
+            if (clientUsername && !shouldSkip(clientUsername)) addTarget(clientUsername, "client");
+            if (assignedUsername && !shouldSkip(assignedUsername)) addTarget(assignedUsername, "enduser");
+            if (caUsername && !shouldSkip(caUsername)) addTarget(caUsername, "ca");
+            break;
+
+        default:
+            if (panel && username) {
+                addTarget(username, panel);
+            }
+            break;
+    }
+
+    return targets;
+}
+
 /**
  * Send a push notification to ALL registered FCM tokens for a given username + panel.
  *
@@ -192,6 +288,48 @@ export async function sendPushToUsers(targets, payload) {
     );
 }
 
+export async function notifyTaskActionPush({
+    branch_id,
+    task_id,
+    task_username,
+    client_username,
+    ca_username,
+    staffUsernames = [],
+    action,
+    title,
+    body,
+    status,
+    updated_by,
+}) {
+    if (!task_id || !action || !title || !body) return;
+
+    const targets = resolveNotificationTargets(action, {
+        clientUsername: client_username || task_username,
+        assignedUsername: task_username,
+        caUsername: ca_username,
+        staffUsernames,
+        updatedBy: updated_by,
+    });
+
+    for (const target of targets) {
+        const payload = buildPushNotificationPayload({
+            action,
+            title,
+            body,
+            panel: target.panel,
+            taskId: task_id,
+            status,
+            data: {
+                branchId: branch_id ? String(branch_id) : undefined,
+            },
+        });
+
+        sendPushToUser(target.username, target.panel, payload).catch((err) =>
+            console.error(`[FCM] ${target.panel} push error for task ${task_id}:`, err?.message)
+        );
+    }
+}
+
 /**
  * Automatically find affected clients and assignees for tasks whose status changed,
  * and dispatch FCM push notifications.
@@ -233,33 +371,31 @@ export async function notifyTaskStatusPush({ branch_id, task_ids, status, update
             const serviceName = task.service_name || "Task";
             const taskLabel = `#${task.task_id} (${serviceName})`;
 
-            // 1. Notify client panel user
-            const clientUser = task.client_username || task.task_username;
-            if (clientUser && clientUser !== updated_by) {
-                sendPushToUser(clientUser, "client", {
-                    title: `Task Update: ${displayStatus}`,
-                    body: `Your task ${taskLabel} status has been updated to "${status}".`,
-                    data: {
-                        type: "TASK_STATUS_UPDATE",
-                        taskId: String(task.task_id),
-                        status: String(status),
-                        panel: "client",
-                    },
-                }).catch((err) => console.error(`[FCM] Client push error for task ${task.task_id}:`, err?.message));
-            }
+            const targets = resolveNotificationTargets("TASK_STATUS_UPDATED", {
+                clientUsername: task.client_username || task.task_username,
+                assignedUsername: task.task_username,
+                caUsername: task.ca_username || null,
+                updatedBy: updated_by,
+            });
 
-            // 2. Notify enduser/staff if assigned
-            if (task.task_username && task.task_username !== clientUser && task.task_username !== updated_by) {
-                sendPushToUser(task.task_username, "enduser", {
+            for (const target of targets) {
+                const payload = buildPushNotificationPayload({
+                    action: "TASK_STATUS_UPDATED",
                     title: `Task Update: ${displayStatus}`,
-                    body: `Task ${taskLabel} status has been updated to "${status}".`,
+                    body: target.panel === "client"
+                        ? `Your task ${taskLabel} status has been updated to "${status}".`
+                        : `Task ${taskLabel} status has been updated to "${status}".`,
+                    panel: target.panel,
+                    taskId: task.task_id,
+                    status,
                     data: {
-                        type: "TASK_STATUS_UPDATE",
-                        taskId: String(task.task_id),
-                        status: String(status),
-                        panel: "enduser",
+                        taskLabel,
                     },
-                }).catch((err) => console.error(`[FCM] Enduser push error for task ${task.task_id}:`, err?.message));
+                });
+
+                sendPushToUser(target.username, target.panel, payload).catch((err) =>
+                    console.error(`[FCM] ${target.panel} push error for task ${task.task_id}:`, err?.message)
+                );
             }
         }
     } catch (err) {
