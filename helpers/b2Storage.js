@@ -2,7 +2,7 @@ import "dotenv/config";
 import axios from "axios";
 import crypto from "crypto";
 import { RANDOM_STRING } from "./function.js";
-import { buildProfileDocumentUrl } from "./mediaUrl.js";
+import { buildExpenseAttachmentUrl, buildProfileDocumentUrl } from "./mediaUrl.js";
 
 const B2_BUCKET = process.env.B2_BUCKET || "OOMS-CRM";
 const B2_ACCESS_KEY = process.env.B2_ACCESS_KEY || "";
@@ -15,6 +15,7 @@ const DOCUMENT_BASE_PREFIX = "media/profile/document";
 const PROFILE_IMAGE_BASE_PREFIX = "media/profile/image";
 const BRANCH_LOGO_BASE_PREFIX = "media/branch/logo";
 const BRANCH_SIGN_BASE_PREFIX = "media/branch/sign";
+const EXPENSE_ATTACHMENT_BASE_PREFIX = "media/expense/attachment";
 const ALLOWED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
 const ALLOWED_IMAGE_MIME_TYPES = [
     "image/jpeg",
@@ -650,7 +651,7 @@ async function downloadAndUploadBranchSign(imageUrl, branchId) {
     return downloadAndUploadBranchAsset(imageUrl, "sign", branchId);
 }
 
-async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
+async function downloadRemoteFileBuffer(fileUrl) {
     if (!fileUrl || typeof fileUrl !== "string" || !fileUrl.trim()) {
         throw new Error("Invalid file URL");
     }
@@ -692,6 +693,11 @@ async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
         ext = MIME_TO_EXT[mimeType];
     }
 
+    return { buffer, mimeType, size, ext };
+}
+
+async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
+    const { buffer, mimeType, size, ext } = await downloadRemoteFileBuffer(fileUrl);
     const filename = `${RANDOM_STRING(30)}.${ext}`;
 
     try {
@@ -699,7 +705,82 @@ async function downloadAndUploadProfileDocument(fileUrl, categoryFolder) {
         return {
             filename: uploaded.filename,
             mimeType: uploaded.mimeType,
-            size: uploaded.size,
+            size: uploaded.size || size,
+            key: uploaded.key,
+        };
+    } catch (error) {
+        const message = error.response?.data?.message || error.response?.data?.code || error.message;
+        throw new Error(`Failed to upload to B2: ${message}`);
+    }
+}
+
+function getExpenseAttachmentObjectKey(filename) {
+    return `${EXPENSE_ATTACHMENT_BASE_PREFIX}/${filename}`;
+}
+
+async function uploadExpenseAttachmentBuffer(filename, buffer, mimeType) {
+    const key = getExpenseAttachmentObjectKey(filename);
+    const uploadUrlData = await getUploadUrl();
+    const sha1 = crypto.createHash("sha1").update(buffer).digest("hex");
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+
+    await axios.post(uploadUrlData.uploadUrl, buffer, {
+        headers: {
+            Authorization: uploadUrlData.authorizationToken,
+            "X-Bz-File-Name": encodedKey,
+            "X-Bz-Content-Sha1": sha1,
+            "Content-Type": mimeType || "application/octet-stream",
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 300000,
+    });
+
+    return {
+        filename,
+        key,
+        mimeType: mimeType || "application/octet-stream",
+        size: buffer.length,
+    };
+}
+
+async function deleteExpenseAttachment(filename) {
+    if (!filename) return;
+
+    const key = getExpenseAttachmentObjectKey(filename);
+    const bucketId = await getBucketId();
+    const listResponse = await b2Post("/b2api/v2/b2_list_file_names", {
+        bucketId,
+        startFileName: key,
+        maxFileCount: 100,
+        prefix: key,
+    });
+
+    const files = listResponse.files || [];
+    for (const file of files) {
+        if (file.fileName !== key) continue;
+
+        await b2Post("/b2api/v2/b2_delete_file_version", {
+            fileName: file.fileName,
+            fileId: file.fileId,
+        });
+    }
+}
+
+function getExpenseAttachmentAccessUrl(filename) {
+    return buildExpenseAttachmentUrl(filename);
+}
+
+async function downloadAndUploadExpenseAttachment(fileUrl) {
+    const { buffer, mimeType, size, ext } = await downloadRemoteFileBuffer(fileUrl);
+    const filename = `${RANDOM_STRING(30)}.${ext}`;
+
+    try {
+        const uploaded = await uploadExpenseAttachmentBuffer(filename, buffer, mimeType);
+        return {
+            filename: uploaded.filename,
+            mimeType: uploaded.mimeType,
+            size: uploaded.size || size,
             key: uploaded.key,
         };
     } catch (error) {
@@ -712,24 +793,30 @@ export {
     BRANCH_LOGO_BASE_PREFIX,
     BRANCH_SIGN_BASE_PREFIX,
     DOCUMENT_BASE_PREFIX,
+    EXPENSE_ATTACHMENT_BASE_PREFIX,
     PROFILE_IMAGE_BASE_PREFIX,
     buildBranchAssetFilename,
     deleteBranchAsset,
     deleteBranchAssetsForBranch,
+    deleteExpenseAttachment,
     deleteProfileDocument,
     deleteProfileImage,
     downloadAndUploadBranchAsset,
     downloadAndUploadBranchLogo,
     downloadAndUploadBranchSign,
+    downloadAndUploadExpenseAttachment,
     downloadAndUploadProfileDocument,
     downloadAndUploadProfileImage,
     downloadB2Object,
     downloadProfileDocument,
     downloadProfileImage,
     getBranchAssetObjectKey,
+    getExpenseAttachmentAccessUrl,
+    getExpenseAttachmentObjectKey,
     getProfileDocumentAccessUrl,
     getProfileDocumentObjectKey,
     getProfileImageAccessUrl,
     getProfileImageObjectKey,
+    uploadExpenseAttachmentBuffer,
     uploadProfileDocumentBuffer,
 };

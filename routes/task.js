@@ -314,13 +314,10 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 const total = gst.total;
 
                 const ca_id = assignmentPayload.ca_id ?? assignmentPayload.ca ?? null;
-                const agent_id = assignmentPayload.agent_id ?? assignmentPayload.agent ?? null;
                 const has_ca = ca_id ? "1" : "0";
-                const has_agent = agent_id ? "1" : "0";
                 const assignmentForDb = {
                     staff: assignmentPayload.staff ?? [],
                     ca_id: ca_id,
-                    agent_id: agent_id
                 };
 
                 const notesText = notesPayload?.text ?? null;
@@ -369,8 +366,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         service_id,
                         has_ca,
                         ca_id,
-                        has_agent,
-                        agent_id,
                         fees: finalFees,
                         total,
                         create_by: username,
@@ -647,9 +642,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
             const task_id = await UNIQUE_RANDOM_STRING("tasks", "task_id", { length: ID_LENGTH, conn });
             const ca_id = legacyAssignment?.ca_id ?? legacyAssignment?.ca ?? null;
-            const agent_id = legacyAssignment?.agent_id ?? legacyAssignment?.agent ?? null;
             const has_ca = ca_id ? "1" : "0";
-            const has_agent = agent_id ? "1" : "0";
             const legacyStaffIds = Array.isArray(legacyAssignment?.staff) ? legacyAssignment.staff : [];
             const taskStatusLegacy = "in process";
 
@@ -661,8 +654,6 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 service_id: service_id_legacy,
                 has_ca,
                 ca_id,
-                has_agent,
-                agent_id,
                 fees: finalFees,
                 total,
                 create_by: username,
@@ -870,7 +861,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             status,
             service_ids,
             ca,
-            agent,
             ca_approval,
         } = req.query || {};
 
@@ -934,12 +924,10 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             baseQuery += " AND t.has_ca = '1' AND t.ca_id = ?";
             params.push(String(ca).trim());
         }
-        if (agent && String(agent).trim() !== "") {
-            baseQuery += " AND t.has_agent = '1' AND t.agent_id = ?";
-            params.push(String(agent).trim());
-        }
         if (caApprovalList.length > 0) {
             const caApprovalPlaceholders = caApprovalList.map(() => "?").join(", ");
+            // CA approval filter only applies to tasks that have a CA assigned
+            baseQuery += ` AND t.has_ca = '1' AND t.ca_id IS NOT NULL AND TRIM(t.ca_id) <> ''`;
             baseQuery += ` AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) IN (${caApprovalPlaceholders})`;
             params.push(...caApprovalList);
         }
@@ -984,8 +972,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 t.has_ca,
                 t.ca_id,
                 t.ca_approval,
-                t.has_agent,
-                t.agent_id,
                 t.fees,
                 t.total,
                 t.due_date,
@@ -1082,13 +1068,6 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             if (has_ca) {
                 const ca_data = await USER_SNIPPED_DATA(element?.ca_id);
                 object.ca = ca_data;
-            }
-
-            const has_agent = element?.has_agent == '1';
-            object.has_agent = has_agent;
-            if (has_agent) {
-                const agent_data = await USER_SNIPPED_DATA(element?.agent_id);
-                object.agent = agent_data;
             }
 
             const inUser = normalizeInUser(element?.in_user);
@@ -1315,7 +1294,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
             service_id,
             fees,
             ca,
-            agent,
             due_date,
             target_date,
             complete_date
@@ -1352,7 +1330,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         let AllowFeesChange = false;
         let AllowCaChange = false;
-        let AllowAgentChange = false;
         let AllowDueDateChange = false;
         let AllowTargetDateChange = false;
         let AllowCompleteDateChange = false;
@@ -1386,7 +1363,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         if (isBillingPending) {
             AllowFeesChange = true;
             AllowCaChange = true;
-            AllowAgentChange = true;
             AllowDueDateChange = true;
             AllowTargetDateChange = true;
         } else if (isBillingComplete || isNonBillable) {
@@ -1433,27 +1409,6 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
                 if (String(task_data.has_ca) === "1" || task_data.ca_id) {
                     await conn.query(
                         "UPDATE tasks SET has_ca = '0', ca_id = NULL, ca_approval = 'pending' WHERE task_id = ? AND branch_id = ?",
-                        [task_id, branch_id]
-                    );
-                }
-            }
-        }
-        // Keep has_agent / agent_id in sync
-        if (agent && AllowAgentChange) {
-            if (agent.has_agent && agent.agent_id) {
-                const nextAgentId = String(agent.agent_id).trim();
-                const prevAgentId = task_data.agent_id != null ? String(task_data.agent_id).trim() : "";
-                const prevHasAgent = String(task_data.has_agent) === "1";
-                if (nextAgentId && (!prevHasAgent || nextAgentId !== prevAgentId)) {
-                    await conn.query(
-                        "UPDATE tasks SET has_agent = '1', agent_id = ? WHERE task_id = ? AND branch_id = ?",
-                        [nextAgentId, task_id, branch_id]
-                    );
-                }
-            } else if (!agent.has_agent) {
-                if (String(task_data.has_agent) === "1" || task_data.agent_id) {
-                    await conn.query(
-                        "UPDATE tasks SET has_agent = '0', agent_id = NULL WHERE task_id = ? AND branch_id = ?",
                         [task_id, branch_id]
                     );
                 }
@@ -1598,8 +1553,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
           t.ca_id,
           t.ca_approval,
           t.udin,
-          t.has_agent,
-          t.agent_id,
           t.fees,
           t.total,
           t.due_date,
@@ -1734,12 +1687,6 @@ router.get("/details/profile", auth, validateBranch, async (req, res) => {
         object.udin = element?.udin ?? null;
         if (has_ca) {
             object.ca = await USER_SNIPPED_DATA(element?.ca_id);
-        }
-
-        const has_agent = element?.has_agent == "1";
-        object.has_agent = has_agent;
-        if (has_agent) {
-            object.agent = await USER_SNIPPED_DATA(element?.agent_id);
         }
 
         if (element?.billing_status == "1") {
@@ -5032,44 +4979,193 @@ router.post("/ca-billing/cancel", auth, validateBranch, async (req, res) => {
 });
 
 /**
- * Header notifications: CA approval complete but task still open.
- * GET /task/notifications
- * Query: limit? (default 20, max 50)
+ * Header notifications:
+ * - CA approval complete while task still open
+ * - Incoming (SHARABLE) documents uploaded by end clients
  *
- * Filters:
- * - ca_approval = 'complete'
- * - status NOT IN ('complete', 'cancel')
+ * Read state is stored in staff_notification_reads (badge = unread only).
+ * Deleted items are stored in staff_notification_deletes (hidden from menu).
+ *
+ * GET  /task/notifications?limit=
+ * POST /task/notifications/read    { notification_ids?: string[], notification_id?: string, mark_all?: boolean }
+ * POST /task/notifications/delete  { notification_ids?: string[], notification_id?: string, delete_all?: boolean }
  */
-router.get("/notifications", auth, validateBranch, async (req, res) => {
-    try {
-        const branch_id = req.branch_id;
-        const limitNum = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+const NOTIF_READS_ENSURE_SQL = `
+CREATE TABLE IF NOT EXISTS staff_notification_reads (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  branch_id VARCHAR(50) NOT NULL,
+  username VARCHAR(100) NOT NULL,
+  notification_id VARCHAR(100) NOT NULL,
+  read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_staff_notif_read (branch_id, username, notification_id),
+  KEY idx_staff_notif_branch_user (branch_id, username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
 
-        const whereSql = `
-            FROM tasks t
-            LEFT JOIN services s ON s.service_id = t.service_id
-            LEFT JOIN firms f
-                ON f.firm_id = t.firm_id
-               AND (f.is_deleted = '0' OR f.is_deleted = 0)
-            LEFT JOIN profile cp
-                ON cp.username = t.username
-               AND cp.id = (
-                    SELECT MAX(cp2.id)
-                    FROM profile cp2
-                    WHERE cp2.username = t.username
-               )
-            WHERE t.branch_id = ?
-              AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
-              AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
-        `;
+const NOTIF_DELETES_ENSURE_SQL = `
+CREATE TABLE IF NOT EXISTS staff_notification_deletes (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  branch_id VARCHAR(50) NOT NULL,
+  username VARCHAR(100) NOT NULL,
+  notification_id VARCHAR(100) NOT NULL,
+  deleted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_staff_notif_delete (branch_id, username, notification_id),
+  KEY idx_staff_notif_del_branch_user (branch_id, username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
 
-        const [[countRow]] = await pool.query(
-            `SELECT COUNT(*) AS total ${whereSql}`,
-            [branch_id]
-        );
-        const total = Number(countRow?.total) || 0;
+const NOTIF_COLLATION_SQLS = [
+    `ALTER TABLE staff_notification_reads
+      CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    `ALTER TABLE staff_notification_deletes
+      CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+];
 
-        const [rows] = await pool.query(
+let staffNotificationTablesReady = false;
+async function ensureStaffNotificationTables() {
+    if (staffNotificationTablesReady) return;
+    await pool.query(NOTIF_READS_ENSURE_SQL);
+    await pool.query(NOTIF_DELETES_ENSURE_SQL);
+    for (const sql of NOTIF_COLLATION_SQLS) {
+        try {
+            await pool.query(sql);
+        } catch (_) {
+            /* ignore if already matching / no permission */
+        }
+    }
+    staffNotificationTablesReady = true;
+}
+
+function notificationStaffUsername(req) {
+    return String(req.headers["username"] || req.headers["Username"] || "").trim();
+}
+
+function normalizeNotificationIds(rawIds) {
+    return [...new Set(
+        (rawIds || [])
+            .map((id) => String(id || "").trim())
+            .filter((id) => id.length > 0 && id.length <= 100)
+    )];
+}
+
+async function buildHeaderNotifications(branch_id, staffUsername, limitNum) {
+    await ensureStaffNotificationTables();
+
+    // Visible list: exclude deleted only (read items still appear).
+    const caListWhereSql = `
+        FROM tasks t
+        LEFT JOIN services s ON s.service_id = t.service_id
+        LEFT JOIN firms f
+            ON f.firm_id = t.firm_id
+           AND (f.is_deleted = '0' OR f.is_deleted = 0)
+        LEFT JOIN profile cp
+            ON cp.username = t.username
+           AND cp.id = (
+                SELECT MAX(cp2.id)
+                FROM profile cp2
+                WHERE cp2.username = t.username
+           )
+        LEFT JOIN staff_notification_reads nr
+            ON nr.branch_id = ?
+           AND nr.username = ?
+           AND nr.notification_id = CONCAT('ca-complete-', t.task_id)
+        WHERE t.branch_id = ?
+          AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
+          AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM staff_notification_deletes nd
+            WHERE nd.branch_id = ?
+              AND nd.username = ?
+              AND nd.notification_id = CONCAT('ca-complete-', t.task_id)
+          )
+    `;
+
+    const incomingListWhereSql = `
+        FROM documents d
+        LEFT JOIN firms f
+            ON f.firm_id = d.firm_id
+           AND f.branch_id = d.branch_id
+           AND (f.is_deleted = '0' OR f.is_deleted = 0)
+        LEFT JOIN profile cp
+            ON cp.username = d.username
+           AND cp.id = (
+                SELECT MAX(cp2.id)
+                FROM profile cp2
+                WHERE cp2.username = d.username
+           )
+        LEFT JOIN staff_notification_reads nr
+            ON nr.branch_id = ?
+           AND nr.username = ?
+           AND nr.notification_id = CONCAT('incoming-doc-', d.document_id)
+        WHERE d.branch_id = ?
+          AND d.category_id = 'SHARABLE'
+          AND (d.is_deleted = '0' OR d.is_deleted = 0)
+          AND d.create_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM staff_notification_deletes nd
+            WHERE nd.branch_id = ?
+              AND nd.username = ?
+              AND nd.notification_id = CONCAT('incoming-doc-', d.document_id)
+          )
+    `;
+
+    // Unread badge: exclude deleted AND already-read.
+    const caUnreadWhereSql = `
+        FROM tasks t
+        WHERE t.branch_id = ?
+          AND LOWER(TRIM(COALESCE(t.ca_approval, 'pending'))) = 'complete'
+          AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('complete', 'cancel')
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_notification_deletes nd
+            WHERE nd.branch_id = ? AND nd.username = ?
+              AND nd.notification_id = CONCAT('ca-complete-', t.task_id)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_notification_reads nr
+            WHERE nr.branch_id = ? AND nr.username = ?
+              AND nr.notification_id = CONCAT('ca-complete-', t.task_id)
+          )
+    `;
+
+    const incomingUnreadWhereSql = `
+        FROM documents d
+        WHERE d.branch_id = ?
+          AND d.category_id = 'SHARABLE'
+          AND (d.is_deleted = '0' OR d.is_deleted = 0)
+          AND d.create_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_notification_deletes nd
+            WHERE nd.branch_id = ? AND nd.username = ?
+              AND nd.notification_id = CONCAT('incoming-doc-', d.document_id)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_notification_reads nr
+            WHERE nr.branch_id = ? AND nr.username = ?
+              AND nr.notification_id = CONCAT('incoming-doc-', d.document_id)
+          )
+    `;
+
+    // list params: nr.branch, nr.user, t.branch, nd.branch, nd.user
+    const listParams = [branch_id, staffUsername, branch_id, branch_id, staffUsername];
+    const unreadParams = [branch_id, branch_id, staffUsername, branch_id, staffUsername];
+
+    const [
+        caTotalResult,
+        incomingTotalResult,
+        caUnreadResult,
+        incomingUnreadResult,
+        caListResult,
+        incomingListResult,
+    ] = await Promise.all([
+        pool.query(`SELECT COUNT(*) AS total ${caListWhereSql}`, listParams),
+        pool.query(`SELECT COUNT(*) AS total ${incomingListWhereSql}`, listParams),
+        pool.query(`SELECT COUNT(*) AS total ${caUnreadWhereSql}`, unreadParams),
+        pool.query(`SELECT COUNT(*) AS total ${incomingUnreadWhereSql}`, unreadParams),
+        pool.query(
             `SELECT
                 t.task_id,
                 t.username,
@@ -5080,47 +5176,256 @@ router.get("/notifications", auth, validateBranch, async (req, res) => {
                 t.due_date,
                 s.name AS service_name,
                 f.firm_name,
-                cp.name AS client_name
-             ${whereSql}
-             ORDER BY t.create_date DESC, t.id DESC
+                cp.name AS client_name,
+                (nr.id IS NOT NULL) AS is_read
+             ${caListWhereSql}
+             ORDER BY (nr.id IS NULL) DESC, t.create_date DESC, t.id DESC
              LIMIT ?`,
-            [branch_id, limitNum]
-        );
+            [...listParams, limitNum]
+        ),
+        pool.query(
+            `SELECT
+                d.document_id,
+                d.username,
+                d.name AS document_name,
+                d.remark,
+                d.firm_id,
+                d.create_date,
+                f.firm_name,
+                cp.name AS client_name,
+                (nr.id IS NOT NULL) AS is_read
+             ${incomingListWhereSql}
+             ORDER BY (nr.id IS NULL) DESC, d.create_date DESC, d.id DESC
+             LIMIT ?`,
+            [...listParams, limitNum]
+        ),
+    ]);
 
-        const notifications = (rows || []).map((row) => {
-            const serviceName = row.service_name || "Task";
-            const clientName = row.client_name || row.username || "Client";
-            const firmName = row.firm_name || "";
-            return {
-                id: `ca-complete-${row.task_id}`,
-                type: "ca_approval_complete",
-                title: "CA approval complete",
-                message: `${serviceName} for ${clientName} is CA-approved but the task is still ${row.status || "open"}.`,
-                task_id: row.task_id,
-                status: row.status || null,
-                ca_approval: row.ca_approval || "complete",
-                udin: row.udin || null,
-                service_name: serviceName,
-                client_name: clientName,
-                firm_name: firmName,
-                path: `/task/profile/${encodeURIComponent(row.task_id)}/details`,
-                at: row.create_date || null,
-            };
-        });
+    const caTotal = Number(caTotalResult?.[0]?.[0]?.total) || 0;
+    const incomingTotal = Number(incomingTotalResult?.[0]?.[0]?.total) || 0;
+    const unreadCount =
+        (Number(caUnreadResult?.[0]?.[0]?.total) || 0) +
+        (Number(incomingUnreadResult?.[0]?.[0]?.total) || 0);
+
+    const caNotifications = (caListResult?.[0] || []).map((row) => {
+        const serviceName = row.service_name || "Task";
+        const clientName = row.client_name || row.username || "Client";
+        const firmName = row.firm_name || "";
+        return {
+            id: `ca-complete-${row.task_id}`,
+            type: "ca_approval_complete",
+            title: "CA approval complete",
+            message: `${serviceName} for ${clientName} is CA-approved but the task is still ${row.status || "open"}.`,
+            task_id: row.task_id,
+            document_id: null,
+            username: row.username || null,
+            status: row.status || null,
+            ca_approval: row.ca_approval || "complete",
+            udin: row.udin || null,
+            service_name: serviceName,
+            document_name: null,
+            client_name: clientName,
+            firm_name: firmName,
+            path: `/task/profile/${encodeURIComponent(row.task_id)}/details`,
+            at: row.create_date || null,
+            is_read: Boolean(Number(row.is_read)),
+        };
+    });
+
+    const incomingNotifications = (incomingListResult?.[0] || []).map((row) => {
+        const clientName = row.client_name || row.username || "Client";
+        const docName = row.document_name || "Document";
+        const firmName = row.firm_name || "";
+        const username = row.username || "";
+        return {
+            id: `incoming-doc-${row.document_id}`,
+            type: "incoming_document",
+            title: "Incoming document uploaded",
+            message: `${clientName} uploaded "${docName}"${firmName ? ` (${firmName})` : ""}.`,
+            task_id: null,
+            document_id: row.document_id,
+            username,
+            status: null,
+            ca_approval: null,
+            udin: null,
+            service_name: null,
+            document_name: docName,
+            client_name: clientName,
+            firm_name: firmName,
+            path: username
+                ? `/client/profile/${encodeURIComponent(username)}/documents?docTab=sharable`
+                : null,
+            at: row.create_date || null,
+            is_read: Boolean(Number(row.is_read)),
+        };
+    });
+
+    const merged = [...caNotifications, ...incomingNotifications].sort((a, b) => {
+        // Unread first, then newest
+        if (Boolean(a.is_read) !== Boolean(b.is_read)) {
+            return a.is_read ? 1 : -1;
+        }
+        const aTime = a.at ? new Date(a.at).getTime() : 0;
+        const bTime = b.at ? new Date(b.at).getTime() : 0;
+        return bTime - aTime;
+    });
+
+    return {
+        count: unreadCount,
+        unread_count: unreadCount,
+        total: caTotal + incomingTotal,
+        notifications: merged.slice(0, limitNum),
+    };
+}
+
+router.get("/notifications", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = notificationStaffUsername(req);
+        if (!staffUsername) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired",
+            });
+        }
+
+        const limitNum = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+        const data = await buildHeaderNotifications(branch_id, staffUsername, limitNum);
 
         return res.status(200).json({
             success: true,
             message: "Notifications fetched successfully",
-            data: {
-                count: total,
-                notifications,
-            },
+            data,
         });
     } catch (error) {
         console.error("Task notifications error:", error);
         return res.status(500).json({
             success: false,
             message: "Failed to fetch notifications",
+            error: error.message,
+        });
+    }
+});
+
+router.post("/notifications/read", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = notificationStaffUsername(req);
+        if (!staffUsername) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired",
+            });
+        }
+
+        await ensureStaffNotificationTables();
+
+        const body = req.body || {};
+        let ids = [];
+
+        if (body.mark_all === true || body.mark_all === "1" || body.mark_all === 1) {
+            const { notifications } = await buildHeaderNotifications(
+                branch_id,
+                staffUsername,
+                50
+            );
+            ids = (notifications || [])
+                .filter((n) => !n.is_read)
+                .map((n) => n.id)
+                .filter(Boolean);
+        } else if (Array.isArray(body.notification_ids)) {
+            ids = body.notification_ids;
+        } else if (body.notification_id != null) {
+            ids = [body.notification_id];
+        }
+
+        ids = normalizeNotificationIds(ids);
+
+        if (ids.length === 0) {
+            return res.status(200).json({
+                success: true,
+                message: "No unread notifications to mark",
+                data: { marked: 0, notification_ids: [] },
+            });
+        }
+
+        const values = ids.map((id) => [branch_id, staffUsername, id]);
+        await pool.query(
+            `INSERT IGNORE INTO staff_notification_reads (branch_id, username, notification_id)
+             VALUES ?`,
+            [values]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Notifications marked as read",
+            data: { marked: ids.length, notification_ids: ids },
+        });
+    } catch (error) {
+        console.error("Mark notifications read error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to mark notifications as read",
+            error: error.message,
+        });
+    }
+});
+
+router.post("/notifications/delete", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const staffUsername = notificationStaffUsername(req);
+        if (!staffUsername) {
+            return res.status(401).json({
+                success: false,
+                message: "Session expired",
+            });
+        }
+
+        await ensureStaffNotificationTables();
+
+        const body = req.body || {};
+        let ids = [];
+
+        if (body.delete_all === true || body.delete_all === "1" || body.delete_all === 1) {
+            const { notifications } = await buildHeaderNotifications(
+                branch_id,
+                staffUsername,
+                50
+            );
+            ids = (notifications || []).map((n) => n.id).filter(Boolean);
+        } else if (Array.isArray(body.notification_ids)) {
+            ids = body.notification_ids;
+        } else if (body.notification_id != null) {
+            ids = [body.notification_id];
+        }
+
+        ids = normalizeNotificationIds(ids);
+
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No notification ids provided",
+            });
+        }
+
+        const values = ids.map((id) => [branch_id, staffUsername, id]);
+        await pool.query(
+            `INSERT IGNORE INTO staff_notification_deletes (branch_id, username, notification_id)
+             VALUES ?`,
+            [values]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Notifications deleted",
+            data: { deleted: ids.length, notification_ids: ids },
+        });
+    } catch (error) {
+        console.error("Delete notifications error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete notifications",
             error: error.message,
         });
     }

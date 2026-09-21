@@ -110,7 +110,7 @@ async function insertRow(db, tableName, data) {
 
 
 
-const SALE_PARTY_TYPES = ["client", "ca", "staff", "agent", "bank", "capital"];
+const SALE_PARTY_TYPES = ["client", "ca", "staff", "bank", "capital"];
 
 async function validateAndNormalizeSaleItems(branch_id, items) {
     if (!Array.isArray(items) || items.length === 0) {

@@ -7,7 +7,6 @@ import apiRoutes from "./routes/index.js";
 import adminRoutes from "./routes_admin/index.js";
 import clientPortalRoutes from "./routes_client/index.js";
 import caPortalRoutes from "./routes_ca/index.js";
-import agentPortalRoutes from "./routes_agent/index.js";
 import http from "http";
 import { setupSocketIO } from "./helpers/Socket.js";
 import { generateDatabaseContext } from "./helpers/DatabaseContext.js";
@@ -75,7 +74,6 @@ app.use("/api/v1", apiRoutes);
 app.use("/admin", adminRoutes);
 app.use("/client", clientPortalRoutes);
 app.use("/ca", caPortalRoutes);
-app.use("/agent", agentPortalRoutes);
 
 app.use("/public", publicRoutes);
 

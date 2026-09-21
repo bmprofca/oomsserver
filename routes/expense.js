@@ -6,7 +6,7 @@ import { UNIQUE_RANDOM_STRING, ID_LENGTH, TODAY_DATE, USER_SNIPPED_DATA, BANK_SN
 const router = express.Router();
 
 const EXPENSE_ITEM_TYPES_ALLOWED = ["direct", "indirect", "reimbursement"];
-const ALLOWED_DISCOUNT_PARTY_TYPES = ["client", "ca", "staff", "agent"];
+const ALLOWED_DISCOUNT_PARTY_TYPES = ["client", "ca", "staff"];
 const DISCOUNT_RESERVED_ITEM_NAME = "Discount";
 
 const ensureDiscountExpenseItem = async (connection, branch_id, username) => {
@@ -824,6 +824,21 @@ router.put("/entry/edit", auth, validateBranch, async (req, res) => {
         if (!expenseRows?.length) {
             return res.status(404).json({ success: false, message: "Expense entry not found" });
         }
+
+        const [staffClaimRows] = await pool.query(
+            `SELECT expense_id FROM staff_expenses
+             WHERE branch_id = ? AND linked_expense_id = ? AND is_deleted = '0'
+               AND create_by = staff_username
+             LIMIT 1`,
+            [branch_id, expenseIdVal]
+        );
+        if (staffClaimRows?.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Staff-submitted expenses cannot be edited. Manage them from Staff Expenses.",
+            });
+        }
+
         const expenseRow = expenseRows[0];
         const transaction_id = expenseRow.transaction_id;
         const invoice_id = expenseRow.invoice_id;
@@ -1029,7 +1044,16 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 ee.invoice_id, ee.invoice_no, ee.transaction_id,
                 ee.create_by, ee.modify_by, ee.create_date, ee.modify_date,
                 t.remark,
-                DATE_FORMAT(t.transaction_date, '%Y-%m-%d') AS transaction_date
+                DATE_FORMAT(t.transaction_date, '%Y-%m-%d') AS transaction_date,
+                (
+                    SELECT se.expense_id
+                    FROM staff_expenses se
+                    WHERE se.branch_id = ee.branch_id
+                      AND se.linked_expense_id = ee.expense_id
+                      AND se.is_deleted = '0'
+                      AND se.create_by = se.staff_username
+                    LIMIT 1
+                ) AS staff_claim_id
              FROM expense_entries ee
              ${joinTransactions}
              WHERE ${whereClause}
@@ -1085,6 +1109,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 invoice_no: row.invoice_no,
                 items: entryItems,
                 item: primaryItem,
+                from_staff_expense: Boolean(row.staff_claim_id),
                 expense_party: {
                     type: row.party_type,
                     details: party,

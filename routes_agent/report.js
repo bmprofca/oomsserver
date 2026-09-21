@@ -1,5 +1,4 @@
 import express from "express";
-import pool from "../db.js";
 import { GET_BALANCE } from "../helpers/function.js";
 import { validateAgentSession } from "../middleware/validateAgentSession.js";
 
@@ -10,49 +9,15 @@ router.get("/dashboard", validateAgentSession, async (req, res) => {
         const branch_id = req.branch_id;
         const username = req.agent_username;
 
-        const [balanceResult, taskResult, firmResult] = await Promise.all([
-            GET_BALANCE({
-                branch_id,
-                party_id: username,
-                party_type: "agent",
-            }),
-            pool.query(
-                `SELECT
-                    COUNT(*) AS total,
-                    COALESCE(SUM(CASE WHEN status = 'in process' THEN 1 ELSE 0 END), 0) AS in_process,
-                    COALESCE(SUM(CASE WHEN status = 'pending from client' THEN 1 ELSE 0 END), 0) AS pending_from_client,
-                    COALESCE(SUM(CASE WHEN status = 'pending from department' THEN 1 ELSE 0 END), 0) AS pending_from_department,
-                    COALESCE(SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END), 0) AS complete,
-                    COALESCE(SUM(CASE WHEN status = 'cancel' THEN 1 ELSE 0 END), 0) AS cancel
-                 FROM tasks
-                 WHERE branch_id = ?
-                   AND has_agent = '1'
-                   AND agent_id = ?`,
-                [branch_id, username]
-            ),
-            pool.query(
-                `SELECT
-                    COUNT(*) AS total,
-                    COALESCE(SUM(CASE WHEN status = '1' THEN 1 ELSE 0 END), 0) AS active,
-                    COALESCE(SUM(CASE WHEN status = '0' THEN 1 ELSE 0 END), 0) AS inactive
-                 FROM (
-                    SELECT DISTINCT f.firm_id, f.status
-                    FROM tasks t
-                    INNER JOIN firms f
-                        ON f.firm_id = t.firm_id
-                        AND f.branch_id = t.branch_id
-                        AND (f.is_deleted = '0' OR f.is_deleted = 0)
-                    WHERE t.branch_id = ?
-                      AND t.has_agent = '1'
-                      AND t.agent_id = ?
-                 ) AS agent_firms`,
-                [branch_id, username]
-            ),
-        ]);
+        const balanceResult = await GET_BALANCE({
+            branch_id,
+            party_id: username,
+            party_type: "agent",
+        });
 
         const num = (value) => Number(value) || 0;
-        const tasks = taskResult[0]?.[0] || {};
-        const firms = firmResult[0]?.[0] || {};
+        const tasks = {};
+        const firms = {};
 
         return res.status(200).json({
             success: true,

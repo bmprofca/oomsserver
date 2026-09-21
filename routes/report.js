@@ -1221,8 +1221,6 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 t.has_ca,
                 t.ca_id,
                 t.ca_approval,
-                t.has_agent,
-                t.agent_id,
                 t.target_date,
                 t.in_user,
                 s.name as service_name,
@@ -1314,8 +1312,6 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 CASE WHEN cs.invoice_id IS NOT NULL THEN '1' ELSE '0' END AS billing_status,
                 CASE WHEN ca.ca_id IS NOT NULL THEN '1' ELSE '0' END AS has_ca,
                 ca.ca_id,
-                '0' AS has_agent,
-                NULL AS agent_id,
                 NULL AS target_date,
                 NULL AS in_user,
                 s.name AS service_name,
@@ -1477,16 +1473,11 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                 }
             }
 
-            // Get CA and Agent details
+            // Get CA details
             let caDetails = null;
-            let agentDetails = null;
 
             if (task.has_ca === '1' && task.ca_id) {
                 caDetails = await USER_SNIPPED_DATA(task.ca_id);
-            }
-
-            if (task.has_agent === '1' && task.agent_id) {
-                agentDetails = await USER_SNIPPED_DATA(task.agent_id);
             }
 
             // Get subtasks for this task
@@ -1664,7 +1655,7 @@ router.get("/task-detailed", auth, validateBranch, async (req, res) => {
                     ca_approval: (task.has_ca === '1' && task.ca_id && task.ca_approval != null)
                         ? (task.ca_approval || 'pending')
                         : null,
-                    agent: agentDetails,
+                    agent: null,
                     staff_count: staffList.length,
                     staff: staffList
                 },
@@ -1882,16 +1873,7 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
         );
         const totalCa = totalCaResult[0]?.total || 0;
 
-        // 10. Total Agent
-        const [totalAgentResult] = await pool.query(
-            `SELECT COUNT(*) as total
-             FROM clients
-             WHERE branch_id = ?
-               AND user_type = 'agent'
-               AND (is_deleted = '0' OR is_deleted = 0)`,
-            [branch_id]
-        );
-        const totalAgent = totalAgentResult[0]?.total || 0;
+        const totalAgent = 0;
 
         // 11. Total Firms
         const [totalFirmsResult] = await pool.query(
@@ -1912,6 +1894,44 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
             [branch_id]
         );
         const totalServices = totalServicesResult[0]?.total || 0;
+
+        // 13. Pending staff expenses (count + amount)
+        let pendingStaffExpense = 0;
+        let pendingStaffExpenseAmount = 0;
+        try {
+            const [pendingStaffExpenseResult] = await pool.query(
+                `SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(amount), 0) AS total_amount
+                 FROM staff_expenses
+                 WHERE branch_id = ?
+                   AND is_deleted = '0'
+                   AND status = '0'`,
+                [branch_id]
+            );
+            pendingStaffExpense = Number(pendingStaffExpenseResult[0]?.total_count) || 0;
+            pendingStaffExpenseAmount = parseFloat(pendingStaffExpenseResult[0]?.total_amount || 0);
+        } catch (err) {
+            console.log("Could not load pending staff expenses:", err.message);
+        }
+
+        // Today Birthday count (clients celebrating today)
+        let todayBirthday = 0;
+        try {
+            const [todayBirthdayResult] = await pool.query(
+                `SELECT COUNT(DISTINCT p.username) AS total
+                 FROM profile p
+                 INNER JOIN clients c ON c.username = p.username
+                    AND c.branch_id = ?
+                    AND (c.is_deleted = '0' OR c.is_deleted = 0)
+                 WHERE p.status = '1'
+                   AND DATE_FORMAT(p.date_of_birth, '%m-%d') = DATE_FORMAT(CURDATE(), '%m-%d')`,
+                [branch_id]
+            );
+            todayBirthday = Number(todayBirthdayResult[0]?.total) || 0;
+        } catch (err) {
+            console.log("Could not load today birthday count:", err.message);
+        }
 
         // Additional helpful metrics
         // Pending tasks (not complete or cancel)
@@ -2072,6 +2092,9 @@ router.get("/dashboard-summary", auth, validateBranch, async (req, res) => {
                 total_agent: totalAgent,
                 total_firms: totalFirms,
                 total_services: totalServices,
+                pending_staff_expense: pendingStaffExpense,
+                pending_staff_expense_amount: pendingStaffExpenseAmount,
+                today_birthday: todayBirthday,
                 recurring_task_summary: {
                     total_tasks: totalRecurringTasks,
                     overdue_tasks: overdueRecurringTasks,
@@ -2714,6 +2737,25 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
             date_of_birth: row.date_of_birth
         }));
 
+        // CA Report: sent + complete approval counts for open tasks only
+        // (task status not cancel/complete)
+        const [caReportRows] = await pool.query(
+            `SELECT
+                SUM(CASE
+                    WHEN LOWER(TRIM(COALESCE(ca_approval, 'pending'))) = 'sent'
+                    THEN 1 ELSE 0 END) AS sent_count,
+                SUM(CASE
+                    WHEN LOWER(TRIM(COALESCE(ca_approval, 'pending'))) = 'complete'
+                    THEN 1 ELSE 0 END) AS complete_count
+             FROM tasks
+             WHERE branch_id = ?
+               AND has_ca = '1'
+               AND ca_id IS NOT NULL
+               AND TRIM(ca_id) <> ''
+               AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('cancel', 'complete')`,
+            [branch_id]
+        );
+
         // Recurring Tasks Summary
         const [recurringSchedules] = await pool.query(
             `SELECT 
@@ -2784,6 +2826,10 @@ router.get("/dashboard/quick-stats", auth, validateBranch, async (req, res) => {
                 today_birthday: {
                     count: todayBirthday.length,
                     list: birthdays
+                },
+                ca_report: {
+                    sent: Number(caReportRows[0]?.sent_count) || 0,
+                    complete: Number(caReportRows[0]?.complete_count) || 0
                 },
                 recurring_task_summary: {
                     total_tasks: totalRecurringTasks,

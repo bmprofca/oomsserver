@@ -273,7 +273,7 @@ async function resolvePartySnippet(party_type, party_id) {
     return (await USER_SNIPPED_DATA(id)) || {};
 }
 
-const SEARCH_PARTY_TYPES = ["client", "ca", "agent", "staff", "bank", "capital", "expense", "admin"];
+const SEARCH_PARTY_TYPES = ["client", "ca", "staff", "bank", "capital", "expense", "admin"];
 
 function normalizeSearchPartyTypes(party_types) {
     if (!Array.isArray(party_types)) return [];
@@ -847,7 +847,17 @@ router.get("/details", auth, validateBranch, async (req, res) => {
             party2_id: party2Id,
             payment_from: { type: party1Type, details: party1Details },
             payment_to: { type: party2Type, details: party2Details },
+            from_staff_expense: false,
         };
+
+        const [staffClaimRows] = await pool.query(
+            `SELECT expense_id FROM staff_expenses
+             WHERE branch_id = ? AND transaction_id = ? AND is_deleted = '0'
+               AND create_by = staff_username
+             LIMIT 1`,
+            [branch_id, transactionId]
+        );
+        data.from_staff_expense = Boolean(staffClaimRows?.length);
 
         const txType = String(row.transaction_type || "").trim().toLowerCase();
         const invoiceId = row.invoice_id != null ? String(row.invoice_id).trim() : "";
@@ -1235,6 +1245,23 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         let runningBalance = balanceBefore;
         const fullList = [];
+        const staffClaimTxIds = new Set();
+        const allTxIds = rows.map((r) => r.transaction_id).filter(Boolean);
+        if (allTxIds.length) {
+            const placeholders = allTxIds.map(() => "?").join(",");
+            const [claimRows] = await pool.query(
+                `SELECT transaction_id FROM staff_expenses
+                 WHERE branch_id = ?
+                   AND transaction_id IN (${placeholders})
+                   AND is_deleted = '0'
+                   AND create_by = staff_username`,
+                [branch_id, ...allTxIds]
+            );
+            for (const cr of claimRows || []) {
+                if (cr.transaction_id) staffClaimTxIds.add(String(cr.transaction_id));
+            }
+        }
+
         for (const row of rows) {
             const { id, create_by: create_by_username, modify_by: modify_by_username, party1_type: p1t, party1_id: p1id, party2_type: p2t, party2_id: p2id, ...rest } = row;
             const amount = Math.abs(Number(row.amount) || 0);
@@ -1454,6 +1481,17 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 transaction_date: row.transaction_date,
                 transaction_type: row.transaction_type,
                 payment: { debit: rowDebit, credit: rowCredit, balance: runningBalance },
+                // Mirror amounts under the transaction_type key so ledger UI
+                // (getTransactionAmounts) always finds debit/credit for expense/payslip/etc.
+                ...(row.transaction_type
+                    ? {
+                        [row.transaction_type]: {
+                            debit: rowDebit,
+                            credit: rowCredit,
+                            balance: runningBalance,
+                        },
+                    }
+                    : {}),
                 invoice_id: row.invoice_id,
                 invoice_no: row.invoice_no,
                 downloadable: Boolean(
@@ -1461,6 +1499,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 ),
                 is_task: Boolean(isTaskSale),
                 task_id: saleTaskId,
+                from_staff_expense: staffClaimTxIds.has(String(row.transaction_id)),
                 create_by,
                 modify_by,
                 particular

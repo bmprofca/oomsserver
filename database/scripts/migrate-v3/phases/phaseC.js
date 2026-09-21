@@ -45,8 +45,6 @@ export async function runPhaseC(ctx) {
             service_id: t.service_id,
             has_ca: t.ca ? "1" : "0",
             ca_id: t.ca || null,
-            has_agent: t.agent ? "1" : "0",
-            agent_id: t.agent || null,
             fees,
             tax_rate: taxRate,
             tax_value: taxValue,
@@ -68,7 +66,7 @@ export async function runPhaseC(ctx) {
         "tasks",
         [
             "branch_id", "task_id", "task_type", "username", "firm_id", "service_id", "has_ca", "ca_id",
-            "has_agent", "agent_id", "fees", "tax_rate", "tax_value", "total", "create_date", "create_by",
+            "fees", "tax_rate", "tax_value", "total", "create_date", "create_by",
             "is_recurring", "due_date", "target_date", "complete_date", "complete_by", "billing_status",
             "invoice_id", "status",
         ],

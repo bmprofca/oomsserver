@@ -442,8 +442,6 @@ async function handleBillingTaskList(req, res) {
                 t.service_id,
                 t.has_ca,
                 t.ca_id,
-                t.has_agent,
-                t.agent_id,
                 t.fees,
                 t.total,
                 t.due_date,
@@ -527,13 +525,6 @@ async function handleBillingTaskList(req, res) {
             if (has_ca) {
                 const ca_data = await USER_SNIPPED_DATA(element?.ca_id);
                 object.ca = ca_data;
-            }
-
-            const has_agent = element?.has_agent == "1";
-            object.has_agent = has_agent;
-            if (has_agent) {
-                const agent_data = await USER_SNIPPED_DATA(element?.agent_id);
-                object.agent = agent_data;
             }
 
             if (element?.billing_status == "1") {
