@@ -1,35 +1,37 @@
 import axios from "axios";
 import crypto from "crypto";
+import { resolveRazorpayRuntimeConfig } from "../helpers/razorpayConfig.js";
 
-function trimEnv(value) {
-    return typeof value === "string" ? value.trim() : "";
+let configCache = null;
+let configCacheAt = 0;
+const CONFIG_CACHE_MS = 15000;
+
+export function invalidateRazorpayServiceCache() {
+    configCache = null;
+    configCacheAt = 0;
 }
 
-function normalizeRazorpayEnvironment(value) {
-    const env = trimEnv(value).toLowerCase();
-    return env === "live" ? "live" : "test";
+export async function getRazorpayConfig({ force = false } = {}) {
+    if (!force && configCache && Date.now() - configCacheAt < CONFIG_CACHE_MS) {
+        return configCache;
+    }
+    const config = await resolveRazorpayRuntimeConfig();
+    configCache = config;
+    configCacheAt = Date.now();
+    return config;
 }
 
-export function getRazorpayConfig() {
-    const baseDomain = trimEnv(process.env.BASE_DOMAIN).replace(/\/$/, "");
-    const environment = normalizeRazorpayEnvironment(process.env.RAZORPAY_ENVIRONMENT);
-
-    return {
-        environment,
-        isLive: environment === "live",
-        keyId: trimEnv(process.env.RAZORPAY_KEY_ID),
-        keySecret: trimEnv(process.env.RAZORPAY_KEY_SECRET),
-        webhookSecret: trimEnv(process.env.RAZORPAY_WEBHOOK_SECRET),
-        webhookUrl:
-            trimEnv(process.env.RAZORPAY_WEBHOOK_URL) ||
-            (baseDomain ? `${baseDomain}/api/v1/webhook/razorpay` : ""),
-    };
-}
-
-export function assertRazorpayKeys() {
-    const { environment, keyId, keySecret } = getRazorpayConfig();
+export async function assertRazorpayKeys() {
+    const { environment, keyId, keySecret, status } = await getRazorpayConfig();
+    if (String(status || "").toLowerCase() === "inactive") {
+        const error = new Error("Razorpay payment gateway is inactive. Enable it in Admin → Settings → Razorpay.");
+        error.statusCode = 503;
+        throw error;
+    }
     if (!keyId || !keySecret) {
-        const error = new Error("Razorpay integration keys are not configured on the server.");
+        const error = new Error(
+            "Razorpay integration keys are not configured. Set them in Admin → Settings → Razorpay."
+        );
         error.statusCode = 500;
         throw error;
     }
@@ -37,7 +39,7 @@ export function assertRazorpayKeys() {
     const expectedPrefix = environment === "live" ? "rzp_live_" : "rzp_test_";
     if (!keyId.toLowerCase().startsWith(expectedPrefix)) {
         const error = new Error(
-            `RAZORPAY_KEY_ID does not match RAZORPAY_ENVIRONMENT=${environment}. Expected a key starting with ${expectedPrefix}.`
+            `Razorpay key_id does not match environment=${environment}. Expected a key starting with ${expectedPrefix}.`
         );
         error.statusCode = 500;
         throw error;
@@ -55,7 +57,7 @@ function wrapRazorpayApiError(error) {
 
     if (status === 401) {
         const authError = new Error(
-            "Razorpay authentication failed. Update RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in SERVER/.env from Razorpay Dashboard → Settings → API Keys (use the Key Secret, not the webhook secret)."
+            "Razorpay authentication failed. Update Key ID and Key Secret in Admin → Settings → Razorpay (use the API Key Secret, not the webhook secret)."
         );
         authError.statusCode = 502;
         authError.razorpayDescription = description;
@@ -73,7 +75,7 @@ function sanitizeReceipt(value) {
 }
 
 export async function createRazorpayOrder({ amountPaise, receipt, notes = {} }) {
-    const { keyId, keySecret, environment } = assertRazorpayKeys();
+    const { keyId, keySecret, environment } = await assertRazorpayKeys();
     const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
     const safeReceipt = sanitizeReceipt(receipt);
 
@@ -106,20 +108,29 @@ export async function createRazorpayOrder({ amountPaise, receipt, notes = {} }) 
     }
 }
 
-export function verifyRazorpayPaymentSignature({ orderId, paymentId, signature }) {
-    const { keySecret } = assertRazorpayKeys();
+export async function verifyRazorpayPaymentSignature({ orderId, paymentId, signature }) {
+    const { keySecret } = await assertRazorpayKeys();
     const generatedSignature = crypto
         .createHmac("sha256", keySecret)
         .update(`${orderId}|${paymentId}`)
         .digest("hex");
 
-    return generatedSignature === signature;
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(generatedSignature),
+            Buffer.from(String(signature || ""))
+        );
+    } catch {
+        return false;
+    }
 }
 
-export function verifyRazorpayWebhookSignature({ rawBody, signature }) {
-    const { webhookSecret } = getRazorpayConfig();
+export async function verifyRazorpayWebhookSignature({ rawBody, signature }) {
+    const { webhookSecret } = await getRazorpayConfig();
     if (!webhookSecret) {
-        const error = new Error("Razorpay webhook secret is not configured on the server.");
+        const error = new Error(
+            "Razorpay webhook secret is not configured. Set it in Admin → Settings → Razorpay."
+        );
         error.statusCode = 500;
         throw error;
     }
@@ -129,5 +140,40 @@ export function verifyRazorpayWebhookSignature({ rawBody, signature }) {
 
     const body = typeof rawBody === "string" ? rawBody : rawBody?.toString("utf8") || "";
     const digest = crypto.createHmac("sha256", webhookSecret).update(body).digest("hex");
-    return digest === signature;
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(digest),
+            Buffer.from(String(signature))
+        );
+    } catch {
+        return false;
+    }
+}
+
+/** Lightweight credentials check against Razorpay Orders API. */
+export async function testRazorpayCredentials() {
+    const { keyId, keySecret, environment } = await assertRazorpayKeys();
+    const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+
+    try {
+        await axios.get("https://api.razorpay.com/v1/orders?count=1", {
+            headers: { Authorization: `Basic ${authHeader}` },
+            timeout: 15000,
+        });
+        return {
+            ok: true,
+            environment,
+            key_id: keyId,
+            message: "Razorpay credentials are valid.",
+        };
+    } catch (error) {
+        const wrapped = wrapRazorpayApiError(error);
+        return {
+            ok: false,
+            environment,
+            key_id: keyId,
+            message: wrapped.message,
+            statusCode: wrapped.statusCode,
+        };
+    }
 }

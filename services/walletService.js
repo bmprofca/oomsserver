@@ -43,11 +43,13 @@ async function getOrCreateWallet(branchId) {
     };
 }
 
-async function creditWallet({ branch_id, amount, purpose, details = null }) {
+async function creditWallet({ branch_id, amount, remark, details = null, purpose = null }) {
     const numericAmount = Number(amount);
     if (isNaN(numericAmount) || numericAmount <= 0) {
         throw new Error('Invalid credit amount');
     }
+
+    const resolvedRemark = String(remark || purpose || 'Add Money').trim() || 'Add Money';
 
     const conn = await pool.getConnection();
     try {
@@ -56,9 +58,9 @@ async function creditWallet({ branch_id, amount, purpose, details = null }) {
 
         const transactionId = newId('wtx');
         await conn.query(
-            `INSERT INTO wallet_transactions (transaction_id, branch_id, amount, type, purpose, details)
+            `INSERT INTO wallet_transactions (transaction_id, branch_id, amount, type, remark, details)
              VALUES (?, ?, ?, 'credit', ?, ?)`,
-            [transactionId, branch_id, numericAmount, purpose || 'Add Money', details]
+            [transactionId, branch_id, numericAmount, resolvedRemark, details]
         );
 
         const balance = await getWalletBalance(branch_id, conn);
@@ -78,11 +80,13 @@ async function creditWallet({ branch_id, amount, purpose, details = null }) {
     }
 }
 
-async function debitWallet({ branch_id, amount, purpose, details = null, connection = null }) {
+async function debitWallet({ branch_id, amount, remark, details = null, connection = null, purpose = null }) {
     const numericAmount = Number(amount);
     if (isNaN(numericAmount) || numericAmount <= 0) {
         throw new Error('Invalid debit amount');
     }
+
+    const resolvedRemark = String(remark || purpose || 'SMS Sent').trim() || 'SMS Sent';
 
     const ownsConnection = !connection;
     const conn = connection || await pool.getConnection();
@@ -103,9 +107,9 @@ async function debitWallet({ branch_id, amount, purpose, details = null, connect
 
         const transactionId = newId('wtx');
         await conn.query(
-            `INSERT INTO wallet_transactions (transaction_id, branch_id, amount, type, purpose, details)
+            `INSERT INTO wallet_transactions (transaction_id, branch_id, amount, type, remark, details)
              VALUES (?, ?, ?, 'debit', ?, ?)`,
-            [transactionId, branch_id, numericAmount, purpose || 'SMS Sent', details]
+            [transactionId, branch_id, numericAmount, resolvedRemark, details]
         );
 
         const updatedBalance = balance - numericAmount;

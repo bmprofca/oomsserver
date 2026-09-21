@@ -7,6 +7,8 @@ import mailRoutes from "./mail.js";
 import wpSystemTemplatesRoutes from "./wpSystemTemplates.js";
 import smsSystemRoutes from "./smsSystem.js";
 import callSystemRoutes from "./callSystem.js";
+import razorpayRoutes from "./razorpay.js";
+import walletRoutes from "./wallet.js";
 
 const router = express.Router();
 
@@ -18,5 +20,7 @@ router.use("/mail", mailRoutes);
 router.use("/wp-system-templates", wpSystemTemplatesRoutes);
 router.use("/sms-system", smsSystemRoutes);
 router.use("/call-system", callSystemRoutes);
+router.use("/razorpay", razorpayRoutes);
+router.use("/wallet", walletRoutes);
 
 export default router;
