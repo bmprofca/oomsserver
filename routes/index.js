@@ -44,7 +44,6 @@ import smsRoutes from "./sms.js";
 import callRoutes from "./call.js";
 import backupRoutes from "./backup.js";
 import accountRoutes from "./account.js";
-import voipRoutes from "./voip.js";
 import fcmRoutes from "./fcm.js";
 
 
@@ -94,7 +93,6 @@ router.use("/compliance", complianceRoutes);
 router.use("/recurring-task", complianceRoutes);
 router.use("/backup", backupRoutes);
 router.use("/account", accountRoutes);
-router.use("/voip", voipRoutes);
 router.use("/fcm", fcmRoutes);
 
 export default router;

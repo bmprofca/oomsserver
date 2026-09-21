@@ -17,7 +17,6 @@ import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
 import publicRoutes from "./routes/public.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
-import { registerNeronEventForwarder } from "./services/neronVoipEvents.js";
 
 const PORT = Number(process.env.PORT) || 8877;
 
@@ -86,7 +85,6 @@ app.get("/health", (req, res) => {
 
 const server = http.createServer(app);
 const WsIo = setupSocketIO(server);
-registerNeronEventForwarder(WsIo);
 
 
 server.listen(PORT, '0.0.0.0', () => {
