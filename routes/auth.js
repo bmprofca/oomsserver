@@ -18,6 +18,7 @@ import {
     normalizeMobileDigits,
 } from "../helpers/clientPhone.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
+import { auth } from "../middleware/auth.js";
 
 async function fetchActiveProfilePayload(conn, username) {
     const [rows] = await conn.query(
@@ -189,8 +190,19 @@ router.post("/logout", async (req, res) => {
     try {
         const token = req.headers["token"] || req.headers["Token"] || "";
         const username = req.headers["username"] || req.headers["Username"] || "";
+        const allSessions = Boolean(
+            req.body?.all_sessions ?? req.body?.allSessions ?? false
+        );
 
-        if (token) {
+        if (allSessions && username) {
+            await pool.query(
+                `UPDATE tokens
+                 SET status = ?
+                 WHERE username = ?
+                   AND status = ?`,
+                ["0", username, "1"]
+            );
+        } else if (token) {
             await pool.query(
                 `UPDATE tokens
                  SET status = ?
@@ -203,13 +215,239 @@ router.post("/logout", async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: "Logged out successfully",
+            message: allSessions
+                ? "Logged out from all sessions successfully"
+                : "Logged out successfully",
+            data: { all_sessions: allSessions },
         });
     } catch (err) {
         console.error("LOGOUT ERROR:", err);
         return res.status(500).json({
             success: false,
             message: "Logout failed",
+        });
+    }
+});
+
+/** GET /auth/sessions — list login sessions for the authenticated user */
+router.get("/sessions", auth, async (req, res) => {
+    try {
+        const username = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const currentToken = String(req.headers["token"] || req.headers["Token"] || "").trim();
+
+        if (!username) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
+        const statusParam = String(req.query.status || "active").toLowerCase();
+        const pageNo = Math.max(1, parseInt(req.query.page_no || req.query.page || "1", 10) || 1);
+        const limit = Math.min(
+            100,
+            Math.max(1, parseInt(req.query.limit || "10", 10) || 10)
+        );
+        const offset = (pageNo - 1) * limit;
+
+        // Active = status 1 and not expired. Expired sessions are treated as inactive.
+        const stillValid =
+            "(expire_date IS NULL OR expire_date > NOW())";
+        const isExpired =
+            "(expire_date IS NOT NULL AND expire_date <= NOW())";
+
+        let statusClause = "";
+        if (statusParam === "active" || statusParam === "1") {
+            statusClause = `AND status = '1' AND ${stillValid}`;
+        } else if (statusParam === "inactive" || statusParam === "0") {
+            statusClause = `AND (status = '0' OR ${isExpired})`;
+        }
+        // status=all → no status filter
+
+        const baseWhere = `WHERE username = ? ${statusClause}`;
+        const params = [username];
+
+        const [[{ total }]] = await pool.query(
+            `SELECT COUNT(*) AS total FROM tokens ${baseWhere}`,
+            params
+        );
+
+        const [rows] = await pool.query(
+            `SELECT
+                token_id,
+                login_method,
+                status,
+                create_ip,
+                last_ip,
+                create_date,
+                last_used_date,
+                expire_date,
+                token
+             FROM tokens
+             ${baseWhere}
+             ORDER BY
+               CASE
+                 WHEN status = '1' AND (expire_date IS NULL OR expire_date > NOW()) THEN 0
+                 ELSE 1
+               END,
+               COALESCE(last_used_date, create_date) DESC,
+               id DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
+        );
+
+        const data = (rows || []).map((row) => {
+            const isCurrent = Boolean(currentToken && row.token === currentToken);
+            const expired =
+                row.expire_date && new Date(row.expire_date).getTime() < Date.now();
+            const effectivelyActive = String(row.status) === "1" && !expired;
+
+            return {
+                token_id: row.token_id,
+                login_method: row.login_method || null,
+                status: effectivelyActive ? "active" : "inactive",
+                is_current: isCurrent,
+                is_expired: Boolean(expired),
+                create_ip: row.create_ip || null,
+                last_ip: row.last_ip || null,
+                create_date: FORMAT_DATE(row.create_date) ?? null,
+                last_used_date: FORMAT_DATE(row.last_used_date) ?? null,
+                expire_date: FORMAT_DATE(row.expire_date) ?? null,
+            };
+        });
+
+        const totalCount = Number(total) || 0;
+        const totalPages = Math.max(1, Math.ceil(totalCount / limit));
+
+        return res.status(200).json({
+            success: true,
+            message: "Sessions retrieved",
+            data,
+            pagination: {
+                page_no: pageNo,
+                limit,
+                total: totalCount,
+                total_pages: totalPages,
+            },
+            meta: {
+                status:
+                    statusParam === "0" || statusParam === "inactive"
+                        ? "inactive"
+                        : statusParam === "all"
+                          ? "all"
+                          : "active",
+                count: data.length,
+            },
+        });
+    } catch (err) {
+        console.error("SESSIONS LIST ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            message: err?.message || "Failed to load sessions",
+        });
+    }
+});
+
+/** POST /auth/sessions/revoke-others — end all active sessions except current */
+router.post("/sessions/revoke-others", auth, async (req, res) => {
+    try {
+        const username = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const currentToken = String(req.headers["token"] || req.headers["Token"] || "").trim();
+
+        if (!username || !currentToken) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
+        const [result] = await pool.query(
+            `UPDATE tokens
+             SET status = ?
+             WHERE username = ?
+               AND status = ?
+               AND token <> ?
+               AND (expire_date IS NULL OR expire_date > NOW())`,
+            ["0", username, "1", currentToken]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Other active sessions ended",
+            data: { revoked: Number(result?.affectedRows) || 0 },
+        });
+    } catch (err) {
+        console.error("SESSION REVOKE OTHERS ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            message: err?.message || "Failed to end other sessions",
+        });
+    }
+});
+
+/** POST /auth/sessions/:tokenId/revoke — end a specific session (not current) */
+router.post("/sessions/:tokenId/revoke", auth, async (req, res) => {
+    try {
+        const username = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const currentToken = String(req.headers["token"] || req.headers["Token"] || "").trim();
+        const tokenId = String(req.params.tokenId || "").trim();
+
+        if (!username || !tokenId) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid request",
+            });
+        }
+
+        const [rows] = await pool.query(
+            `SELECT token_id, token, status, expire_date
+             FROM tokens
+             WHERE token_id = ?
+               AND username = ?
+             LIMIT 1`,
+            [tokenId, username]
+        );
+        const row = rows?.[0];
+        if (!row) {
+            return res.status(404).json({
+                success: false,
+                message: "Session not found",
+            });
+        }
+        if (currentToken && row.token === currentToken) {
+            return res.status(400).json({
+                success: false,
+                message: "Cannot revoke the current session. Use Sign out instead.",
+            });
+        }
+
+        const expired =
+            row.expire_date && new Date(row.expire_date).getTime() < Date.now();
+        if (String(row.status) === "0" || expired) {
+            return res.status(200).json({
+                success: true,
+                message: "Session already inactive",
+            });
+        }
+
+        await pool.query(
+            `UPDATE tokens
+             SET status = ?
+             WHERE token_id = ?
+               AND username = ?
+               AND status = ?`,
+            ["0", tokenId, username, "1"]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Session revoked",
+        });
+    } catch (err) {
+        console.error("SESSION REVOKE ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            message: err?.message || "Failed to revoke session",
         });
     }
 });

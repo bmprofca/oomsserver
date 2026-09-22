@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { fetchPermissionRoleById } from "../helpers/permissionRole.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA, GET_FIRMS_BY_USERNAME, TODAY_DATE } from "../helpers/function.js";
+import { UNIQUE_RANDOM_STRING, ID_LENGTH, SINGLE_FIRM_DATA, SINGLE_SERVICE_DATA, SINGLE_TASK_STAFF_LIST, TIMESTAMP, USER_SNIPPED_DATA, GET_FIRMS_BY_USERNAME, TODAY_DATE, FORMAT_DATE } from "../helpers/function.js";
 import { executeCreatePurchase } from "../helpers/purchaseCreate.js";
 import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/NoteFile.js";
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
@@ -3464,6 +3464,80 @@ router.put("/details/timelog/edit/:timelog_id", auth, validateBranch, async (req
 
 
 // Bulk change task status
+router.get("/:task_id/status-history", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const task_id = String(req.params.task_id || "").trim();
+
+        if (!task_id) {
+            return res.status(400).json({
+                success: false,
+                message: "task_id is required",
+            });
+        }
+
+        const [taskRows] = await pool.query(
+            `SELECT task_id
+             FROM tasks
+             WHERE branch_id = ?
+               AND task_id = ?
+             LIMIT 1`,
+            [branch_id, task_id]
+        );
+        if (!taskRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Task not found for this branch",
+            });
+        }
+
+        const [rows] = await pool.query(
+            `SELECT id, status, create_by, create_date
+             FROM task_status
+             WHERE branch_id = ?
+               AND task_id = ?
+             ORDER BY id DESC`,
+            [branch_id, task_id]
+        );
+
+        const userCache = new Map();
+        const data = [];
+
+        for (const row of rows || []) {
+            const createByKey =
+                row.create_by != null ? String(row.create_by).trim() : "";
+            if (createByKey && !userCache.has(createByKey)) {
+                userCache.set(createByKey, await USER_SNIPPED_DATA(createByKey));
+            }
+
+            data.push({
+                id: row.id,
+                status: row.status || null,
+                create_date: FORMAT_DATE(row.create_date) ?? null,
+                create_by: createByKey
+                    ? userCache.get(createByKey) ?? { username: createByKey }
+                    : null,
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Task status history retrieved",
+            data,
+            meta: {
+                task_id,
+                count: data.length,
+            },
+        });
+    } catch (error) {
+        console.error("TASK STATUS HISTORY ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: error?.message || "Failed to load task status history",
+        });
+    }
+});
+
 router.put("/change-status", auth, validateBranch, async (req, res) => {
     const conn = await pool.getConnection();
     try {

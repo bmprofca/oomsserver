@@ -28,6 +28,9 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`password-groups.md`](./password-groups.md) | Password groups + firm credentials, status `'1'`/`'0'`, select-all delete |
 | [`staff.md`](./staff.md) | `/settings/staff` invite (email/mobile), list image, status OTP |
 | [`document-delete-otp.md`](./document-delete-otp.md) | Client/task document delete OTP to branch admin |
+| [`help-support.md`](./help-support.md) | Platform help contacts + FAQs (`/help-support`) |
+| [`auth-sessions.md`](./auth-sessions.md) | `tokens` list/revoke + logout `all_sessions` |
+| [`wallet.md`](./wallet.md) | Razorpay platform config, wallet recharge, payment requests |
 
 ## Pair with client
 
@@ -50,3 +53,6 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | `invoice.md` | `CLIENT/context/invoice.md`, `CLIENT/context/ledger-tab.md`, `CLIENT/context/finance-registers.md` |
 | `password-groups.md` | `CLIENT/context/password-groups.md` |
 | `staff.md` | `CLIENT/context/staff.md` |
+| `help-support.md` | `CLIENT/context/help-support.md`, `ADMIN/context/help-support.md` |
+| `auth-sessions.md` | `CLIENT/context/sessions.md` |
+| `wallet.md` | `CLIENT/context/wallet.md`, `ADMIN/context/wallet-payments.md` |

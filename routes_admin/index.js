@@ -9,6 +9,7 @@ import smsSystemRoutes from "./smsSystem.js";
 import callSystemRoutes from "./callSystem.js";
 import razorpayRoutes from "./razorpay.js";
 import walletRoutes from "./wallet.js";
+import helpSupportRoutes from "./helpSupport.js";
 
 const router = express.Router();
 
@@ -22,5 +23,6 @@ router.use("/sms-system", smsSystemRoutes);
 router.use("/call-system", callSystemRoutes);
 router.use("/razorpay", razorpayRoutes);
 router.use("/wallet", walletRoutes);
+router.use("/help-support", helpSupportRoutes);
 
 export default router;
