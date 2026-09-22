@@ -526,12 +526,17 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     notifyTaskCreatedWhatsapp({ branch_id, task_id: item.task_id, created_by: username });
                     notifyTaskCreatedSms({ branch_id, task_id: item.task_id });
 
+                    const assignedStaffs = Array.isArray(item.assignment?.staff)
+                        ? item.assignment.staff.filter(Boolean)
+                        : [];
+
                     notifyTaskActionPush({
                         branch_id,
                         task_id: item.task_id,
-                        task_username: item.assignment?.staff?.[0] || null,
+                        task_username: assignedStaffs[0] || null,
                         client_username: item.firm_id ? null : null,
                         ca_username: item.assignment?.ca_id || null,
+                        staffUsernames: assignedStaffs,
                         action: "TASK_CREATED",
                         title: "New Task Assigned",
                         body: `A new task has been created for your account (${item.task_id}).`,
@@ -799,12 +804,17 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             notifyTaskCreatedWhatsapp({ branch_id, task_id, created_by: username });
             notifyTaskCreatedSms({ branch_id, task_id });
 
+            const assignedStaffsLegacy = Array.isArray(legacyAssignment?.staff)
+                ? legacyAssignment.staff.filter(Boolean)
+                : [];
+
             notifyTaskActionPush({
                 branch_id,
                 task_id,
-                task_username: legacyAssignment?.staff?.[0] || null,
+                task_username: assignedStaffsLegacy[0] || null,
                 client_username: firm_username || null,
                 ca_username: legacyAssignment?.ca_id || legacyAssignment?.ca || null,
+                staffUsernames: assignedStaffsLegacy,
                 action: "TASK_CREATED",
                 title: "New Task Assigned",
                 body: `A new task has been created for your account (${task_id}).`,

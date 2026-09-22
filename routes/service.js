@@ -981,15 +981,30 @@ router.put("/service-request/reject/:request_id", auth, validateBranch, async (r
         );
 
         const updatedRow = rows[0] || null;
-        if (updatedRow?.username) {
+        const clientUsername = updatedRow?.username || null;
+        if (clientUsername) {
             notifyServiceRequestStatusPush({
                 branch_id,
                 request_id,
-                client_username: updatedRow.username,
+                client_username: clientUsername,
                 status: 'rejected',
                 message: `Your service request #${request_id} was rejected.`,
             }).catch((err) => console.error("[FCM] Service request reject push error:", err?.message || err));
         }
+
+        notifyTaskActionPush({
+            branch_id,
+            task_id: updatedRow?.task_id || null,
+            task_username: null,
+            client_username: clientUsername,
+            ca_username: null,
+            staffUsernames: [],
+            action: "SERVICE_REQUEST_REJECTED",
+            title: "Service Request Rejected",
+            body: `Service request #${request_id} was rejected by the branch team.`,
+            status: "rejected",
+            updated_by: modifiedBy || "system",
+        }).catch((err) => console.error("[FCM] Service request rejected push error:", err?.message || err));
 
         return res.status(200).json({
             success: true,
@@ -1034,6 +1049,10 @@ router.put("/service-request/approve/:request_id", auth, validateBranch, async (
         }
 
         const clientUsername = result.data?.client_username || result.data?.username || null;
+        const taskAssignment = result.data?.task?.assignment || {};
+        const taskStaffs = Array.isArray(taskAssignment.staff) ? taskAssignment.staff.filter(Boolean) : [];
+        const taskCaUsername = taskAssignment.ca_id || taskAssignment.ca || null;
+
         if (clientUsername) {
             notifyServiceRequestStatusPush({
                 branch_id,
@@ -1042,6 +1061,22 @@ router.put("/service-request/approve/:request_id", auth, validateBranch, async (
                 status: 'approved',
                 message: `Your service request #${request_id} has been approved and is now in progress.`,
             }).catch((err) => console.error("[FCM] Service request approve push error:", err?.message || err));
+        }
+
+        if (result.data?.task_id || taskStaffs.length || taskCaUsername) {
+            notifyTaskActionPush({
+                branch_id,
+                task_id: result.data?.task_id || null,
+                task_username: taskStaffs[0] || null,
+                client_username: clientUsername,
+                ca_username: taskCaUsername,
+                staffUsernames: taskStaffs,
+                action: "SERVICE_REQUEST_APPROVED",
+                title: "Service Request Approved",
+                body: `Service request #${request_id} was approved and the task has been created.`,
+                status: "approved",
+                updated_by: modifiedBy || "system",
+            }).catch((err) => console.error("[FCM] Service request approved task push error:", err?.message || err));
         }
 
         return res.status(200).json({

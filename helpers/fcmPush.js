@@ -158,10 +158,15 @@ export function resolveNotificationTargets(action, context = {}) {
 
         case "DOCUMENT_SHARED":
         case "SERVICE_REQUEST_UPDATE":
+        case "SERVICE_REQUEST_APPROVED":
+        case "SERVICE_REQUEST_REJECTED":
         case "PAYMENT_REMINDER":
             if (clientUsername && !shouldSkip(clientUsername)) addTarget(clientUsername, "client");
             if (assignedUsername && !shouldSkip(assignedUsername)) addTarget(assignedUsername, "enduser");
             if (caUsername && !shouldSkip(caUsername)) addTarget(caUsername, "ca");
+            for (const staffUsername of Array.isArray(staffUsernames) ? staffUsernames : []) {
+                if (!shouldSkip(staffUsername)) addTarget(staffUsername, "enduser");
+            }
             break;
 
         default:
@@ -349,6 +354,47 @@ export async function notifyServiceRequestStatusPush({ branch_id, request_id, cl
             panel: 'client',
         },
     });
+}
+
+export async function notifyCaApprovalCompletePush({ branch_id, task_id, client_username, ca_username, task_label }) {
+    if (!branch_id || !task_id) return;
+
+    const uniqueTargets = new Map();
+    const pushTarget = (username, panel) => {
+        if (!username) return;
+        const key = `${String(username).trim()}::${String(panel || 'enduser').trim().toLowerCase()}`;
+        if (!uniqueTargets.has(key)) {
+            uniqueTargets.set(key, { username: String(username).trim(), panel: String(panel || 'enduser').trim().toLowerCase() });
+        }
+    };
+
+    if (client_username) pushTarget(client_username, 'client');
+    if (ca_username) pushTarget(ca_username, 'ca');
+
+    const branchTargets = await getBranchNotificationTargets(branch_id);
+    for (const target of branchTargets) {
+        pushTarget(target.username, target.panel || 'enduser');
+    }
+
+    if (!uniqueTargets.size) return;
+
+    const label = task_label || `Task #${task_id}`;
+    const body = `${label} has been completed by the CA and is ready for review.`;
+
+    await Promise.allSettled(
+        [...uniqueTargets.values()].map((target) =>
+            sendPushToUser(target.username, target.panel, {
+                title: 'CA Approval Complete',
+                body,
+                data: {
+                    type: 'CA_APPROVAL_COMPLETE',
+                    taskId: String(task_id),
+                    branchId: String(branch_id),
+                    panel: target.panel,
+                },
+            })
+        )
+    );
 }
 
 export async function notifyTaskActionPush({

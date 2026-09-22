@@ -8,6 +8,7 @@ import {
 } from "../helpers/b2Storage.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { notifyCaApprovalComplete } from "../helpers/caApprovalEmail.js";
+import { notifyCaApprovalCompletePush } from "../helpers/fcmPush.js";
 
 const router = express.Router();
 
@@ -757,6 +758,24 @@ router.put("/details/:task_id/udin", validateCaSession, async (req, res) => {
         await conn.commit();
         conn.release();
 
+        if (mark_complete) {
+            const [taskOwnerRows] = await pool.query(
+                `SELECT username, ca_id
+                 FROM tasks
+                 WHERE branch_id = ? AND task_id = ?
+                 LIMIT 1`,
+                [branch_id, task_id]
+            );
+            const taskOwner = taskOwnerRows?.[0] || {};
+            notifyCaApprovalCompletePush({
+                branch_id,
+                task_id,
+                client_username: taskOwner.username || null,
+                ca_username: ca_username || taskOwner.ca_id || null,
+                task_label: `Task #${task_id}`,
+            }).catch((err) => console.error("[FCM] CA approval complete push error:", err?.message || err));
+        }
+
         return res.status(200).json({
             success: true,
             message: mark_complete
@@ -842,6 +861,15 @@ router.put("/details/:task_id/udin/complete", validateCaSession, async (req, res
             [branch_id, task_id]
         );
 
+        const [taskOwnerRows] = await pool.query(
+            `SELECT username, ca_id
+             FROM tasks
+             WHERE branch_id = ? AND task_id = ?
+             LIMIT 1`,
+            [branch_id, task_id]
+        );
+        const taskOwner = taskOwnerRows?.[0] || {};
+
         notifyCaApprovalComplete({
             branch_id,
             task_id,
@@ -850,6 +878,14 @@ router.put("/details/:task_id/udin/complete", validateCaSession, async (req, res
         }).catch((err) => {
             console.error("CA approval complete notify error:", err?.message || err);
         });
+
+        notifyCaApprovalCompletePush({
+            branch_id,
+            task_id,
+            client_username: taskOwner.username || null,
+            ca_username: ca_username || taskOwner.ca_id || null,
+            task_label: `Task #${task_id}`,
+        }).catch((err) => console.error("[FCM] CA approval complete push error:", err?.message || err));
 
         return res.status(200).json({
             success: true,
