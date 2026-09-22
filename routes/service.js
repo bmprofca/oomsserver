@@ -7,6 +7,7 @@ import { auth, validateBranch } from "../middleware/auth.js";
 import { RANDOM_STRING, USER_SNIPPED_DATA } from "../helpers/function.js";
 import { createTaskFromServiceRequest } from "../helpers/taskCreateHelper.js";
 import { parseDueDateOffset } from "../helpers/complianceDueDate.js";
+import { notifyServiceRequestStatusPush } from "../helpers/fcmPush.js";
 
 function parseServiceId(value) {
     const service_id = value != null ? String(value).trim() : "";
@@ -925,7 +926,7 @@ router.put("/service-request/reject/:request_id", auth, validateBranch, async (r
         }
 
         const [existingRows] = await pool.query(
-            `SELECT request_id, status, task_id
+            `SELECT request_id, username, status, task_id
              FROM service_requests
              WHERE branch_id = ? AND request_id = ?
              LIMIT 1`,
@@ -972,12 +973,23 @@ router.put("/service-request/reject/:request_id", auth, validateBranch, async (r
         );
 
         const [rows] = await pool.query(
-            `SELECT request_id, status, office_remark, modify_date, task_id
+            `SELECT request_id, username, status, office_remark, modify_date, task_id
              FROM service_requests
              WHERE branch_id = ? AND request_id = ?
              LIMIT 1`,
             [branch_id, request_id]
         );
+
+        const updatedRow = rows[0] || null;
+        if (updatedRow?.username) {
+            notifyServiceRequestStatusPush({
+                branch_id,
+                request_id,
+                client_username: updatedRow.username,
+                status: 'rejected',
+                message: `Your service request #${request_id} was rejected.`,
+            }).catch((err) => console.error("[FCM] Service request reject push error:", err?.message || err));
+        }
 
         return res.status(200).json({
             success: true,
@@ -1019,6 +1031,17 @@ router.put("/service-request/approve/:request_id", auth, validateBranch, async (
                 success: false,
                 message: result.error.message,
             });
+        }
+
+        const clientUsername = result.data?.client_username || result.data?.username || null;
+        if (clientUsername) {
+            notifyServiceRequestStatusPush({
+                branch_id,
+                request_id,
+                client_username: clientUsername,
+                status: 'approved',
+                message: `Your service request #${request_id} has been approved and is now in progress.`,
+            }).catch((err) => console.error("[FCM] Service request approve push error:", err?.message || err));
         }
 
         return res.status(200).json({

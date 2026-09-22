@@ -288,6 +288,69 @@ export async function sendPushToUsers(targets, payload) {
     );
 }
 
+export async function getBranchNotificationTargets(branch_id) {
+    if (!branch_id) return [];
+
+    const [rows] = await pool.query(
+        `SELECT username, type
+         FROM branch_mapping
+         WHERE branch_id = ?
+           AND status = '1'
+           AND is_deleted = '0'
+           AND is_accepted = '1'
+           AND type IN ('admin','staff')
+         GROUP BY username, type`,
+        [branch_id]
+    );
+
+    return Array.isArray(rows) ? rows.map((row) => ({
+        username: String(row.username).trim(),
+        panel: 'enduser',
+    })).filter((row) => row.username) : [];
+}
+
+export async function notifyServiceRequestCreatedPush({ branch_id, request_id, client_username, service_name }) {
+    if (!branch_id || !request_id) return;
+
+    const targets = await getBranchNotificationTargets(branch_id);
+    if (!targets.length) return;
+
+    const serviceLabel = service_name ? ` (${service_name})` : "";
+    await Promise.allSettled(
+        targets.map((target) =>
+            sendPushToUser(target.username, target.panel, {
+                title: 'New Service Request',
+                body: `Client ${client_username || 'customer'} raised a new service request${serviceLabel}.`,
+                data: {
+                    type: 'SERVICE_REQUEST_CREATED',
+                    requestId: String(request_id),
+                    branchId: String(branch_id),
+                    panel: 'enduser',
+                },
+            })
+        )
+    );
+}
+
+export async function notifyServiceRequestStatusPush({ branch_id, request_id, client_username, status, message }) {
+    if (!client_username || !request_id) return;
+
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const statusLabel = normalizedStatus === 'approved' ? 'Approved' : normalizedStatus === 'rejected' ? 'Rejected' : normalizedStatus === 'pending' ? 'Pending' : 'Updated';
+
+    await sendPushToUser(client_username, 'client', {
+        title: `Service Request ${statusLabel}`,
+        body: message || `Your service request #${request_id} has been updated.`,
+        data: {
+            type: 'SERVICE_REQUEST_UPDATE',
+            requestId: String(request_id),
+            branchId: branch_id ? String(branch_id) : '',
+            status: normalizedStatus,
+            panel: 'client',
+        },
+    });
+}
+
 export async function notifyTaskActionPush({
     branch_id,
     task_id,

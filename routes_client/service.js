@@ -3,6 +3,7 @@ import pool from "../db.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { fetchBranchGstSettings, resolveGst, toDateOnly } from "../helpers/gst.js";
 import { validateClientSession } from "../middleware/validateClientSession.js";
+import { notifyServiceRequestCreatedPush } from "../helpers/fcmPush.js";
 
 const router = express.Router();
 
@@ -440,6 +441,21 @@ router.post("/service-request/create", validateClientSession, async (req, res) =
                 username,
             ]
         );
+
+        const [serviceRowsForPush] = await pool.query(
+            `SELECT s.name
+             FROM services s
+             WHERE s.service_id = ?
+             LIMIT 1`,
+            [resolvedServiceId]
+        );
+
+        notifyServiceRequestCreatedPush({
+            branch_id,
+            request_id,
+            client_username: username,
+            service_name: serviceRowsForPush?.[0]?.name || null,
+        }).catch((err) => console.error("[FCM] Service request create push error:", err?.message || err));
 
         return res.status(200).json({
             success: true,
