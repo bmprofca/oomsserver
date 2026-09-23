@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { auth } from "../middleware/auth.js";
+import { authCa } from "../middleware/authCa.js";
 import { validateClientSession } from "../middleware/validateClientSession.js";
 
 const router = express.Router();
@@ -15,9 +16,9 @@ const VALID_PANELS = new Set(["enduser", "client", "ca"]);
  *
  * Headers: username, token  (standard auth middleware)
  * Body:
- *   - fcm_token  {string}  required  – the Firebase device token
- *   - panel      {string}  required  – one of: enduser | client | ca
- *   - device_id  {string}  optional  – unique device identifier (e.g. Android ID)
+ *   - fcm_token  {string}  required  ï¿½ the Firebase device token
+ *   - panel      {string}  required  ï¿½ one of: enduser | client | ca
+ *   - device_id  {string}  optional  ï¿½ unique device identifier (e.g. Android ID)
  */
 router.post("/register", auth, async (req, res) => {
     try {
@@ -69,6 +70,52 @@ router.post("/register", auth, async (req, res) => {
     } catch (error) {
         console.error("[FCM Register] Error:", error);
         return res.status(500).json({ success: false, message: "Failed to register FCM token" });
+    }
+});
+
+/**
+ * POST /api/v1/fcm/register-ca
+ *
+ * CA-panel variant of registration. CA tokens are validated through the CA
+ * client/profile mapping instead of the generic enduser auth middleware.
+ */
+router.post("/register-ca", authCa, async (req, res) => {
+    try {
+        const username = req.ca_username;
+        const { fcm_token, device_id } = req.body || {};
+
+        if (!fcm_token || String(fcm_token).trim() === "") {
+            return res.status(400).json({ success: false, message: "fcm_token is required" });
+        }
+
+        const normalizedToken = String(fcm_token).trim();
+        const normalizedDeviceId = device_id ? String(device_id).trim() : null;
+
+        if (normalizedDeviceId) {
+            await pool.query(
+                `INSERT INTO fcm_tokens (username, panel, fcm_token, device_id)
+                 VALUES (?, 'ca', ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                   fcm_token = VALUES(fcm_token),
+                   updated_at = CURRENT_TIMESTAMP`,
+                [username, normalizedToken, normalizedDeviceId]
+            );
+        } else {
+            await pool.query(
+                `DELETE FROM fcm_tokens WHERE username = ? AND panel = 'ca' AND device_id IS NULL`,
+                [username]
+            );
+            await pool.query(
+                `INSERT INTO fcm_tokens (username, panel, fcm_token, device_id)
+                 VALUES (?, 'ca', ?, NULL)`,
+                [username, normalizedToken]
+            );
+        }
+
+        return res.status(200).json({ success: true, message: "CA FCM token registered" });
+    } catch (error) {
+        console.error("[FCM Register CA] Error:", error);
+        return res.status(500).json({ success: false, message: "Failed to register CA FCM token" });
     }
 });
 
