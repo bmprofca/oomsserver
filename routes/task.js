@@ -1792,6 +1792,7 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
     try {
         const branch_id = req.branch_id;
         const { task_id = "", ca_approval = "" } = req.body || {};
+        const updatedBy = String(req.headers.username || req.headers.Username || "").trim();
         const taskId = String(task_id || "").trim();
         const next = String(ca_approval || "").trim().toLowerCase();
 
@@ -1806,7 +1807,8 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
         }
 
         const [rows] = await pool.query(
-            `SELECT t.task_id, t.has_ca, t.ca_id, t.ca_approval, s.name AS service_name
+            `SELECT t.task_id, t.has_ca, t.ca_id, t.ca_approval, t.username AS client_username,
+                    s.name AS service_name
              FROM tasks t
              LEFT JOIN services s ON s.service_id = t.service_id
              WHERE t.branch_id = ? AND t.task_id = ? LIMIT 1`,
@@ -1825,6 +1827,15 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
 
         const previous = String(task.ca_approval || "pending").toLowerCase();
         const task_label = task.service_name ? `Task #${taskId} (${task.service_name})` : `Task #${taskId}`;
+        const [modifierRows] = await pool.query(
+            `SELECT name
+             FROM profile
+             WHERE username = ? AND status = '1'
+             ORDER BY id DESC
+             LIMIT 1`,
+            [updatedBy]
+        );
+        const modifierName = modifierRows?.[0]?.name || updatedBy || "A staff member";
 
         await pool.query(
             "UPDATE tasks SET ca_approval = ? WHERE branch_id = ? AND task_id = ?",
@@ -1849,6 +1860,22 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
                 console.error("CA approval sent push error:", err?.message || err);
             });
         }
+
+        const statusLabel = next === "sent" ? "Sent for CA approval" : next === "complete" ? "Completed" : "Pending";
+        const statusBody = `${task_label} status was updated to ${statusLabel} by ${modifierName}.`;
+        notifyTaskActionPush({
+            branch_id,
+            task_id: taskId,
+            client_username: task.client_username || null,
+            ca_username: task.ca_id,
+            action: "CA_APPROVAL_UPDATE",
+            title: `CA Approval ${statusLabel}`,
+            body: statusBody,
+            status: next,
+            updated_by: updatedBy,
+        }).catch((err) => {
+            console.error("CA approval status push error:", err?.message || err);
+        });
 
         return res.status(200).json({
             success: true,
