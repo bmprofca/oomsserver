@@ -8,8 +8,8 @@ import { downloadAndSaveNoteFile, downloadAndSaveVoiceFile } from "../helpers/No
 import { notifyTaskCreatedEmail, notifyTaskCompletedEmail, notifyTaskCanceledEmail } from "../helpers/taskStaticEmail.js";
 import { notifyTaskCreatedWhatsapp, notifyTaskCompletedWhatsapp } from "../helpers/whatsappNotification.js";
 import { notifyTaskCreatedSms, notifyTaskCompletedSms } from "../helpers/smsNotification.js";
-import { notifyCaApprovalSent } from "../helpers/caApprovalEmail.js";
-import { notifyTaskStatusPush, notifyTaskActionPush } from "../helpers/fcmPush.js";
+import { notifyCaApprovalSent, notifyCaAssigned } from "../helpers/caApprovalEmail.js";
+import { notifyTaskStatusPush, notifyTaskActionPush, notifyCaApprovalSentPush, notifyCaAssignedPush } from "../helpers/fcmPush.js";
 import { BASE_DOMAIN } from "../helpers/Config.js";
 import {
     deleteProfileDocument,
@@ -1337,7 +1337,13 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         const username = req.headers["username"] || req.headers["Username"] || "";
 
-        const [task_row] = await conn.query("SELECT * FROM tasks WHERE task_id = ? AND branch_id = ?", [task_id, branch_id]);
+        const [task_row] = await conn.query(
+            `SELECT t.*, s.name AS service_name
+             FROM tasks t
+             LEFT JOIN services s ON s.service_id = t.service_id
+             WHERE t.task_id = ? AND t.branch_id = ? LIMIT 1`,
+            [task_id, branch_id]
+        );
         if (task_row.length === 0) {
             conn.release();
             return res.status(404).json({
@@ -1430,6 +1436,9 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
         await conn.beginTransaction();
 
         // Keep has_ca / ca_id in sync (profile + lists gate CA on has_ca = '1')
+        // Track whether a CA was newly assigned so we can notify them after commit.
+        let caChanged = false;
+        let assignedCaId = null;
         if (ca && AllowCaChange) {
             if (ca.has_ca && ca.ca_id) {
                 const nextCaId = String(ca.ca_id).trim();
@@ -1440,6 +1449,8 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
                         "UPDATE tasks SET has_ca = '1', ca_id = ? WHERE task_id = ? AND branch_id = ?",
                         [nextCaId, task_id, branch_id]
                     );
+                    caChanged = true;
+                    assignedCaId = nextCaId;
                 }
             } else if (!ca.has_ca) {
                 if (String(task_data.has_ca) === "1" || task_data.ca_id) {
@@ -1530,6 +1541,28 @@ router.put("/edit/:task_id", auth, validateBranch, async (req, res) => {
 
         await conn.commit();
         conn.release();
+
+        // Fire-and-forget CA assignment notifications (email + push) after a successful commit.
+        if (caChanged && assignedCaId) {
+            const task_label = task_data.service_name
+                ? `Task #${task_id} (${task_data.service_name})`
+                : `Task #${task_id}`;
+            notifyCaAssigned({
+                branch_id,
+                task_id,
+                ca_username: assignedCaId,
+            }).catch((err) => {
+                console.error("CA assigned email error:", err?.message || err);
+            });
+            notifyCaAssignedPush({
+                branch_id,
+                task_id,
+                ca_username: assignedCaId,
+                task_label,
+            }).catch((err) => {
+                console.error("CA assigned push error:", err?.message || err);
+            });
+        }
 
         return res.status(200).json({
             success: true,
@@ -1773,7 +1806,10 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
         }
 
         const [rows] = await pool.query(
-            "SELECT task_id, has_ca, ca_id, ca_approval FROM tasks WHERE branch_id = ? AND task_id = ? LIMIT 1",
+            `SELECT t.task_id, t.has_ca, t.ca_id, t.ca_approval, s.name AS service_name
+             FROM tasks t
+             LEFT JOIN services s ON s.service_id = t.service_id
+             WHERE t.branch_id = ? AND t.task_id = ? LIMIT 1`,
             [branch_id, taskId]
         );
         if (!rows.length) {
@@ -1788,6 +1824,7 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
         }
 
         const previous = String(task.ca_approval || "pending").toLowerCase();
+        const task_label = task.service_name ? `Task #${taskId} (${task.service_name})` : `Task #${taskId}`;
 
         await pool.query(
             "UPDATE tasks SET ca_approval = ? WHERE branch_id = ? AND task_id = ?",
@@ -1795,13 +1832,21 @@ router.put("/details/ca-approval", auth, validateBranch, async (req, res) => {
         );
 
         if (next === "sent" && previous !== "sent") {
-            // Fire-and-forget: do not block / fail the approval update on mail errors.
+            // Fire-and-forget: do not block / fail the approval update on mail/push errors.
             notifyCaApprovalSent({
                 branch_id,
                 task_id: taskId,
                 ca_username: task.ca_id,
             }).catch((err) => {
-                console.error("CA approval sent notify error:", err?.message || err);
+                console.error("CA approval sent email error:", err?.message || err);
+            });
+            notifyCaApprovalSentPush({
+                branch_id,
+                task_id: taskId,
+                ca_username: task.ca_id,
+                task_label,
+            }).catch((err) => {
+                console.error("CA approval sent push error:", err?.message || err);
             });
         }
 

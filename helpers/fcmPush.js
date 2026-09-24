@@ -356,6 +356,46 @@ export async function notifyServiceRequestStatusPush({ branch_id, request_id, cl
     });
 }
 
+/**
+ * Notify assigned CA via push when staff sets ca_approval = "sent".
+ * Mirrors notifyCaApprovalCompletePush but targets the CA instead of admins.
+ */
+export async function notifyCaApprovalSentPush({ branch_id, task_id, ca_username, task_label }) {
+    if (!ca_username || !task_id) return;
+
+    const label = task_label || `Task #${task_id}`;
+    await sendPushToUser(String(ca_username).trim(), 'ca', {
+        title: 'Task Sent for CA Approval',
+        body: `${label} has been sent to you for CA approval. Please review and add UDIN.`,
+        data: {
+            type: 'CA_APPROVAL_SENT',
+            taskId: String(task_id),
+            branchId: branch_id ? String(branch_id) : '',
+            panel: 'ca',
+        },
+    });
+}
+
+/**
+ * Notify a CA via push when they are first assigned (or re-assigned) to a task.
+ * Fires after PUT /edit/:task_id sets has_ca = 1 with a new ca_id.
+ */
+export async function notifyCaAssignedPush({ branch_id, task_id, ca_username, task_label }) {
+    if (!ca_username || !task_id) return;
+
+    const label = task_label || `Task #${task_id}`;
+    await sendPushToUser(String(ca_username).trim(), 'ca', {
+        title: 'New Task Assigned',
+        body: `${label} has been assigned to you as CA. Please review the task details.`,
+        data: {
+            type: 'CA_TASK_ASSIGNED',
+            taskId: String(task_id),
+            branchId: branch_id ? String(branch_id) : '',
+            panel: 'ca',
+        },
+    });
+}
+
 export async function notifyCaApprovalCompletePush({ branch_id, task_id, client_username, ca_username, task_label }) {
     if (!branch_id || !task_id) return;
 

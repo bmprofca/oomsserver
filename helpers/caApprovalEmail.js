@@ -242,3 +242,53 @@ export async function notifyCaApprovalComplete({
         return { sent: false, reason: "send_failed", error: error?.message || String(error) };
     }
 }
+
+/**
+ * Notify assigned CA by email when they are first assigned (or re-assigned) to a task.
+ * Fires after the PUT /edit/:task_id endpoint sets has_ca = 1 with a new ca_id.
+ */
+export async function notifyCaAssigned({ branch_id, task_id, ca_username, activity_at }) {
+    try {
+        const ctx = await loadTaskEmailContext(branch_id, task_id);
+        if (!ctx) {
+            console.warn("CA assigned email skipped: task not found", { branch_id, task_id });
+            return { sent: false, reason: "task_not_found" };
+        }
+
+        ctx.activity_at =
+            activity_at != null && String(activity_at).trim() !== ""
+                ? String(activity_at).trim()
+                : TIMESTAMP();
+
+        const ca = await loadCaProfile(ca_username || ctx.ca_id);
+        if (!ca || !isValidEmail(ca.email)) {
+            console.warn("CA assigned email skipped: CA email missing", {
+                branch_id,
+                task_id,
+                ca_username: ca_username || ctx.ca_id,
+            });
+            return { sent: false, reason: "ca_email_missing" };
+        }
+
+        const caPortalUrl = String(process.env.CA_PORTAL_URL || process.env.CA_APP_URL || "").trim();
+        const portalHint = caPortalUrl
+            ? ` You can view the task on the CA portal: <a href="${escapeHtml(caPortalUrl)}">${escapeHtml(caPortalUrl)}</a>`
+            : " Please sign in to the CA portal to view the task details.";
+
+        await SendMail({
+            to: String(ca.email).trim(),
+            subject: `${APP_NAME}: You have been assigned to a task — ${ctx.task_id}`,
+            html: wrapEmail({
+                title: "Task Assigned to You",
+                intro: `Hello ${escapeHtml(ca.name || "CA")}, you have been assigned as CA for the following task.${portalHint}`,
+                ctx,
+                footerNote: "This is an automated message from OOMS.",
+            }),
+        });
+
+        return { sent: true, to: String(ca.email).trim() };
+    } catch (error) {
+        console.error("CA assigned email error:", error?.message || error);
+        return { sent: false, reason: "send_failed", error: error?.message || String(error) };
+    }
+}
