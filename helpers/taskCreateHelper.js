@@ -614,6 +614,7 @@ async function createTaskFromServiceRequest({
         return {
             data: {
                 request_id: normalizedRequestId,
+                client_username: firm_username || firmRows[0].username,
                 status: updated.status || "approved",
                 task_id: updated.task_id || taskData.task_id,
                 modify_date: updated.modify_date || null,
