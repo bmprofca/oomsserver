@@ -11,6 +11,9 @@ test('buildPushNotificationPayload adds safe default metadata for task updates',
     panel: 'client',
     taskId: '123',
     status: 'in process',
+    navigation: { screen: 'ClientTaskDetails', params: { taskId: '123' } },
+    highlight: { kind: 'task', id: '123', field: 'status' },
+    filters: { status: 'in process' },
   });
 
   assert.equal(payload.title, 'Task Update');
@@ -19,6 +22,17 @@ test('buildPushNotificationPayload adds safe default metadata for task updates',
   assert.equal(payload.data.panel, 'client');
   assert.equal(payload.data.taskId, '123');
   assert.equal(payload.data.status, 'in process');
+  assert.equal(payload.data.schemaVersion, '1');
+  assert.deepEqual(JSON.parse(payload.data.navigation), {
+    screen: 'ClientTaskDetails',
+    params: { taskId: '123' },
+  });
+  assert.deepEqual(JSON.parse(payload.data.highlight), {
+    kind: 'task',
+    id: '123',
+    field: 'status',
+  });
+  assert.deepEqual(JSON.parse(payload.data.filters), { status: 'in process' });
 });
 
 test('resolveNotificationTargets returns all relevant panels for a task notification', () => {

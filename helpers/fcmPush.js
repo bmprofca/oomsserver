@@ -88,10 +88,18 @@ export function buildPushNotificationPayload({
     status,
     type,
     data = {},
+    navigation,
+    highlight,
+    filters,
 }) {
     const safeType = String((type || action || "GENERIC_NOTIFICATION")).trim().toUpperCase();
     const normalizedPanel = String(panel || "enduser").trim().toLowerCase();
-    const payloadData = { ...data, type: safeType, panel: normalizedPanel };
+    const payloadData = {
+        ...data,
+        schemaVersion: "1",
+        type: safeType,
+        panel: normalizedPanel,
+    };
 
     if (taskId !== undefined && taskId !== null && taskId !== "") {
         payloadData.taskId = String(taskId);
@@ -102,6 +110,10 @@ export function buildPushNotificationPayload({
     if (status !== undefined && status !== null && status !== "") {
         payloadData.status = String(status);
     }
+
+    if (navigation) payloadData.navigation = JSON.stringify(navigation);
+    if (highlight) payloadData.highlight = JSON.stringify(highlight);
+    if (filters) payloadData.filters = JSON.stringify(filters);
 
     return {
         title: String(title || "OOMS Notification"),
@@ -327,10 +339,13 @@ export async function notifyServiceRequestCreatedPush({ branch_id, request_id, c
                 title: 'New Service Request',
                 body: `Client ${client_username || 'customer'} raised a new service request${serviceLabel}.`,
                 data: {
+                    schemaVersion: '1',
                     type: 'SERVICE_REQUEST_CREATED',
                     requestId: String(request_id),
                     branchId: String(branch_id),
                     panel: 'enduser',
+                    navigation: JSON.stringify({ screen: 'ServiceRequests', params: { requestId: String(request_id) } }),
+                    highlight: JSON.stringify({ kind: 'serviceRequest', id: String(request_id), field: 'status' }),
                 },
             })
         )
@@ -347,11 +362,15 @@ export async function notifyServiceRequestStatusPush({ branch_id, request_id, cl
         title: `Service Request ${statusLabel}`,
         body: message || `Your service request #${request_id} has been updated.`,
         data: {
+            schemaVersion: '1',
             type: 'SERVICE_REQUEST_UPDATE',
             requestId: String(request_id),
             branchId: branch_id ? String(branch_id) : '',
             status: normalizedStatus,
             panel: 'client',
+            navigation: JSON.stringify({ screen: 'ClientRequestDetails', params: { requestId: String(request_id) } }),
+            highlight: JSON.stringify({ kind: 'serviceRequest', id: String(request_id), field: 'status' }),
+            filters: JSON.stringify({ status: normalizedStatus }),
         },
     });
 }
@@ -368,10 +387,14 @@ export async function notifyCaApprovalSentPush({ branch_id, task_id, ca_username
         title: 'Task Sent for CA Approval',
         body: `${label} has been sent to you for CA approval. Please review and add UDIN.`,
         data: {
+            schemaVersion: '1',
             type: 'CA_APPROVAL_SENT',
             taskId: String(task_id),
             branchId: branch_id ? String(branch_id) : '',
             panel: 'ca',
+            navigation: JSON.stringify({ screen: 'CATaskDetails', params: { taskId: String(task_id), initialTab: 'udin' } }),
+            highlight: JSON.stringify({ kind: 'task', id: String(task_id), field: 'ca_approval' }),
+            filters: JSON.stringify({ ca_approval: 'sent' }),
         },
     });
 }
@@ -388,10 +411,13 @@ export async function notifyCaAssignedPush({ branch_id, task_id, ca_username, ta
         title: 'New Task Assigned',
         body: `${label} has been assigned to you as CA. Please review the task details.`,
         data: {
+            schemaVersion: '1',
             type: 'CA_TASK_ASSIGNED',
             taskId: String(task_id),
             branchId: branch_id ? String(branch_id) : '',
             panel: 'ca',
+            navigation: JSON.stringify({ screen: 'CATaskDetails', params: { taskId: String(task_id) } }),
+            highlight: JSON.stringify({ kind: 'task', id: String(task_id), field: 'assignment' }),
         },
     });
 }
@@ -427,10 +453,18 @@ export async function notifyCaApprovalCompletePush({ branch_id, task_id, client_
                 title: 'CA Approval Complete',
                 body,
                 data: {
+                    schemaVersion: '1',
                     type: 'CA_APPROVAL_COMPLETE',
                     taskId: String(task_id),
                     branchId: String(branch_id),
                     panel: target.panel,
+                    navigation: JSON.stringify(target.panel === 'ca'
+                        ? { screen: 'CATaskDetails', params: { taskId: String(task_id), initialTab: 'udin' } }
+                        : target.panel === 'client'
+                            ? { screen: 'ClientTaskDetails', params: { taskId: String(task_id) } }
+                            : { screen: 'TaskDetail', params: { taskId: String(task_id) } }),
+                    highlight: JSON.stringify({ kind: 'task', id: String(task_id), field: 'ca_approval' }),
+                    filters: JSON.stringify({ ca_approval: 'complete' }),
                 },
             })
         )
@@ -468,6 +502,13 @@ export async function notifyTaskActionPush({
             panel: target.panel,
             taskId: task_id,
             status,
+            navigation: target.panel === 'client'
+                ? { screen: 'ClientTaskDetails', params: { taskId: String(task_id) } }
+                : target.panel === 'ca'
+                    ? { screen: 'CATaskDetails', params: { taskId: String(task_id) } }
+                    : { screen: 'TaskDetail', params: { taskId: String(task_id) } },
+            highlight: { kind: 'task', id: String(task_id), field: 'status' },
+            filters: status ? { status: String(status).trim().toLowerCase() } : undefined,
             data: {
                 branchId: branch_id ? String(branch_id) : undefined,
             },
@@ -537,6 +578,13 @@ export async function notifyTaskStatusPush({ branch_id, task_ids, status, update
                     panel: target.panel,
                     taskId: task.task_id,
                     status,
+                    navigation: target.panel === 'client'
+                        ? { screen: 'ClientTaskDetails', params: { taskId: String(task.task_id) } }
+                        : target.panel === 'ca'
+                            ? { screen: 'CATaskDetails', params: { taskId: String(task.task_id) } }
+                            : { screen: 'TaskDetail', params: { taskId: String(task.task_id) } },
+                    highlight: { kind: 'task', id: String(task.task_id), field: 'status' },
+                    filters: status ? { status: String(status).trim().toLowerCase() } : undefined,
                     data: {
                         taskLabel,
                     },
