@@ -15,7 +15,7 @@ import { startAttendanceWeeklyOffCron } from "./cron/attendanceWeeklyOffCron.js"
 import { startOneChattingCampaignCron } from "./cron/oneChattingCampaignCron.js";
 import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
-import publicRoutes from "./routes/public.js";
+import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
 
 const PORT = Number(process.env.PORT) || 8877;

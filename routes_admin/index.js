@@ -10,6 +10,7 @@ import callSystemRoutes from "./callSystem.js";
 import razorpayRoutes from "./razorpay.js";
 import walletRoutes from "./wallet.js";
 import helpSupportRoutes from "./helpSupport.js";
+import websiteContactRoutes from "./websiteContact.js";
 
 const router = express.Router();
 
@@ -24,5 +25,6 @@ router.use("/call-system", callSystemRoutes);
 router.use("/razorpay", razorpayRoutes);
 router.use("/wallet", walletRoutes);
 router.use("/help-support", helpSupportRoutes);
+router.use("/website-contact", websiteContactRoutes);
 
 export default router;
