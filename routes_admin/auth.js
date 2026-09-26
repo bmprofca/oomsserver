@@ -176,6 +176,17 @@ router.post("/login", async (req, res) => {
         await conn.query("UPDATE otps SET status = ? WHERE id = ?", ["1", otpRows[0].id]);
 
         const username = adminProfile.username;
+
+        // Single-device admin: terminate every other active session for this user instantly.
+        await conn.query(
+            `UPDATE tokens
+             SET status = '0',
+                 last_used_date = CURRENT_TIMESTAMP
+             WHERE username = ?
+               AND status = '1'`,
+            [username]
+        );
+
         const token_id = await UNIQUE_RANDOM_STRING("tokens", "token_id", { length: ID_LENGTH, conn });
         const token = RANDOM_STRING(50);
         await conn.query(

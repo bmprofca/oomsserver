@@ -195,20 +195,29 @@ router.get("/list", authAdmin, async (req, res) => {
         const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
         const offset = (page_no - 1) * limit;
         const search = req.query.search ? String(req.query.search).trim() : "";
+        const userType = req.query.user_type
+            ? String(req.query.user_type).trim().toLowerCase()
+            : "user";
 
         const { sql: searchSql, params: searchParams } = buildSearchClause(search);
 
+        const typeSql = userType
+            ? ` AND p.user_type = ? `
+            : "";
+        const typeParams = userType ? [userType] : [];
+
         const baseFrom = `
             FROM users u
-            LEFT JOIN profile p ON p.username = u.username
+            INNER JOIN profile p ON p.username = u.username
                 AND p.status = '1'
             WHERE 1 = 1
+            ${typeSql}
             ${searchSql}
         `;
 
         const [[{ total }]] = await pool.query(
             `SELECT COUNT(*) AS total ${baseFrom}`,
-            searchParams
+            [...typeParams, ...searchParams]
         );
 
         const [rows] = await pool.query(
@@ -228,11 +237,13 @@ router.get("/list", authAdmin, async (req, res) => {
                 p.district,
                 p.address_line_1,
                 p.address_line_2,
-                p.pincode
+                p.pincode,
+                p.user_type,
+                p.image
             ${baseFrom}
             ORDER BY u.id DESC
             LIMIT ? OFFSET ?`,
-            [...searchParams, limit, offset]
+            [...typeParams, ...searchParams, limit, offset]
         );
 
         const usernames = rows.map((row) => row.username).filter(Boolean);
@@ -277,6 +288,7 @@ router.get("/list", authAdmin, async (req, res) => {
 
         const data = rows.map((row) => ({
             username: row.username,
+            login_id: row.email || row.username,
             status: row.status === "1",
             remark: row.remark,
             create_date: FORMAT_DATE(row.create_date),
@@ -292,6 +304,8 @@ router.get("/list", authAdmin, async (req, res) => {
                 address_line_1: row.address_line_1,
                 address_line_2: row.address_line_2,
                 pincode: row.pincode,
+                user_type: row.user_type,
+                image: buildProfileImageUrl(row.image),
             },
             branches: branchesByUser[row.username] || [],
             branch_count: (branchesByUser[row.username] || []).length,
@@ -301,9 +315,10 @@ router.get("/list", authAdmin, async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: "User list retrieved successfully",
+            message: "Client list retrieved successfully",
             filters: {
                 search: search || null,
+                user_type: userType || null,
             },
             data,
             pagination: {
