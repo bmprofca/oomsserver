@@ -20,16 +20,18 @@ router.post("/login/send-otp", async (req, res) => {
     let conn;
 
     try {
-        const { country_code, mobile } = req.body || {};
+        const { mobile } = req.body || {};
+        const normalizedMobile = normalizeMobileDigits(mobile);
+        const normalizedCountryCode = normalizeCountryCode("+91");
 
-        if (!country_code || !mobile) {
+        if (!normalizedMobile || !/^\d{10}$/.test(normalizedMobile)) {
             return res.status(400).json({
                 success: false,
-                message: "Missing required parameters (country_code, mobile).",
+                message: "Enter a valid 10-digit mobile number.",
             });
         }
 
-        const clientProfile = await findActiveClientProfile(country_code, mobile);
+        const clientProfile = await findActiveClientProfile(normalizedCountryCode, normalizedMobile);
         if (!clientProfile) {
             return res.status(404).json({
                 success: false,
@@ -37,8 +39,6 @@ router.post("/login/send-otp", async (req, res) => {
             });
         }
 
-        const normalizedCountryCode = normalizeCountryCode(country_code);
-        const normalizedMobile = normalizeMobileDigits(mobile);
         const otp = await generateClientOtp();
 
         conn = await pool.getConnection();
@@ -110,26 +110,32 @@ router.post("/login", async (req, res) => {
     let conn;
 
     try {
-        const { country_code, mobile, otp } = req.body || {};
+        const { mobile, otp } = req.body || {};
         const IP = req.ip;
+        const normalizedMobile = normalizeMobileDigits(mobile);
+        const normalizedCountryCode = normalizeCountryCode("+91");
 
-        if (!country_code || !mobile || !otp) {
+        if (!normalizedMobile || !/^\d{10}$/.test(normalizedMobile)) {
             return res.status(400).json({
                 success: false,
-                message: "Missing required parameters (country_code, mobile, otp).",
+                message: "Enter a valid 10-digit mobile number.",
             });
         }
 
-        const clientProfile = await findActiveClientProfile(country_code, mobile);
+        if (!otp) {
+            return res.status(400).json({
+                success: false,
+                message: "OTP is required.",
+            });
+        }
+
+        const clientProfile = await findActiveClientProfile(normalizedCountryCode, normalizedMobile);
         if (!clientProfile) {
             return res.status(404).json({
                 success: false,
                 message: "Client not found or account is inactive.",
             });
         }
-
-        const normalizedCountryCode = normalizeCountryCode(country_code);
-        const normalizedMobile = normalizeMobileDigits(mobile);
 
         conn = await pool.getConnection();
         await conn.beginTransaction();

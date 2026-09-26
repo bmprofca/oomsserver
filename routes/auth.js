@@ -9,7 +9,6 @@ import { sendSmsOtp } from "../helpers/smsOtp.js";
 import {
     findSoftwareUserByEmail,
     findSoftwareUserByMobile,
-    resolveSoftwareUserByContact,
     REGISTER_OTP_TYPE,
     USER_OTP_TYPE,
 } from "../helpers/authProfile.js";
@@ -115,45 +114,23 @@ function validateRegistrationContact({ email, mobile }) {
 }
 
 function resolveLoginIdentifier(body = {}) {
-    const { email, login_id, phone, mobile, country_code } = body;
-    const normalizedCountryCode = normalizeCountryCode(country_code || "+91");
-    const directMobile = normalizeMobileDigits(mobile || phone);
-    const identifier = String(login_id || email || "").trim();
-    let lookupEmail = email ? String(email).trim().toLowerCase() : null;
-    let lookupMobile = directMobile;
-
-    if (!lookupMobile && identifier) {
-        if (identifier.includes("@")) {
-            lookupEmail = identifier.toLowerCase();
-        } else {
-            lookupMobile = normalizeMobileDigits(identifier);
-        }
-    }
+    // India-only product: country code is always managed server-side.
+    const normalizedCountryCode = normalizeCountryCode("+91");
+    const lookupMobile = normalizeMobileDigits(
+        body.mobile || body.phone || body.login_id
+    );
 
     return {
         normalizedCountryCode,
-        lookupEmail,
         lookupMobile,
-        identifier,
     };
 }
 
-async function findLoginUserAccount(conn, { normalizedCountryCode, lookupEmail, lookupMobile, identifier }) {
-    if (lookupMobile) {
-        const byMobile = await findSoftwareUserByMobile(conn, normalizedCountryCode, lookupMobile);
-        if (byMobile) return byMobile;
+async function findLoginUserAccount(conn, { normalizedCountryCode, lookupMobile }) {
+    if (!lookupMobile || !MOBILE_REGEX.test(lookupMobile)) {
+        return null;
     }
-
-    if (lookupEmail) {
-        const byEmail = await findSoftwareUserByEmail(conn, lookupEmail);
-        if (byEmail) return byEmail;
-    }
-
-    if (identifier) {
-        return resolveSoftwareUserByContact(conn, identifier);
-    }
-
-    return null;
+    return findSoftwareUserByMobile(conn, normalizedCountryCode, lookupMobile);
 }
 
 async function findExistingUser(conn, { email, mobile }) {
@@ -457,13 +434,12 @@ router.post("/login/send-otp", async (req, res) => {
     let conn;
 
     try {
-        const { template_id, config_id } = req.body ?? {};
         const loginLookup = resolveLoginIdentifier(req.body);
 
-        if (!loginLookup.lookupMobile && !loginLookup.lookupEmail && !loginLookup.identifier) {
+        if (!loginLookup.lookupMobile || !MOBILE_REGEX.test(loginLookup.lookupMobile)) {
             return res.status(400).json({
                 success: false,
-                message: "Mobile number or email is required.",
+                message: "Enter a valid 10-digit mobile number.",
             });
         }
 
@@ -481,7 +457,7 @@ router.post("/login/send-otp", async (req, res) => {
         }
 
         const db_username = userAccount.username;
-        const otpCountryCode = normalizeCountryCode(userAccount.country_code || loginLookup.normalizedCountryCode);
+        const otpCountryCode = normalizeCountryCode("+91");
         const otpMobile = normalizeMobileDigits(userAccount.mobile || loginLookup.lookupMobile);
 
         if (!otpMobile || !MOBILE_REGEX.test(otpMobile)) {
@@ -575,7 +551,7 @@ const verifyOtpHandler = async (req, res) => {
     let conn;
 
     try {
-        const { otp, country_code } = req.body || {};
+        const { otp } = req.body || {};
         const loginLookup = resolveLoginIdentifier(req.body);
         const IP = req.ip;
 
@@ -586,10 +562,10 @@ const verifyOtpHandler = async (req, res) => {
             });
         }
 
-        if (!loginLookup.lookupMobile && !loginLookup.lookupEmail && !loginLookup.identifier) {
+        if (!loginLookup.lookupMobile || !MOBILE_REGEX.test(loginLookup.lookupMobile)) {
             return res.status(400).json({
                 success: false,
-                message: "Mobile number or email is required.",
+                message: "Enter a valid 10-digit mobile number.",
             });
         }
 
@@ -607,7 +583,7 @@ const verifyOtpHandler = async (req, res) => {
         }
 
         const resolvedUsername = userAccount.username;
-        const otpCountryCode = normalizeCountryCode(userAccount.country_code || loginLookup.normalizedCountryCode || country_code);
+        const otpCountryCode = normalizeCountryCode("+91");
         const otpMobile = normalizeMobileDigits(userAccount.mobile || loginLookup.lookupMobile);
 
         if (!otpMobile) {
