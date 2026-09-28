@@ -12,6 +12,7 @@ import walletRoutes from "./wallet.js";
 import helpSupportRoutes from "./helpSupport.js";
 import websiteContactRoutes from "./websiteContact.js";
 import websiteLegalRoutes from "./websiteLegal.js";
+import accountDeletionRoutes from "./accountDeletion.js";
 
 const router = express.Router();
 
@@ -28,5 +29,6 @@ router.use("/wallet", walletRoutes);
 router.use("/help-support", helpSupportRoutes);
 router.use("/website-contact", websiteContactRoutes);
 router.use("/website-legal", websiteLegalRoutes);
+router.use("/account-deletion", accountDeletionRoutes);
 
 export default router;
