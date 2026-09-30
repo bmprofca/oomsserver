@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import Handlebars from "handlebars";
 import PDFDocument from "pdfkit";
+import { getInvoiceFormat } from "./invoiceFormatCatalog.js";
 
 // Register helper for money formatting
 Handlebars.registerHelper("money", function (num) {
@@ -18,14 +19,23 @@ Handlebars.registerHelper("eq", function (a, b) {
  * Loads an HTML template from disk, compiles it with Handlebars, and injects data.
  */
 export async function renderHtmlTemplate(type, templateName, data) {
-    const templatePath = path.join(process.cwd(), "templates", "format", type, `${templateName}.html`);
+    let htmlContent = "";
     try {
-        const htmlContent = await fs.readFile(templatePath, "utf-8");
+        const stored = await getInvoiceFormat(type, templateName);
+        htmlContent = stored?.html || "";
+    } catch (error) {
+        console.error("Invoice format catalog lookup failed:", error.message);
+    }
+    if (!htmlContent) {
+        const templatePath = path.join(process.cwd(), "templates", "format", type, `${templateName}.html`);
+        htmlContent = await fs.readFile(templatePath, "utf-8");
+    }
+    try {
         const template = Handlebars.compile(htmlContent);
         return template(data);
     } catch (error) {
-        console.error(`Error loading/rendering template ${templateName} for type ${type}:`, error);
-        throw new Error(`Template not found or failed to render: ${templatePath}`);
+        console.error(`Error rendering template ${templateName} for type ${type}:`, error);
+        throw new Error(`Template failed to render: ${type}/${templateName}`);
     }
 }
 

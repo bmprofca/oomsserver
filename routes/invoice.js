@@ -11,6 +11,7 @@ import {
     saveInvoicePdfLink,
 } from "../services/invoiceGenerateService.js";
 import { isValidFormatForType, INVOICE_GENERATE_TYPES } from "../helpers/invoiceFormatMapping.js";
+import { getInvoiceFormat } from "../helpers/invoiceFormatCatalog.js";
 import {
     sendDocumentSharingWhatsapp,
 } from "../helpers/whatsappNotification.js";
@@ -43,7 +44,13 @@ function getFormatColumnForInvoiceType(invoiceType) {
     return INVOICE_TYPE_TO_FORMAT_COLUMN[key] ?? null;
 }
 
-function isValidFormatKey(invoiceType, key) {
+async function isValidFormatKey(invoiceType, key) {
+    try {
+        const row = await getInvoiceFormat(invoiceType, key);
+        if (row) return row.status === "active";
+    } catch (error) {
+        console.error("Invoice format catalog check failed:", error.message);
+    }
     return isValidFormatForType(invoiceType, key);
 }
 
@@ -166,7 +173,7 @@ router.put("/update-format", auth, validateBranch, async (req, res) => {
                 message: "format_id is required",
             });
         }
-        if (!isValidFormatKey(col, rawFormat)) {
+        if (!(await isValidFormatKey(col, rawFormat))) {
             return res.status(400).json({
                 success: false,
                 message: `format_id must be a valid format for type ${col}`,

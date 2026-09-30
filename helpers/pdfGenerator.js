@@ -13,6 +13,7 @@ export async function buildUnifiedInvoicePdfBuffer({
     partyName,
     issuer,
     lines = [],
+    accent = "#2563eb",
 }) {
     return new Promise((resolve, reject) => {
         try {
@@ -35,7 +36,8 @@ export async function buildUnifiedInvoicePdfBuffer({
             const right = pageW - 48;
             const contentW = right - left;
 
-            drawHeader(doc, issuer, title, left, right, contentW);
+            const theme = /^#[0-9a-fA-F]{6}$/.test(String(accent || "")) ? accent : "#2563eb";
+            drawHeader(doc, issuer, title, left, right, contentW, theme);
             let y = 150;
 
             y = drawMeta(doc, invoice, transactionRow, left, right, y);
@@ -43,9 +45,9 @@ export async function buildUnifiedInvoicePdfBuffer({
 
             if (items && items.length > 0) {
                 y = drawItemsTable(doc, items, left, contentW, y);
-                y = drawTotals(doc, invoice, items, left, contentW, y);
+                y = drawTotals(doc, invoice, items, left, contentW, y, theme);
             } else {
-                y = drawSimpleAmount(doc, invoice, lines, left, contentW, y);
+                y = drawSimpleAmount(doc, invoice, lines, left, contentW, y, theme);
             }
 
             const remark = invoice?.remark || invoice?.remarks || transactionRow?.remark;
@@ -61,8 +63,8 @@ export async function buildUnifiedInvoicePdfBuffer({
     });
 }
 
-function drawHeader(doc, issuer, title, left, right, contentW) {
-    doc.rect(left, 40, contentW, 4).fill("#2563eb");
+function drawHeader(doc, issuer, title, left, right, contentW, accent) {
+    doc.rect(left, 40, contentW, 4).fill(accent);
 
     doc.fillColor("#0f172a")
         .font("Helvetica-Bold")
@@ -87,7 +89,7 @@ function drawHeader(doc, issuer, title, left, right, contentW) {
             .text(`Email: ${issuer.email}`, left, contactY, { width: contentW * 0.55 });
     }
 
-    doc.fillColor("#2563eb")
+    doc.fillColor(accent)
         .font("Helvetica-Bold")
         .fontSize(14)
         .text(title || "INVOICE", left + contentW * 0.55, 55, {
@@ -215,7 +217,7 @@ function deriveTax(invoice) {
     return 0;
 }
 
-function drawTotals(doc, invoice, items, left, contentW, y) {
+function drawTotals(doc, invoice, items, left, contentW, y, accent) {
     const boxW = 220;
     const boxX = left + contentW - boxW;
     const pad = 10;
@@ -252,14 +254,14 @@ function drawTotals(doc, invoice, items, left, contentW, y) {
         y += 16;
     }
     y += 4;
-    doc.strokeColor("#2563eb").lineWidth(1.5)
+    doc.strokeColor(accent).lineWidth(1.5)
         .moveTo(boxX, y).lineTo(boxX + boxW, y).stroke();
     y += 8;
-    totalsRow(doc, "Grand Total", money(grand), boxX, boxW, y, pad, "#2563eb", "#2563eb", 11, true);
+    totalsRow(doc, "Grand Total", money(grand), boxX, boxW, y, pad, accent, accent, 11, true);
     return y + 28;
 }
 
-function drawSimpleAmount(doc, invoice, lines, left, contentW, y) {
+function drawSimpleAmount(doc, invoice, lines, left, contentW, y, accent) {
     const amount =
         Number(invoice?.grand_total) ||
         Number(invoice?.amount) ||
@@ -269,7 +271,7 @@ function drawSimpleAmount(doc, invoice, lines, left, contentW, y) {
     doc.rect(left, y, contentW, 56).fill("#f8fafc");
     doc.fillColor("#64748b").font("Helvetica").fontSize(9)
         .text("AMOUNT", left + 16, y + 12);
-    doc.fillColor("#2563eb").font("Helvetica-Bold").fontSize(18)
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(18)
         .text(money(amount), left + 16, y + 28);
 
     return y + 72;
@@ -293,11 +295,17 @@ function drawRemark(doc, remark, left, contentW, y) {
 }
 
 function drawFooter(doc, left, contentW) {
-    const y = doc.page.height - 40;
-    doc.fontSize(8)
-        .fillColor("#94a3b8")
+    // The document margin is 48pt. Drawing below that makes PDFKit open a
+    // blank extra page even when the invoice already fits on one page.
+    const previousBottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    const y = doc.page.height - 32;
+    doc.font("Helvetica").fontSize(8).fillColor("#94a3b8")
         .text("Thank you for your business.", left, y, {
             align: "center",
             width: contentW,
+            lineBreak: false,
+            height: 12,
         });
+    doc.page.margins.bottom = previousBottom;
 }

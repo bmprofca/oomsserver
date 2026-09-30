@@ -19,7 +19,7 @@ export const DEFAULT_LEGAL_PAGES = [
         title: "Privacy Policy",
         sort_order: 10,
         content_html: `
-<p><strong>Effective date:</strong> 26 September 2026</p>
+<p><strong>Effective date:</strong> 28 September 2026</p>
 <p>OneSaaS Technologies Private Limited ("OneSaaS", "OOMS", "we", "us", or "our") operates the OneSaaS Office Management System (OOMS) and related websites, portals, and applications. This Privacy Policy explains how we collect, use, store, share, and protect personal and business information when you use our products and services in India.</p>
 
 <h3>1. Who We Are</h3>
@@ -61,10 +61,21 @@ export const DEFAULT_LEGAL_PAGES = [
 <p>We use administrative, technical, and organisational safeguards appropriate to the nature of the data, including access controls, encrypted transport (HTTPS/TLS), and monitoring. No method of transmission or storage is 100% secure; you are responsible for safeguarding login credentials and configuring staff access carefully.</p>
 
 <h3>7. Retention</h3>
-<p>We retain account and operational data for as long as your subscription remains active and thereafter as needed for backups, dispute resolution, audit, accounting, and legal retention requirements. You may request deletion subject to legal and contractual limits.</p>
+<p>We retain account and operational data for as long as your subscription remains active and thereafter as needed for backups, dispute resolution, audit, accounting, and legal retention requirements. You may request deletion of your account and the personal data associated with it, subject to the legal and contractual limits described below.</p>
 
 <h3>8. Your Rights &amp; Choices</h3>
-<p>Subject to applicable law, you may request access, correction, or deletion of personal data associated with your account, or withdraw consent where processing is consent-based. Account owners/admins control much of the business data stored in their tenant. Contact us using the details below to raise a privacy request.</p>
+<p>Subject to applicable law, you may request access, correction, or deletion of personal data associated with your account, or withdraw consent where processing is consent-based. Account owners and administrators control much of the business data stored in their tenant.</p>
+
+<h3>8.1 Account deletion</h3>
+<p>You can ask us to delete your OOMS account and the personal data tied to it by submitting the public account deletion form at <a href="https://ooms.in/account-deletion">https://ooms.in/account-deletion</a>. Use the name, email address, and mobile number registered on the account, and your username if you have one.</p>
+<p>After we receive the request we will:</p>
+<ul>
+  <li>Match the details you submitted to the registered account.</li>
+  <li>Close the account and delete personal profile data associated with it.</li>
+  <li>Keep only records we are required to retain by law, such as billing, tax, and fraud-prevention records, for the applicable retention period.</li>
+  <li>Send a status update to the email address you provide on the form.</li>
+</ul>
+<p>Firm owners should export any business records they still need before requesting deletion. If you cannot use the form, you may also contact us through <a href="https://ooms.in/contact">ooms.in/contact</a>.</p>
 
 <h3>9. Children</h3>
 <p>OOMS is intended for professional and business use. We do not knowingly collect personal data from children for consumer purposes.</p>
@@ -76,7 +87,7 @@ export const DEFAULT_LEGAL_PAGES = [
 <p>We may update this Privacy Policy from time to time. Material changes will be reflected by updating the effective date on this page. Continued use of OOMS after changes means you acknowledge the updated policy.</p>
 
 <h3>12. Contact</h3>
-<p>For privacy questions or requests, contact OneSaaS Technologies Private Limited through the support channels published on <a href="https://ooms.in/contact">ooms.in/contact</a> or your account support email.</p>
+<p>For privacy questions, contact OneSaaS Technologies Private Limited through the support channels published on <a href="https://ooms.in/contact">ooms.in/contact</a>. To request deletion of your account, use <a href="https://ooms.in/account-deletion">ooms.in/account-deletion</a>.</p>
 `.trim(),
     },
     {

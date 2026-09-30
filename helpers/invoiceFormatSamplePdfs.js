@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { BASE_DOMAIN } from "./Config.js";
 import { buildUnifiedInvoicePdfBuffer } from "./pdfGenerator.js";
-import { getAvailableFormatsForType } from "./invoiceFormatMapping.js";
+import { listInvoiceFormats } from "./invoiceFormatCatalog.js";
 
 const INVOICE_FORMAT_COLUMNS = ["sale", "purchase", "payment", "receive", "journal", "expense"];
 
@@ -86,7 +86,7 @@ async function fileExists(filePath) {
     }
 }
 
-async function buildOneSamplePdf(columnKey) {
+async function buildOneSamplePdf(columnKey, accent) {
     const isSale = columnKey === "sale";
     const isPurchase = columnKey === "purchase";
 
@@ -107,6 +107,7 @@ async function buildOneSamplePdf(columnKey) {
         partyName,
         issuer: SAMPLE_ISSUER,
         lines,
+        accent: accent || "#2563eb",
     });
 }
 
@@ -115,27 +116,30 @@ async function buildOneSamplePdf(columnKey) {
  * Missing files are generated with PDFKit (no Puppeteer).
  */
 async function ensureTypeFormatSamples(columnKey) {
-    const formats = getAvailableFormatsForType(columnKey);
+    const formats = await listInvoiceFormats({ invoiceType: columnKey, activeOnly: true });
     const dir = path.join(process.cwd(), "media", "format", columnKey);
     await fs.mkdir(dir, { recursive: true });
 
-    let allExist = true;
-    for (const formatKey of formats) {
-        if (!(await fileExists(path.join(dir, `${formatKey}.pdf`)))) {
-            allExist = false;
-            break;
+    for (const format of formats) {
+        const pdfPath = path.join(dir, `${format.format_key}.pdf`);
+        const markerPath = path.join(dir, `${format.format_key}.accent`);
+        const accent = format.accent_color || "#2563eb";
+        let storedAccent = "";
+        try {
+            storedAccent = (await fs.readFile(markerPath, "utf8")).trim().toLowerCase();
+        } catch {
+            storedAccent = "";
         }
-    }
-    if (allExist) return;
-
-    try {
-        // One PDFKit layout for all format keys (HTML theme variants need a browser).
-        const buffer = await buildOneSamplePdf(columnKey);
-        for (const formatKey of formats) {
-            await fs.writeFile(path.join(dir, `${formatKey}.pdf`), buffer);
+        if ((await fileExists(pdfPath)) && storedAccent === accent.toLowerCase()) {
+            continue;
         }
-    } catch (err) {
-        console.error(`[InvoiceFormats] PDFKit sample render failed for '${columnKey}':`, err.message);
+        try {
+            const buffer = await buildOneSamplePdf(columnKey, accent);
+            await fs.writeFile(pdfPath, buffer);
+            await fs.writeFile(markerPath, accent.toLowerCase());
+        } catch (err) {
+            console.error(`[InvoiceFormats] PDFKit sample render failed for '${columnKey}/${format.format_key}':`, err.message);
+        }
     }
 }
 
@@ -156,15 +160,12 @@ export async function getFormatSamplePdfsBase64(invoiceTypeInput) {
 
     await ensureTypeFormatSamples(dirKey);
 
-    const formats = getAvailableFormatsForType(dirKey);
+    const formats = await listInvoiceFormats({ invoiceType: dirKey, activeOnly: true });
     const base = String(BASE_DOMAIN || "").replace(/\/$/, "");
-    const out = [];
-    for (let i = 0; i < formats.length; i++) {
-        const formatKey = formats[i];
-        out.push({
-            format_id: formatKey,
-            url: `${base}/media/format/${dirKey}/${formatKey}.pdf`,
-        });
-    }
-    return out;
+    return formats.map((format) => ({
+        format_id: format.format_key,
+        name: format.name,
+        accent_color: format.accent_color,
+        url: `${base}/media/format/${dirKey}/${format.format_key}.pdf`,
+    }));
 }

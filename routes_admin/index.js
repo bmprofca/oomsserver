@@ -13,9 +13,12 @@ import helpSupportRoutes from "./helpSupport.js";
 import websiteContactRoutes from "./websiteContact.js";
 import websiteLegalRoutes from "./websiteLegal.js";
 import accountDeletionRoutes from "./accountDeletion.js";
+import dashboardRoutes from "./dashboard.js";
+import invoiceFormatRoutes from "./invoiceFormats.js";
 
 const router = express.Router();
 
+router.use("/dashboard", dashboardRoutes);
 router.use("/auth", authRoutes);
 router.use("/user", userRoutes);
 router.use("/branch", branchRoutes);
@@ -30,5 +33,6 @@ router.use("/help-support", helpSupportRoutes);
 router.use("/website-contact", websiteContactRoutes);
 router.use("/website-legal", websiteLegalRoutes);
 router.use("/account-deletion", accountDeletionRoutes);
+router.use("/invoice-formats", invoiceFormatRoutes);
 
 export default router;

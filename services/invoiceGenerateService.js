@@ -1,5 +1,6 @@
 import pool from "../db.js";
 import { buildUnifiedInvoicePdfBuffer } from "../helpers/pdfGenerator.js";
+import { getInvoiceFormat } from "../helpers/invoiceFormatCatalog.js";
 import { uploadBufferToOneSaas } from "./onesaasUploadService.js";
 
 const ALLOWED_GENERATE_TYPES = new Set([
@@ -241,6 +242,7 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
     }
 
     const rawFormatKey = await getActiveFormatKeyForInvoiceType(branch_id, invoiceType);
+    const formatRecord = await getInvoiceFormat(invoiceType, rawFormatKey).catch(() => null);
 
     const invoiceForPdf = {
         ...invoice,
@@ -256,6 +258,7 @@ async function buildInvoicePdfBuffer(branch_id, caller, invoice_id, requestedTyp
         partyName,
         issuer,
         lines,
+        accent: formatRecord?.accent_color || "#2563eb",
     });
 
     const safeNo = String(invoice.invoice_no || invoice.invoice_id || "inv").replace(/[^\w.-]+/g, "_");
