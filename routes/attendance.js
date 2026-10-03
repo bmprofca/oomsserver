@@ -314,6 +314,66 @@ function computePresentWageBreakdown({
     };
 }
 
+function isSalaryFlagOn(value) {
+    return value === "1" || value === 1 || value === true;
+}
+
+/**
+ * Wage stored when a day is approved. Matches single-day mark:
+ * present uses punch times, half day is half the daily rate, leave is a full day.
+ * Returns null when the day cannot be priced (no salary, or present without both punches).
+ */
+function wageForApproval(existing, salary, date) {
+    const status = String(existing?.status || "").toLowerCase().trim();
+
+    if (status === "half day") {
+        const amount = Number(salary?.amount);
+        const days = daysInMonthFromDate(date);
+        if (!Number.isFinite(amount) || amount <= 0 || !days) return null;
+        const daily = amount / days / 2;
+        return {
+            ...clearWageColumns(),
+            daily_wage: Number(daily.toFixed(4)),
+            net_day_amount: Number(daily.toFixed(4)),
+        };
+    }
+
+    if (status === "leave") {
+        const wage = buildLeaveWageForDate(salary, date);
+        return Number.isFinite(Number(wage?.net_day_amount)) ? wage : null;
+    }
+
+    if (status === "absent") {
+        return {
+            ...clearWageColumns(),
+            daily_wage: 0,
+            overtime_amount: 0,
+            fine_amount: 0,
+            net_day_amount: 0,
+        };
+    }
+
+    if (status !== "present") return null;
+
+    const wage = computePresentWageBreakdown({
+        inTime: existing.in_time,
+        outTime: existing.out_time,
+        date,
+        monthlyAmount: salary?.amount,
+        expectedMinutes: salary?.expected_minutes,
+        expectedHours: salary?.expected_hours,
+        gracePeriodMinutes: salary?.grace_period_minutes,
+        overtimeEnabled:
+            isSalaryFlagOn(existing.overtime_enabled) &&
+            isSalaryFlagOn(salary?.overtime_enabled),
+        fineEnabled:
+            isSalaryFlagOn(existing.fine_enabled) &&
+            isSalaryFlagOn(salary?.fine_enabled),
+        statusMultiplier: 1,
+    });
+    return Number.isFinite(Number(wage?.net_day_amount)) ? wage : null;
+}
+
 async function getActiveSalaryForDate(conn, { branch_id, username, date }) {
     try {
         const [rows] = await conn.query(
@@ -1758,14 +1818,60 @@ router.post("/manage/approve", auth, validateBranch, async (req, res) => {
             });
         }
 
-        await connection.query(
-            `UPDATE attendance
-             SET is_approved = ?,
-                 modify_by = ?,
-                 modify_date = ?
-             WHERE id = ?`,
-            [approve ? 1 : 0, actor, now, existing.id]
-        );
+        const salary = approve
+            ? await getActiveSalaryForDate(connection, {
+                branch_id,
+                username: targetUsername,
+                date,
+            })
+            : null;
+        const wage = approve ? wageForApproval(existing, salary, date) : null;
+
+        if (wage) {
+            await connection.query(
+                `UPDATE attendance
+                 SET is_approved = 1,
+                     approved_by = ?,
+                     modify_by = ?,
+                     modify_date = ?,
+                     expected_hours = ?,
+                     worked_minutes = ?,
+                     extra_minutes = ?,
+                     less_minutes = ?,
+                     overtime_enabled = ?,
+                     fine_enabled = ?,
+                     daily_wage = ?,
+                     overtime_amount = ?,
+                     fine_amount = ?,
+                     net_day_amount = ?
+                 WHERE id = ?`,
+                [
+                    actor,
+                    actor,
+                    now,
+                    wage.expected_hours,
+                    wage.worked_minutes,
+                    wage.extra_minutes,
+                    wage.less_minutes,
+                    wage.overtime_enabled,
+                    wage.fine_enabled,
+                    wage.daily_wage,
+                    wage.overtime_amount,
+                    wage.fine_amount,
+                    wage.net_day_amount,
+                    existing.id,
+                ]
+            );
+        } else {
+            await connection.query(
+                `UPDATE attendance
+                 SET is_approved = ?,
+                     modify_by = ?,
+                     modify_date = ?
+                 WHERE id = ?`,
+                [approve ? 1 : 0, actor, now, existing.id]
+            );
+        }
 
         await connection.commit();
         const data = await loadTodayStatusPayload(pool, {

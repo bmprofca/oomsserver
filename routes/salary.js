@@ -2297,7 +2297,7 @@ async function computeMonthAttendanceWage(
 ) {
     const db = connection || pool;
     const [attRows] = await db.query(
-        `SELECT id, date, status, daily_wage, overtime_amount, fine_amount, net_day_amount
+        `SELECT id, date, status, in_time, out_time, daily_wage, overtime_amount, fine_amount, net_day_amount
          FROM attendance
          WHERE branch_id = ?
            AND username = ?
@@ -2342,10 +2342,32 @@ async function computeMonthAttendanceWage(
         let net_day_amount = Number(row.net_day_amount);
         if (!Number.isFinite(net_day_amount)) net_day_amount = 0;
 
-        if (status === "present") {
-            present_days += 1;
-        } else if (status === "half day") {
-            half_days += 1;
+        if (status === "present" || status === "half day") {
+            if (status === "present") present_days += 1;
+            else half_days += 1;
+
+            const missingNet = Math.abs(net_day_amount) < 0.009;
+            const canPrice = status === "half day" || (row.in_time && row.out_time);
+            if (missingNet && canPrice) {
+                const salary = pickSalaryForDate(salaries, dateYmd);
+                const fullDay = fullDayWageFromAmount(salary?.amount, dateYmd);
+                const priced = status === "half day" ? Number((fullDay / 2).toFixed(4)) : fullDay;
+                if (priced > 0) {
+                    daily_wage = priced;
+                    overtime_amount = 0;
+                    fine_amount = 0;
+                    net_day_amount = priced;
+                    if (persistFixes && row.id != null) {
+                        leaveFixes.push({
+                            id: row.id,
+                            daily_wage,
+                            overtime_amount,
+                            fine_amount,
+                            net_day_amount,
+                        });
+                    }
+                }
+            }
         } else if (status === "leave") {
             leave_days += 1;
             const salary = pickSalaryForDate(salaries, dateYmd);
