@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS `in_app_voice_call_settings` (
+  `id` TINYINT UNSIGNED NOT NULL,
+  `enabled` TINYINT(1) NOT NULL DEFAULT 0,
+  `server_url` VARCHAR(255) NOT NULL,
+  `api_key_encrypted` TEXT NOT NULL,
+  `api_secret_encrypted` TEXT NOT NULL,
+  `updated_by` VARCHAR(50) NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -101,14 +101,12 @@ server.listen(PORT, '0.0.0.0', () => {
     startOneChattingCampaignCron();
     startSmsCampaignCron();
     startEmailBroadcastScheduleCron();
-    if (String(process.env.IN_APP_VOICE_CALLS_ENABLED).toLowerCase() === "true") {
-        const voiceCallExpiryTimer = setInterval(() => {
-            updateExpiredInvites().catch((error) => {
-                console.error("VOICE CALL EXPIRY WORKER ERROR:", error);
-            });
-        }, 15000);
-        voiceCallExpiryTimer.unref();
-    }
+    const voiceCallExpiryTimer = setInterval(() => {
+        updateExpiredInvites().catch((error) => {
+            console.error("VOICE CALL EXPIRY WORKER ERROR:", error);
+        });
+    }, 15000);
+    voiceCallExpiryTimer.unref();
 });
 
 export { WsIo };

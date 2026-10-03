@@ -10,22 +10,42 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { validateClientSession } from "../middleware/validateClientSession.js";
 import { sendPushToUser } from "../helpers/fcmPush.js";
+import {
+    decryptVoiceCallConfig,
+    encryptVoiceCallConfig,
+} from "../utils/voiceCallConfigCrypto.js";
 
 const router = express.Router();
 const INVITE_TTL_SECONDS = 45;
 const MAX_CALL_INVITES_PER_MINUTE = 10;
 const ACTIVE_CALL_STATUSES = ["ringing", "accepted"];
 
-function liveKitConfig() {
-    if (String(process.env.IN_APP_VOICE_CALLS_ENABLED).toLowerCase() !== "true") {
+async function liveKitConfig({ requireEnabled = true } = {}) {
+    const [rows] = await pool.query(
+        `SELECT enabled, server_url, api_key_encrypted, api_secret_encrypted
+         FROM in_app_voice_call_settings
+         WHERE id = 1
+         LIMIT 1`
+    );
+    const settings = rows[0];
+    if (!settings || (requireEnabled && Number(settings.enabled) !== 1)) {
         const error = new Error("In-app voice calling is not enabled");
         error.status = 503;
         throw error;
     }
 
-    const serverUrl = String(process.env.LIVEKIT_URL || "").trim().replace(/\/+$/, "");
-    const apiKey = String(process.env.LIVEKIT_API_KEY || "").trim();
-    const apiSecret = String(process.env.LIVEKIT_API_SECRET || "").trim();
+    const serverUrl = String(settings.server_url || "").trim().replace(/\/+$/, "");
+    let apiKey;
+    let apiSecret;
+    try {
+        apiKey = decryptVoiceCallConfig(settings.api_key_encrypted);
+        apiSecret = decryptVoiceCallConfig(settings.api_secret_encrypted);
+    } catch (error) {
+        if (error?.status) throw error;
+        const configError = new Error("LiveKit credentials could not be decrypted");
+        configError.status = 503;
+        throw configError;
+    }
     if (!serverUrl || !apiKey || !apiSecret) {
         const error = new Error("In-app voice calling is not configured");
         error.status = 503;
@@ -36,12 +56,12 @@ function liveKitConfig() {
     try {
         parsed = new URL(serverUrl);
     } catch {
-        const error = new Error("LIVEKIT_URL must be a valid secure WebSocket URL");
+        const error = new Error("Stored LiveKit server URL must be valid");
         error.status = 503;
         throw error;
     }
     if (parsed.protocol !== "wss:") {
-        const error = new Error("LIVEKIT_URL must use wss://");
+        const error = new Error("Stored LiveKit server URL must use wss://");
         error.status = 503;
         throw error;
     }
@@ -69,6 +89,193 @@ function sendError(res, error, fallback) {
 function requestUsername(req) {
     return String(req.headers.username || req.headers.Username || "").trim();
 }
+
+async function requirePlatformAdmin(req, res, next) {
+    try {
+        const username = requestUsername(req);
+        const [rows] = await pool.query(
+            `SELECT 1
+             FROM profile
+             WHERE username = ? AND user_type = 'platform_admin' AND status = '1'
+             LIMIT 1`,
+            [username]
+        );
+        if (!rows.length) {
+            return res.status(403).json({
+                success: false,
+                message: "Only platform admins can manage LiveKit settings",
+            });
+        }
+        next();
+    } catch (error) {
+        console.error("LIVEKIT SETTINGS AUTHORIZATION ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to verify platform admin access",
+        });
+    }
+}
+
+function normalizeEnabled(value, fallback) {
+    if (value === undefined) return fallback;
+    if (value === true || value === 1 || value === "1") return 1;
+    if (value === false || value === 0 || value === "0") return 0;
+    return null;
+}
+
+function validateLiveKitUrl(value) {
+    try {
+        const parsed = new URL(value);
+        return parsed.protocol === "wss:" &&
+            Boolean(parsed.hostname) &&
+            !parsed.username &&
+            !parsed.password &&
+            !parsed.search &&
+            !parsed.hash &&
+            parsed.pathname === "/";
+    } catch {
+        return false;
+    }
+}
+
+router.get("/admin/settings", auth, requirePlatformAdmin, async (_req, res) => {
+    try {
+        const [rows] = await pool.query(
+            `SELECT enabled, server_url, api_key_encrypted, api_secret_encrypted,
+                    updated_by, updated_at
+             FROM in_app_voice_call_settings
+             WHERE id = 1
+             LIMIT 1`
+        );
+        const settings = rows[0];
+        return res.status(200).json({
+            success: true,
+            data: settings
+                ? {
+                    configured: true,
+                    enabled: Number(settings.enabled) === 1,
+                    server_url: settings.server_url,
+                    has_api_key: Boolean(settings.api_key_encrypted),
+                    has_api_secret: Boolean(settings.api_secret_encrypted),
+                    updated_by: settings.updated_by,
+                    updated_at: settings.updated_at,
+                }
+                : {
+                    configured: false,
+                    enabled: false,
+                    server_url: "",
+                    has_api_key: false,
+                    has_api_secret: false,
+                    updated_by: null,
+                    updated_at: null,
+                },
+        });
+    } catch (error) {
+        return sendError(res, error, "Failed to load LiveKit settings");
+    }
+});
+
+router.put("/admin/settings", auth, requirePlatformAdmin, async (req, res) => {
+    try {
+        const [rows] = await pool.query(
+            `SELECT enabled, server_url, api_key_encrypted, api_secret_encrypted
+             FROM in_app_voice_call_settings
+             WHERE id = 1
+             LIMIT 1`
+        );
+        const existing = rows[0];
+        const body = req.body || {};
+        const serverUrl = body.server_url === undefined
+            ? String(existing?.server_url || "").trim()
+            : String(body.server_url || "").trim().replace(/\/+$/, "");
+        const enabled = normalizeEnabled(body.enabled, Number(existing?.enabled || 0));
+        const apiKey = body.api_key === undefined || body.api_key === ""
+            ? ""
+            : String(body.api_key).trim();
+        const apiSecret = body.api_secret === undefined || body.api_secret === ""
+            ? ""
+            : String(body.api_secret).trim();
+
+        if (!validateLiveKitUrl(serverUrl)) {
+            return res.status(400).json({
+                success: false,
+                message: "server_url must be a valid wss:// LiveKit URL",
+            });
+        }
+        if (enabled === null) {
+            return res.status(400).json({
+                success: false,
+                message: "enabled must be a boolean",
+            });
+        }
+        if (apiKey.length > 255 || apiSecret.length > 4096) {
+            return res.status(400).json({
+                success: false,
+                message: "LiveKit credentials exceed the allowed length",
+            });
+        }
+
+        const encryptedApiKey = apiKey
+            ? encryptVoiceCallConfig(apiKey)
+            : existing?.api_key_encrypted;
+        const encryptedApiSecret = apiSecret
+            ? encryptVoiceCallConfig(apiSecret)
+            : existing?.api_secret_encrypted;
+        if (!encryptedApiKey || !encryptedApiSecret) {
+            return res.status(400).json({
+                success: false,
+                message: "Both LiveKit API key and secret are required",
+            });
+        }
+
+        await pool.query(
+            `INSERT INTO in_app_voice_call_settings
+                (id, enabled, server_url, api_key_encrypted, api_secret_encrypted, updated_by)
+             VALUES (1, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                enabled = VALUES(enabled),
+                server_url = VALUES(server_url),
+                api_key_encrypted = VALUES(api_key_encrypted),
+                api_secret_encrypted = VALUES(api_secret_encrypted),
+                updated_by = VALUES(updated_by)`,
+            [
+                enabled,
+                serverUrl,
+                encryptedApiKey,
+                encryptedApiSecret,
+                requestUsername(req),
+            ]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "LiveKit settings saved",
+            data: {
+                configured: true,
+                enabled: enabled === 1,
+                server_url: serverUrl,
+                has_api_key: true,
+                has_api_secret: true,
+            },
+        });
+    } catch (error) {
+        return sendError(res, error, "Failed to save LiveKit settings");
+    }
+});
+
+router.delete("/admin/settings", auth, requirePlatformAdmin, async (_req, res) => {
+    try {
+        await pool.query(
+            "DELETE FROM in_app_voice_call_settings WHERE id = 1"
+        );
+        return res.status(200).json({
+            success: true,
+            message: "LiveKit settings deleted and app-to-app calling disabled",
+        });
+    } catch (error) {
+        return sendError(res, error, "Failed to delete LiveKit settings");
+    }
+});
 
 async function getStaffCaller(branchId, username) {
     const [rows] = await pool.query(
@@ -176,7 +383,7 @@ function callView(call, participant) {
 }
 
 async function issueParticipantToken(call, participant) {
-    const config = liveKitConfig();
+    const config = await liveKitConfig({ requireEnabled: false });
     if (call.status !== "accepted") {
         const error = new Error("The call must be accepted before joining audio");
         error.status = 409;
@@ -203,7 +410,7 @@ async function issueParticipantToken(call, participant) {
 
 async function deleteCallRoom(call) {
     try {
-        const config = liveKitConfig();
+        const config = await liveKitConfig({ requireEnabled: false });
         await roomService(config).deleteRoom(call.provider_room);
     } catch (error) {
         if (error?.status !== 503) {
@@ -242,7 +449,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             });
         }
 
-        const config = liveKitConfig();
+        const config = await liveKitConfig();
         const client = await getBranchClient(branchId, clientUsername);
         await updateExpiredInvites();
         const [existingRows] = await pool.query(
@@ -477,7 +684,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
     } catch (error) {
         if (createdRoom) {
             try {
-                await roomService(liveKitConfig()).deleteRoom(createdRoom);
+                await roomService(await liveKitConfig({ requireEnabled: false })).deleteRoom(createdRoom);
             } catch (cleanupError) {
                 console.error("IN-APP VOICE ROOM ROLLBACK ERROR:", cleanupError);
             }
@@ -497,20 +704,18 @@ router.get("/capability", auth, validateBranch, async (req, res) => {
             });
         }
 
-        if (String(process.env.IN_APP_VOICE_CALLS_ENABLED).toLowerCase() !== "true") {
-            return res.status(200).json({
-                success: true,
-                data: { can_call: false, reason: "disabled" },
-            });
-        }
-
         try {
-            liveKitConfig();
+            await liveKitConfig();
         } catch (error) {
             if (error?.status === 503) {
                 return res.status(200).json({
                     success: true,
-                    data: { can_call: false, reason: "provider_not_configured" },
+                    data: {
+                        can_call: false,
+                        reason: error.message === "In-app voice calling is not enabled"
+                            ? "disabled"
+                            : "provider_not_configured",
+                    },
                 });
             }
             throw error;
@@ -706,7 +911,7 @@ router.post("/client/:call_id/end", validateClientSession, async (req, res) => {
 
 router.post("/webhook", async (req, res) => {
     try {
-        const config = liveKitConfig();
+        const config = await liveKitConfig({ requireEnabled: false });
         if (!Buffer.isBuffer(req.rawBody)) {
             return res.status(503).json({
                 success: false,
