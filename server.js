@@ -17,6 +17,7 @@ import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
 import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
+import { updateExpiredInvites } from "./routes/voiceCalls.js";
 
 const PORT = Number(process.env.PORT) || 8877;
 
@@ -46,7 +47,10 @@ app.use((req, res, next) => {
 app.use(express.json({
     strict: false,
     verify: (req, _res, buf) => {
-        if (req.originalUrl.includes("/api/v1/webhook/razorpay")) {
+        if (
+            req.originalUrl.includes("/api/v1/webhook/razorpay") ||
+            req.originalUrl.includes("/api/v1/voice-calls/webhook")
+        ) {
             req.rawBody = buf;
         }
     },
@@ -97,6 +101,14 @@ server.listen(PORT, '0.0.0.0', () => {
     startOneChattingCampaignCron();
     startSmsCampaignCron();
     startEmailBroadcastScheduleCron();
+    if (String(process.env.IN_APP_VOICE_CALLS_ENABLED).toLowerCase() === "true") {
+        const voiceCallExpiryTimer = setInterval(() => {
+            updateExpiredInvites().catch((error) => {
+                console.error("VOICE CALL EXPIRY WORKER ERROR:", error);
+            });
+        }, 15000);
+        voiceCallExpiryTimer.unref();
+    }
 });
 
 export { WsIo };

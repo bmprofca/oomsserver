@@ -9,6 +9,7 @@ Backend API and integration notes for the OOMS server.
 | `finance-registers.md` | Received report, bank list stats, discount CRUD/list APIs |
 | `wp_system.md` | WordPress system integration |
 | `backup_integration.md` | Backup integration |
+| `in-app-voice-calls.md` | Standalone LiveKit app-to-app voice calling |
 
 ## Route mounting (`routes/index.js`)
 

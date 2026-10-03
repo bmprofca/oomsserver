@@ -198,9 +198,17 @@ export function resolveNotificationTargets(action, context = {}) {
  * @param {string} panel     - 'enduser' | 'client' | 'ca'
  * @param {object} payload   - { title, body, data? }
  */
-export async function sendPushToUser(username, panel, { title, body, data = {} }) {
+export async function sendPushToUser(
+    username,
+    panel,
+    { title, body, data = {} },
+    { throwOnError = false } = {}
+) {
     const messaging = getFirebaseMessaging();
-    if (!messaging) return;
+    if (!messaging) {
+        if (throwOnError) throw new Error("Firebase Cloud Messaging is not configured");
+        return { successCount: 0, failureCount: 0 };
+    }
 
     try {
         // Fetch all tokens for this username+panel (multiple devices)
@@ -209,10 +217,16 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
             [username, panel]
         );
 
-        if (!rows || rows.length === 0) return;
+        if (!rows || rows.length === 0) {
+            if (throwOnError) throw new Error(`No FCM device is registered for ${panel}`);
+            return { successCount: 0, failureCount: 0 };
+        }
 
         const tokens = rows.map((r) => String(r.fcm_token)).filter(Boolean);
-        if (tokens.length === 0) return;
+        if (tokens.length === 0) {
+            if (throwOnError) throw new Error(`No FCM device is registered for ${panel}`);
+            return { successCount: 0, failureCount: 0 };
+        }
 
         // Ensure all values in data payload are strings for FCM HTTP v1 / Admin SDK
         const stringData = {};
@@ -229,6 +243,8 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
 
         // FCM Admin SDK allows up to 500 tokens per batch with sendEachForMulticast
         const BATCH_SIZE = 500;
+        let successCount = 0;
+        let failureCount = 0;
         for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
             const batch = tokens.slice(i, i + BATCH_SIZE);
 
@@ -254,6 +270,8 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
             };
 
             const response = await messaging.sendEachForMulticast(message);
+            successCount += response.successCount;
+            failureCount += response.failureCount;
 
             // Clean up stale or unregistered tokens
             const staleTokens = [];
@@ -285,8 +303,14 @@ export async function sendPushToUser(username, panel, { title, body, data = {} }
                 `[FCM] Sent to ${batch.length} token(s) for [${panel}] ${username} – success: ${response.successCount}, failure: ${response.failureCount}`
             );
         }
+        if (throwOnError && successCount === 0) {
+            throw new Error("Firebase Cloud Messaging could not deliver the notification");
+        }
+        return { successCount, failureCount };
     } catch (err) {
         console.error(`[FCM] Push to ${username}/${panel} failed:`, err?.message || err);
+        if (throwOnError) throw err;
+        return { successCount: 0, failureCount: 0 };
     }
 }
 

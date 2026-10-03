@@ -46,6 +46,7 @@ import callRoutes from "./call.js";
 import backupRoutes from "./backup.js";
 import accountRoutes from "./account.js";
 import fcmRoutes from "./fcm.js";
+import voiceCallRoutes from "./voiceCalls.js";
 
 
 router.use("/auth", authRoutes);
@@ -96,6 +97,6 @@ router.use("/recurring-task", complianceRoutes);
 router.use("/backup", backupRoutes);
 router.use("/account", accountRoutes);
 router.use("/fcm", fcmRoutes);
+router.use("/voice-calls", voiceCallRoutes);
 
 export default router;
-
