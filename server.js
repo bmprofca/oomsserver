@@ -17,7 +17,10 @@ import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
 import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
-import { updateExpiredInvites } from "./routes/voiceCalls.js";
+import {
+    resolveVoiceCallCapability,
+    updateExpiredInvites,
+} from "./routes/voiceCalls.js";
 
 const PORT = Number(process.env.PORT) || 8877;
 
@@ -88,7 +91,7 @@ app.get("/health", (req, res) => {
 });
 
 const server = http.createServer(app);
-const WsIo = setupSocketIO(server);
+const WsIo = setupSocketIO(server, resolveVoiceCallCapability);
 
 
 server.listen(PORT, '0.0.0.0', () => {

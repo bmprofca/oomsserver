@@ -14,6 +14,7 @@ import { sendPushToUser } from "../helpers/fcmPush.js";
 import {
     emitStaffVoiceCallIncoming,
     emitVoiceCallIncoming,
+    hasConnectedCAVoiceCallSocket,
     hasConnectedClientVoiceCallSocket,
     hasConnectedStaffVoiceCallSocket,
 } from "../helpers/Socket.js";
@@ -371,6 +372,113 @@ async function getBranchRecipient(branchId, username, panel = "client") {
     return {
         username,
         name: String(rows[0].name || (panel === "ca" ? "CA" : "Client")),
+    };
+}
+
+async function hasRegisteredCallPushToken(username, panel) {
+    const [rows] = await pool.query(
+        `SELECT 1
+         FROM fcm_tokens
+         WHERE username = ? AND panel = ?
+         LIMIT 1`,
+        [username, panel]
+    );
+    return rows.length > 0;
+}
+
+export async function resolveVoiceCallCapability({
+    callerPanel,
+    callerUsername,
+    branchId,
+    recipientUsername,
+    recipientPanel = "client",
+    mobileApp = false,
+}) {
+    const username = String(recipientUsername || "").trim();
+    const panel = String(recipientPanel || "client").trim().toLowerCase();
+    if (!["client", "ca", "enduser"].includes(panel)) {
+        const error = new Error("recipient_panel must be client, ca, or enduser");
+        error.status = 400;
+        throw error;
+    }
+    if (!username || username.length > 50) {
+        const error = new Error("A valid recipient_username is required");
+        error.status = 400;
+        throw error;
+    }
+
+    let caller;
+    if (callerPanel === "enduser") {
+        caller = await getStaffCaller(branchId, callerUsername);
+    } else if (callerPanel !== "client") {
+        const error = new Error("Authenticate with an active OOMS staff or client session");
+        error.status = 401;
+        throw error;
+    }
+
+    try {
+        await liveKitConfig();
+    } catch (error) {
+        if (error?.status === 503) {
+            return {
+                can_call: false,
+                reason: error.message === "In-app voice calling is not enabled"
+                    ? "disabled"
+                    : "provider_not_configured",
+                is_online: false,
+            };
+        }
+        throw error;
+    }
+
+    if (callerPanel === "client") {
+        if (panel !== "enduser") {
+            const error = new Error("Clients can only call assigned staff");
+            error.status = 403;
+            throw error;
+        }
+        await getAssignedStaff(branchId, callerUsername, username);
+        const isOnline = hasConnectedStaffVoiceCallSocket(username);
+        const mobileReachable = mobileApp &&
+            await hasRegisteredCallPushToken(username, "enduser");
+        return {
+            can_call: isOnline || mobileReachable,
+            is_online: isOnline,
+            ...(!isOnline && !mobileReachable ? { reason: "staff_offline" } : {}),
+        };
+    }
+
+    try {
+        await getBranchRecipient(branchId, username, panel);
+    } catch (error) {
+        if (error?.status === 409) {
+            return { can_call: false, reason: error.message };
+        }
+        throw error;
+    }
+    const isOnline = panel === "client"
+        ? hasConnectedClientVoiceCallSocket(username)
+        : panel === "enduser"
+            ? hasConnectedStaffVoiceCallSocket(username)
+            : hasConnectedCAVoiceCallSocket(username);
+    const mobileReachable = mobileApp
+        && panel !== "ca"
+        && await hasRegisteredCallPushToken(
+            username,
+            panel === "enduser" ? "enduser" : "client"
+        );
+    if (!isOnline && !mobileReachable && panel !== "ca") {
+        return {
+            can_call: false,
+            is_online: isOnline,
+            reason: panel === "enduser" ? "staff_offline" : "client_offline",
+            caller_role: caller.type,
+        };
+    }
+    return {
+        can_call: true,
+        is_online: isOnline,
+        caller_role: caller.type,
     };
 }
 
@@ -844,69 +952,17 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
 router.get("/capability", auth, validateBranch, async (req, res) => {
     try {
-        const caller = await getStaffCaller(req.branch_id, requestUsername(req));
-        const recipientPanel = String(req.query.recipient_panel || "client").trim().toLowerCase();
-        const clientUsername = String(req.query.recipient_username || req.query.client_username || "").trim();
-        if (!["client", "ca", "enduser"].includes(recipientPanel)) {
-            return res.status(400).json({
-                success: false,
-                message: "recipient_panel must be client, ca, or enduser",
-            });
-        }
-        if (!clientUsername || clientUsername.length > 50) {
-            return res.status(400).json({
-                success: false,
-                message: "A valid recipient_username is required",
-            });
-        }
-
-        try {
-            await liveKitConfig();
-        } catch (error) {
-            if (error?.status === 503) {
-                return res.status(200).json({
-                    success: true,
-                    data: {
-                        can_call: false,
-                        reason: error.message === "In-app voice calling is not enabled"
-                            ? "disabled"
-                            : "provider_not_configured",
-                    },
-                });
-            }
-            throw error;
-        }
-
-        try {
-            await getBranchRecipient(req.branch_id, clientUsername, recipientPanel);
-        } catch (error) {
-            if (error?.status === 409) {
-                return res.status(200).json({
-                    success: true,
-                    data: { can_call: false, reason: error.message },
-                });
-            }
-            throw error;
-        }
-        if (
-            recipientPanel === "client" &&
-            !hasConnectedClientVoiceCallSocket(clientUsername)
-        ) {
-            return res.status(200).json({
-                success: true,
-                data: {
-                    can_call: false,
-                    reason: "client_offline",
-                    caller_role: caller.type,
-                },
-            });
-        }
+        const data = await resolveVoiceCallCapability({
+            callerPanel: "enduser",
+            callerUsername: requestUsername(req),
+            branchId: req.branch_id,
+            recipientUsername: req.query.recipient_username || req.query.client_username,
+            recipientPanel: req.query.recipient_panel,
+            mobileApp: req.query.mobile_app === "true",
+        });
         return res.status(200).json({
             success: true,
-            data: {
-                can_call: true,
-                caller_role: caller.type,
-            },
+            data,
         });
     } catch (error) {
         return sendError(res, error, "Failed to check voice call availability");
@@ -915,27 +971,17 @@ router.get("/capability", auth, validateBranch, async (req, res) => {
 
 router.get("/client/capability", validateClientVoiceCallSession, async (req, res) => {
     try {
-        const staffUsername = String(req.query.staff_username || "").trim();
-        if (!staffUsername || staffUsername.length > 50) {
-            return res.status(400).json({
-                success: false,
-                message: "A valid staff_username is required",
-            });
-        }
-        await liveKitConfig();
-        await getAssignedStaff(req.branch_id, req.client_username, staffUsername);
-        if (!hasConnectedStaffVoiceCallSocket(staffUsername)) {
-            return res.status(200).json({
-                success: true,
-                data: {
-                    can_call: false,
-                    reason: "staff_offline",
-                },
-            });
-        }
+        const data = await resolveVoiceCallCapability({
+            callerPanel: "client",
+            callerUsername: req.client_username,
+            branchId: req.branch_id,
+            recipientUsername: req.query.staff_username,
+            recipientPanel: "enduser",
+            mobileApp: req.query.mobile_app === "true",
+        });
         return res.status(200).json({
             success: true,
-            data: { can_call: true },
+            data,
         });
     } catch (error) {
         if (error?.status === 503) {
