@@ -12,6 +12,7 @@ import { validateClientVoiceCallSession } from "../middleware/validateClientSess
 import { validateCaSession } from "../middleware/validateCaSession.js";
 import { sendPushToUser } from "../helpers/fcmPush.js";
 import {
+    emitCAVoiceCallIncoming,
     emitStaffVoiceCallIncoming,
     emitVoiceCallIncoming,
     hasConnectedCAVoiceCallSocket,
@@ -881,6 +882,14 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 other_participant_name: caller.name,
                 initiated_by: "staff",
                 recipient_panel: "enduser",
+            });
+        } else if (recipientPanel === "ca") {
+            emitCAVoiceCallIncoming(clientUsername, {
+                call_id: callId,
+                status: "ringing",
+                other_participant_name: caller.name,
+                initiated_by: "staff",
+                recipient_panel: "ca",
             });
         }
 

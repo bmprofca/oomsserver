@@ -13,10 +13,12 @@ In-app voice calls use the configured LiveKit server and the
   to one of the client's active tasks. This assignment is checked again when
   creating the invitation.
 - Apps check call capability with the authenticated
-  `voice_call_capability_check` Socket.IO event. The response separates
-  `can_call` from `is_online`: a registered mobile push target can receive a
-  call while offline, and a connected web or mobile app is reported online.
-  The HTTP capability routes remain available for older clients.
+  `voice_call_capability_watch` Socket.IO event and receive
+  `voice_call_capability_update` whenever the recipient's presence changes.
+  The response separates `can_call` from `is_online`: a registered mobile
+  push target can receive a call while offline, and a connected web or mobile
+  app is reported online. The HTTP capability routes remain available for
+  older clients.
 - The client and office web apps receive incoming-call events over Socket.IO.
   They query the incoming-call endpoint once after socket authentication or
   reconnection to recover an invitation sent while disconnected. Mobile
@@ -64,9 +66,13 @@ sessions authenticate with the existing `auth` event; client web sessions use
 Mobile staff use `auth`, mobile clients use `voice_call_auth`, and mobile CAs use
 `ca_voice_call_auth` to register their live call presence. Each authenticated
 session may request a capability snapshot with
-`voice_call_capability_check`, passing `recipient_username` and
+`voice_call_capability_watch`, passing a unique `subscription_id`,
+`recipient_username`, and
 `recipient_panel`; the server validates assignments and branch membership
-before responding. The mobile app sets `mobile_app: true` so push reachability
-is included in `can_call`. The REST capability routes are retained for older
-clients; current mobile and web clients use the socket event.
+before responding. Presence transitions send a fresh capability snapshot in
+`voice_call_capability_update`; clients should send
+`voice_call_capability_unwatch` when the view no longer needs updates. The
+mobile app sets `mobile_app: true` so push reachability is included in
+`can_call`. The REST capability routes are retained for older clients; current
+mobile and web clients use the socket watch.
 Active-call status continues to use the participant-scoped REST routes.

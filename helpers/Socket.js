@@ -17,6 +17,47 @@ function voiceCallRoom(panel, username) {
     return `voice-call:${panel}:${String(username || "").trim().toLowerCase()}`;
 }
 
+function watchKey(panel, username) {
+    return `${panel}:${String(username || "").trim().toLowerCase()}`;
+}
+
+async function notifyCapabilityWatchers(panel, username) {
+    if (!socketServer || typeof resolveCapability !== "function") return;
+    const targetKey = watchKey(panel, username);
+    const watchers = [];
+    for (const socket of socketServer.sockets.sockets.values()) {
+        const subscriptions = socket.data.voiceCallWatchers;
+        if (!subscriptions) continue;
+        for (const [subscriptionId, subscription] of Object.entries(subscriptions)) {
+            if (watchKey(subscription.recipientPanel, subscription.recipientUsername) === targetKey) {
+                watchers.push({ socket, subscriptionId, subscription });
+            }
+        }
+    }
+
+    await Promise.all(watchers.map(async ({ socket, subscriptionId, subscription }) => {
+        try {
+            const data = await resolveCapability({
+                callerPanel: socket.data.voiceCallIdentity.panel,
+                callerUsername: socket.data.voiceCallIdentity.username,
+                branchId: socket.data.voiceCallIdentity.branchId,
+                ...subscription,
+            });
+            socket.emit("voice_call_capability_update", {
+                subscription_id: subscriptionId,
+                success: true,
+                data,
+            });
+        } catch (error) {
+            socket.emit("voice_call_capability_update", {
+                subscription_id: subscriptionId,
+                success: false,
+                message: error?.message || "Failed to refresh voice call availability",
+            });
+        }
+    }));
+}
+
 export function emitVoiceCallIncoming(username, call) {
     if (!socketServer) return false;
     const room = voiceCallRoom("client", username);
@@ -43,6 +84,11 @@ export function hasConnectedCAVoiceCallSocket(username) {
 export function emitStaffVoiceCallIncoming(username, call) {
     if (!socketServer) return;
     socketServer.to(voiceCallRoom("staff", username)).emit("voice_call_incoming", call);
+}
+
+export function emitCAVoiceCallIncoming(username, call) {
+    if (!socketServer) return;
+    socketServer.to(voiceCallRoom("ca", username)).emit("voice_call_incoming", call);
 }
 
 export function setupSocketIO(server, capabilityResolver) {
@@ -93,6 +139,9 @@ export function setupSocketIO(server, capabilityResolver) {
                     branchId: voiceCallBranchId,
                 };
                 socket.emit("auth_status", true);
+                if (voiceCallBranchId) {
+                    void notifyCapabilityWatchers("enduser", username);
+                }
             } catch (error) {
                 console.error("OFFICE SOCKET AUTH ERROR:", error);
                 socket.emit("auth_status", false);
@@ -157,14 +206,11 @@ export function setupSocketIO(server, capabilityResolver) {
                     username,
                     branchId: String(clientRows[0].branch_id || "").trim(),
                 };
-                console.info("Client voice-call socket authenticated and joined room", {
-                    socket_id: socket.id,
-                    username,
-                    room: voiceCallRoom("client", username),
-                });
+
                 if (typeof acknowledge === "function") {
                     acknowledge({ authenticated: true });
                 }
+                void notifyCapabilityWatchers("client", username);
             } catch (error) {
                 console.error("CLIENT VOICE-CALL SOCKET AUTH ERROR:", error);
                 if (typeof acknowledge === "function") {
@@ -204,6 +250,7 @@ export function setupSocketIO(server, capabilityResolver) {
                 await socket.join(voiceCallRoom("ca", username));
                 socket.data.voiceCallIdentity = { panel: "ca", username, branchId };
                 if (typeof acknowledge === "function") acknowledge({ authenticated: true });
+                void notifyCapabilityWatchers("ca", username);
             } catch (error) {
                 console.error("CA VOICE-CALL SOCKET AUTH ERROR:", error);
                 if (typeof acknowledge === "function") acknowledge({ authenticated: false });
@@ -232,7 +279,56 @@ export function setupSocketIO(server, capabilityResolver) {
                 acknowledge({ success: false, message: error?.message || "Failed to check voice call availability" });
             }
         });
+        socket.on("voice_call_capability_watch", async (request = {}, acknowledge) => {
+            if (typeof acknowledge !== "function") return;
+            try {
+                const identity = socket.data.voiceCallIdentity;
+                if (!identity) {
+                    acknowledge({ success: false, message: "Authenticate before checking call availability" });
+                    return;
+                }
+                const subscriptionId = String(request.subscription_id || "").trim();
+                const recipientUsername = String(request.recipient_username || "").trim();
+                const recipientPanel = String(request.recipient_panel || "client").trim().toLowerCase();
+                if (!subscriptionId || subscriptionId.length > 100) {
+                    acknowledge({ success: false, message: "A valid subscription_id is required" });
+                    return;
+                }
+                const subscription = {
+                    recipientUsername,
+                    recipientPanel,
+                    mobileApp: request.mobile_app === true,
+                };
+                const data = await resolveCapability({
+                    callerPanel: identity.panel,
+                    callerUsername: identity.username,
+                    branchId: identity.branchId,
+                    ...subscription,
+                });
+                socket.data.voiceCallWatchers = socket.data.voiceCallWatchers || Object.create(null);
+                socket.data.voiceCallWatchers[subscriptionId] = subscription;
+                acknowledge({ success: true, data });
+            } catch (error) {
+                acknowledge({
+                    success: false,
+                    message: error?.message || "Failed to watch voice call availability",
+                });
+            }
+        });
+        socket.on("voice_call_capability_unwatch", (subscriptionId) => {
+            const id = String(subscriptionId || "").trim();
+            if (socket.data.voiceCallWatchers) {
+                delete socket.data.voiceCallWatchers[id];
+            }
+        });
         socket.on("disconnect", (reason) => {
+            const identity = socket.data.voiceCallIdentity;
+            if (identity) {
+                const panel = identity.panel === "enduser" ? "enduser" : identity.panel;
+                setTimeout(() => {
+                    void notifyCapabilityWatchers(panel, identity.username);
+                }, 0);
+            }
             // console.log(`❌ Socket ${socket.id} disconnected:`, reason);
         });
     });
