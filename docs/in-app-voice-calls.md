@@ -43,6 +43,8 @@ All routes are mounted under `/api/v1/voice-calls`.
 |---|---|---|
 | `POST /create` | Branch admin/staff | Call a same-branch client, CA, admin, or staff using `recipient_username` and `recipient_panel` |
 | `POST /client/create` | Client | Call assigned active-task staff |
+| `GET /capability` | Branch admin/staff | Legacy HTTP capability check; current apps use Socket.IO |
+| `GET /client/capability` | Client | Legacy HTTP capability check; current apps use Socket.IO |
 | `GET /incoming` | Branch admin/staff | Restore a ringing client or staff call after socket reconnection |
 | `GET /staff/:call_id` | Called admin/staff | Load an incoming staff-to-staff call |
 | `POST /staff/:call_id/respond` | Called admin/staff | Accept or decline an incoming staff-to-staff call |
