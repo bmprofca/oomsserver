@@ -121,4 +121,76 @@ async function validateClientSession(req, res, next) {
     }
 }
 
-export { validateClientSession, readClientCredential };
+async function validateClientVoiceCallSession(req, res, next) {
+    try {
+        const token = readClientCredential(req, "token");
+        const username = readClientCredential(req, "username");
+
+        if (!token || !username) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing required headers (token, username).",
+            });
+        }
+
+        const session = await resolveClientTokenSession(token);
+        if (!session) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid or expired client session",
+            });
+        }
+
+        const [profileRows] = await pool.query(
+            `SELECT p.username
+             FROM profile p
+             INNER JOIN clients c ON c.username = p.username
+               AND c.user_type = 'client'
+               AND (c.is_deleted = '0' OR c.is_deleted = 0)
+             WHERE p.username = ?
+               AND p.user_type = 'client'
+               AND p.status = '1'
+               AND ${PROFILE_MOBILE_SQL} = ?
+               AND ${PROFILE_COUNTRY_CODE_SQL} = ?
+             LIMIT 1`,
+            [username, session.mobile, session.country_code]
+        );
+
+        if (!profileRows.length) {
+            return res.status(403).json({
+                success: false,
+                message: "Username does not belong to the authenticated client account",
+            });
+        }
+
+        const [clientRows] = await pool.query(
+            `SELECT branch_id
+             FROM clients
+             WHERE username = ?
+               AND user_type = 'client'
+               AND (is_deleted = '0' OR is_deleted = 0)
+             LIMIT 1`,
+            [username]
+        );
+        if (!clientRows.length || !clientRows[0].branch_id) {
+            return res.status(404).json({
+                success: false,
+                message: "Client branch mapping not found",
+            });
+        }
+
+        req.branch_id = String(clientRows[0].branch_id).trim();
+        req.client_username = username;
+        req.client_country_code = session.country_code;
+        req.client_mobile = session.mobile;
+        return next();
+    } catch (error) {
+        console.error("VALIDATE CLIENT VOICE-CALL SESSION ERROR:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to validate client voice-call session",
+        });
+    }
+}
+
+export { validateClientSession, validateClientVoiceCallSession, readClientCredential };

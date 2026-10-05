@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "migrate": "node database/migrate.js",
     "migrate:voice-call-settings": "node database/scripts/migrate-in-app-voice-call-settings.js",
+    "migrate:voice-call-direction": "node database/scripts/migrate-in-app-voice-call-direction.js",
     "worker": "node workers/email-broadcast-worker.js",
     "dev:worker": "nodemon workers/email-broadcast-worker.js",
     "dev:full": "concurrently \"nodemon server.js\" \"nodemon workers/email-broadcast-worker.js\""

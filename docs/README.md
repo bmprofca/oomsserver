@@ -20,3 +20,7 @@ Backend API and integration notes for the OOMS server.
 | `/capital` | `routes/capital.js` |
 
 Full URL example: `https://server.ooms.in/api/v1/transaction/report/receive`
+
+Voice-call direction support requires the database update in
+`database/migrations/20261005_in_app_voice_call_direction.sql`. Apply it with
+`npm run migrate:voice-call-direction` before deploying the updated server.
