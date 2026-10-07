@@ -602,7 +602,7 @@ function callView(call, participant) {
 async function issueParticipantToken(call, participant) {
     const config = await liveKitConfig({ requireEnabled: false });
     if (call.status !== "accepted") {
-        const error = new Error("The call must be accepted before joining audio");
+        const error = new Error("The call must be accepted before joining");
         error.status = 409;
         throw error;
     }
@@ -614,7 +614,10 @@ async function issueParticipantToken(call, participant) {
     token.addGrant({
         roomJoin: true,
         room: call.provider_room,
-        canPublishSources: [TrackSource.MICROPHONE],
+        canPublishSources: [
+            TrackSource.MICROPHONE,
+            TrackSource.SCREEN_SHARE,
+        ],
         canSubscribe: true,
         canPublishData: false,
     });
@@ -865,11 +868,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 status: "ringing",
                 other_participant_name: caller.name,
             });
-            console.info("Emitted incoming voice-call invitation to client web room", {
-                call_id: callId,
-                client_username: clientUsername,
-                room_has_clients: delivered,
-            });
+            
             if (!delivered) {
                 console.warn("No authenticated client web socket was connected for incoming call", {
                     call_id: callId,

@@ -10,6 +10,7 @@ Backend API and integration notes for the OOMS server.
 | `wp_system.md` | WordPress system integration |
 | `backup_integration.md` | Backup integration |
 | `in-app-voice-calls.md` | Standalone LiveKit app-to-app voice calling |
+| `../implementation.md` | Implementation plan for screen sharing in app-to-app calls |
 
 ## Route mounting (`routes/index.js`)
 

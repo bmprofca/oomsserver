@@ -1,8 +1,11 @@
 # In-app voice calls
 
 In-app voice calls use the configured LiveKit server and the
-`in_app_voice_calls` table. Calls are audio-only and invitations expire after
-45 seconds.
+`in_app_voice_calls` table. Calls support audio and screen-share video, and
+invitations expire after 45 seconds. Screen sharing uses the existing
+accepted-call room and participant token; clients must request OS/browser
+capture permission and publish a LiveKit screen-share video track. Screen-share
+audio is not enabled.
 
 ## Supported call directions
 
