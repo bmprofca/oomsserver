@@ -26,8 +26,17 @@ audio is not enabled.
   They query the incoming-call endpoint once after socket authentication or
   reconnection to recover an invitation sent while disconnected. Mobile
   clients and CAs continue to receive incoming-call push notifications.
+- If an account is signed in on multiple devices or app sessions, the first
+  session to accept an incoming call owns that call. Other sessions stop
+  ringing, see that the call was answered elsewhere, and cannot obtain a
+  LiveKit join token. Mobile sessions also receive a silent push to cancel
+  their local incoming-call notification. The accepting session can safely
+  repeat its accept or reconnect request.
 - Callers hear a ringback tone while an invitation is ringing; recipients hear
   an incoming-call tone. Both stop when the call is answered or ends.
+- After an accepted call ends, clients disconnect from LiveKit first and the
+  server removes the room after a short grace period so the other participant
+  can observe the ended status and disconnect cleanly.
 
 ## Database update
 
@@ -37,8 +46,9 @@ After the original voice-call and LiveKit settings migrations, run:
 npm run migrate:voice-call-direction
 ```
 
-This adds `initiated_by` and `recipient_panel` plus the incoming-call indexes.
-The migration script is safe to rerun.
+This adds `initiated_by` and `recipient_panel`, the incoming-call indexes, and
+the accepted-session binding that lets only the session that answered an
+incoming call join its LiveKit room. The migration script is safe to rerun.
 
 ## Main API routes
 
@@ -55,6 +65,9 @@ All routes are mounted under `/api/v1/voice-calls`.
 | `POST /staff/:call_id/respond` | Called admin/staff | Accept or decline an incoming staff-to-staff call |
 | `GET /client/incoming` | Client | Restore a ringing admin/staff call after socket reconnection |
 | `GET /ca/incoming` | CA | Poll for an incoming admin/staff call |
+| `GET /history` | Branch admin/staff | Paginated call history for the signed-in user and active branch |
+| `GET /client/history` | Client | Paginated call history for the signed-in client profile |
+| `GET /ca/history` | CA | Paginated call history for the signed-in CA and active branch |
 | `POST /:call_id/respond` | Called admin/staff | Accept or decline an incoming client call |
 | `POST /client/:call_id/respond` | Client | Accept or decline an incoming admin/staff call |
 | `POST /ca/:call_id/respond` | CA | Accept or decline an incoming admin/staff call |
@@ -62,6 +75,9 @@ All routes are mounted under `/api/v1/voice-calls`.
 Participant status, token, and end routes remain scoped to their respective
 authenticated panel. Do not accept a client or staff identity from a request
 body as a substitute for the authenticated session.
+History routes accept `page`, `limit` (maximum 100), `status`, and
+`direction` (`incoming` or `outgoing`) query parameters. Results contain
+participant, branch, outcome, timestamp, and call-duration details.
 
 Incoming web invitations use the `voice_call_incoming` Socket.IO event. Office
 sessions authenticate with the existing `auth` event; client web sessions use
@@ -74,8 +90,12 @@ session may request a capability snapshot with
 `recipient_panel`; the server validates assignments and branch membership
 before responding. Presence transitions send a fresh capability snapshot in
 `voice_call_capability_update`; clients should send
-`voice_call_capability_unwatch` when the view no longer needs updates. The
-mobile app sets `mobile_app: true` so push reachability is included in
-`can_call`. The REST capability routes are retained for older clients; current
-mobile and web clients use the socket watch.
+`voice_call_capability_unwatch` when the view no longer needs updates.
+Capability checks treat an active Socket.IO session or a registered FCM token
+for the target panel as reachable, regardless of whether the caller is web or
+mobile. `is_online` still indicates an active app session; a push-reachable
+recipient can have `can_call: true` while `is_online: false`. FCM delivery
+requires an active device token, network access, and notification permission.
+The REST capability routes are retained for older clients; current mobile and
+web clients use the socket watch.
 Active-call status continues to use the participant-scoped REST routes.

@@ -240,6 +240,12 @@ export async function sendPushToUser(
         if (!stringData.click_action) {
             stringData.click_action = "FLUTTER_NOTIFICATION_CLICK";
         }
+        const pushType = String(stringData.type || "").toUpperCase();
+        const isVoiceCall = pushType === "IN_APP_VOICE_CALL";
+        const isVoiceCallControl = pushType === "IN_APP_VOICE_CALL_ANSWERED";
+        const notificationData = isVoiceCall
+            ? { ...stringData, title: String(title || ""), body: String(body || "") }
+            : stringData;
 
         // FCM Admin SDK allows up to 500 tokens per batch with sendEachForMulticast
         const BATCH_SIZE = 500;
@@ -250,21 +256,41 @@ export async function sendPushToUser(
 
             const message = {
                 tokens: batch,
-                notification: {
-                    title: String(title || ""),
-                    body: String(body || ""),
-                },
-                data: stringData,
+                ...(!isVoiceCall && !isVoiceCallControl ? {
+                    notification: {
+                        title: String(title || ""),
+                        body: String(body || ""),
+                    },
+                } : {}),
+                data: notificationData,
                 android: {
                     priority: "high",
-                    notification: {
-                        sound: "default",
-                        channelId: "ooms_task_updates",
-                    },
+                    ...(isVoiceCall || isVoiceCallControl ? { ttl: 45_000 } : {}),
+                    ...(!isVoiceCall && !isVoiceCallControl ? {
+                        notification: {
+                            sound: "default",
+                            channelId: "ooms_task_updates",
+                        },
+                    } : {}),
                 },
                 apns: {
+                    headers: {
+                        "apns-push-type": isVoiceCallControl ? "background" : "alert",
+                        "apns-priority": isVoiceCallControl ? "5" : "10",
+                        ...(isVoiceCall || isVoiceCallControl
+                            ? { "apns-expiration": String(Math.floor(Date.now() / 1000) + 45) }
+                            : {}),
+                    },
                     payload: {
-                        aps: { sound: "default" },
+                        aps: {
+                            ...(isVoiceCall ? {
+                                alert: {
+                                    title: String(title || ""),
+                                    body: String(body || ""),
+                                },
+                            } : {}),
+                            ...(isVoiceCallControl ? { "content-available": 1 } : { sound: "default" }),
+                        },
                     },
                 },
             };
@@ -273,20 +299,32 @@ export async function sendPushToUser(
             successCount += response.successCount;
             failureCount += response.failureCount;
 
-            // Clean up stale or unregistered tokens
+            const failedDeliveries = [];
             const staleTokens = [];
             response.responses.forEach((resp, idx) => {
                 if (!resp.success && resp.error) {
                     const errCode = resp.error.code;
+                    failedDeliveries.push({
+                        tokenIndex: idx,
+                        code: errCode || "unknown",
+                        message: String(resp.error.message || "FCM rejected the message")
+                            .replace(/[A-Za-z0-9:_-]{80,}/g, "[redacted]"),
+                    });
                     if (
                         errCode === "messaging/registration-token-not-registered" ||
-                        errCode === "messaging/invalid-registration-token" ||
-                        errCode === "messaging/invalid-argument"
+                        errCode === "messaging/invalid-registration-token"
                     ) {
                         staleTokens.push(batch[idx]);
                     }
                 }
             });
+
+            if (failedDeliveries.length > 0) {
+                console.error(
+                    `[FCM] Token delivery errors for [${panel}] ${username}:`,
+                    failedDeliveries
+                );
+            }
 
             if (staleTokens.length > 0) {
                 // Fire-and-forget cleanup – do not await to avoid blocking caller

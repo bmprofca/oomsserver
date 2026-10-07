@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import pool from "../db.js";
 import { resolveCaTokenSession } from "./authCa.js";
 import {
@@ -125,6 +126,10 @@ async function validateCaSession(req, res, next) {
         req.ca_username = ca.username;
         req.ca_country_code = headerCountryCode;
         req.ca_mobile = headerMobile;
+        req.ca_voice_call_session_hash = crypto
+            .createHash("sha256")
+            .update(token)
+            .digest("hex");
         req.ca_branch_name = ca.branch_name || null;
         req.ca_profile = {
             username: ca.username,

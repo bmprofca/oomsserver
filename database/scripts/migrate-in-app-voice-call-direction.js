@@ -40,6 +40,10 @@ try {
         "recipient_panel",
         "`recipient_panel` ENUM('client', 'ca', 'enduser') NOT NULL DEFAULT 'client' AFTER `initiated_by`"
     );
+    await addColumnIfMissing(
+        "accepted_by_session_hash",
+        "`accepted_by_session_hash` CHAR(64) NULL AFTER `recipient_panel`"
+    );
     await addIndexIfMissing(
         "idx_in_app_voice_client_incoming",
         "`client_username`, `initiated_by`, `recipient_panel`, `status`, `expires_at`"

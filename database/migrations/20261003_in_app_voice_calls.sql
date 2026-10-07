@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS `in_app_voice_calls` (
   `client_name` VARCHAR(150) NOT NULL,
   `provider_room` VARCHAR(80) NOT NULL,
   `status` ENUM('ringing', 'accepted', 'rejected', 'cancelled', 'missed', 'ended', 'failed') NOT NULL DEFAULT 'ringing',
+  `accepted_by_session_hash` CHAR(64) NULL,
   `idempotency_key` VARCHAR(100) NULL,
   `expires_at` DATETIME NOT NULL,
   `accepted_at` DATETIME NULL,

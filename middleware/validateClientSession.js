@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import pool from "../db.js";
 import { resolveClientTokenSession } from "./authClient.js";
 import {
@@ -183,6 +184,10 @@ async function validateClientVoiceCallSession(req, res, next) {
         req.client_username = username;
         req.client_country_code = session.country_code;
         req.client_mobile = session.mobile;
+        req.client_voice_call_session_hash = crypto
+            .createHash("sha256")
+            .update(token)
+            .digest("hex");
         return next();
     } catch (error) {
         console.error("VALIDATE CLIENT VOICE-CALL SESSION ERROR:", error);

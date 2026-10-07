@@ -28,6 +28,7 @@ const router = express.Router();
 const INVITE_TTL_SECONDS = 45;
 const MAX_CALL_INVITES_PER_MINUTE = 10;
 const ACTIVE_CALL_STATUSES = ["ringing", "accepted"];
+const ENDED_ROOM_CLEANUP_DELAY_MS = 5000;
 
 async function liveKitConfig({ requireEnabled = true } = {}) {
     const [rows] = await pool.query(
@@ -97,6 +98,36 @@ function sendError(res, error, fallback) {
 
 function requestUsername(req) {
     return String(req.headers.username || req.headers.Username || "").trim();
+}
+
+function requestVoiceCallSessionHash(req) {
+    const token = String(req.headers.token || req.headers.Token || "");
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+async function notifyCallAnswered(call, username, panel) {
+    try {
+        const result = await sendPushToUser(
+            username,
+            panel,
+            {
+                title: "Call answered",
+                body: "This call was answered on another device.",
+                data: {
+                    type: "IN_APP_VOICE_CALL_ANSWERED",
+                    call_id: call.call_id,
+                },
+            }
+        );
+        if (result.failureCount > 0) {
+            console.warn("Some devices did not receive the voice-call answer update", {
+                call_id: call.call_id,
+                failure_count: result.failureCount,
+            });
+        }
+    } catch (error) {
+        console.error("Unable to notify other devices that the voice call was answered:", error);
+    }
 }
 
 async function requirePlatformAdmin(req, res, next) {
@@ -387,13 +418,20 @@ async function hasRegisteredCallPushToken(username, panel) {
     return rows.length > 0;
 }
 
+async function getVoiceCallBranchName(branchId) {
+    const [rows] = await pool.query(
+        "SELECT name FROM branch_list WHERE branch_id = ? LIMIT 1",
+        [branchId]
+    );
+    return String(rows[0]?.name || "").trim();
+}
+
 export async function resolveVoiceCallCapability({
     callerPanel,
     callerUsername,
     branchId,
     recipientUsername,
     recipientPanel = "client",
-    mobileApp = false,
 }) {
     const username = String(recipientUsername || "").trim();
     const panel = String(recipientPanel || "client").trim().toLowerCase();
@@ -440,8 +478,7 @@ export async function resolveVoiceCallCapability({
         }
         await getAssignedStaff(branchId, callerUsername, username);
         const isOnline = hasConnectedStaffVoiceCallSocket(username);
-        const mobileReachable = mobileApp &&
-            await hasRegisteredCallPushToken(username, "enduser");
+        const mobileReachable = await hasRegisteredCallPushToken(username, "enduser");
         return {
             can_call: isOnline || mobileReachable,
             is_online: isOnline,
@@ -462,17 +499,16 @@ export async function resolveVoiceCallCapability({
         : panel === "enduser"
             ? hasConnectedStaffVoiceCallSocket(username)
             : hasConnectedCAVoiceCallSocket(username);
-    const mobileReachable = mobileApp
-        && panel !== "ca"
-        && await hasRegisteredCallPushToken(
-            username,
-            panel === "enduser" ? "enduser" : "client"
-        );
-    if (!isOnline && !mobileReachable && panel !== "ca") {
+    const mobileReachable = await hasRegisteredCallPushToken(username, panel);
+    if (!isOnline && !mobileReachable) {
         return {
             can_call: false,
             is_online: isOnline,
-            reason: panel === "enduser" ? "staff_offline" : "client_offline",
+            reason: panel === "enduser"
+                ? "staff_offline"
+                : panel === "ca"
+                    ? "ca_offline"
+                    : "client_offline",
             caller_role: caller.type,
         };
     }
@@ -552,14 +588,17 @@ export async function updateExpiredInvites() {
 
 async function loadAuthorizedCall(callId, branchId, username, participant) {
     const [rows] = await pool.query(
-        `SELECT call_id, branch_id, caller_username, client_username,
-                caller_name, client_name, initiated_by, recipient_panel,
-                provider_room, status,
-                expires_at, accepted_at, ended_at, end_reason, create_date
-         FROM in_app_voice_calls
-         WHERE call_id = ?
-           AND branch_id = ?
-           AND ${participant === "client" ? "client_username" : "caller_username"} = ?
+            `SELECT c.call_id, c.branch_id, bl.name AS branch_name,
+                c.caller_username, c.client_username,
+                c.caller_name, c.client_name, c.initiated_by, c.recipient_panel,
+                c.provider_room, c.status, c.accepted_by_session_hash,
+                c.expires_at, c.accepted_at,
+                c.ended_at, c.end_reason, c.create_date
+             FROM in_app_voice_calls c
+             LEFT JOIN branch_list bl ON bl.branch_id = c.branch_id
+             WHERE c.call_id = ?
+               AND c.branch_id = ?
+               AND c.${participant === "client" ? "client_username" : "caller_username"} = ?
          LIMIT 1`,
         [callId, branchId, username]
     );
@@ -590,6 +629,10 @@ function callView(call, participant) {
         status: call.status,
         other_participant_name:
             participant === "client" ? call.caller_name : call.client_name,
+        other_participant_username:
+            participant === "client" ? call.caller_username : call.client_username,
+        branch_id: call.branch_id,
+        branch_name: call.branch_name || "",
         expires_at: call.expires_at,
         accepted_at: call.accepted_at,
         ended_at: call.ended_at,
@@ -639,6 +682,13 @@ async function deleteCallRoom(call) {
     }
 }
 
+function scheduleCallRoomCleanup(call) {
+    const timer = setTimeout(() => {
+        void deleteCallRoom(call);
+    }, ENDED_ROOM_CLEANUP_DELAY_MS);
+    timer.unref?.();
+}
+
 router.post("/create", auth, validateBranch, async (req, res) => {
     let createdRoom = "";
     try {
@@ -678,6 +728,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
 
         const config = await liveKitConfig();
         const client = await getBranchRecipient(branchId, clientUsername, recipientPanel);
+        const branchName = await getVoiceCallBranchName(branchId);
         await updateExpiredInvites();
         const [existingRows] = await pool.query(
             `SELECT call_id, client_username, status, expires_at, create_date, recipient_panel
@@ -700,6 +751,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     call_id: existing.call_id,
                     status: existing.status,
                     other_participant_name: client.name,
+                    other_participant_username: clientUsername,
+                    branch_id: branchId,
+                    branch_name: branchName,
                     expires_at: existing.expires_at,
                     create_date: existing.create_date,
                 },
@@ -759,6 +813,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         call_id: retryRows[0].call_id,
                         status: retryRows[0].status,
                         other_participant_name: client.name,
+                        other_participant_username: clientUsername,
+                        branch_id: branchId,
+                        branch_name: branchName,
                         expires_at: retryRows[0].expires_at,
                         create_date: retryRows[0].create_date,
                     },
@@ -862,12 +919,17 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         }
         createdRoom = "";
 
+        let socketDelivered = false;
         if (recipientPanel === "client") {
             const delivered = emitVoiceCallIncoming(clientUsername, {
                 call_id: callId,
                 status: "ringing",
                 other_participant_name: caller.name,
+                other_participant_username: callerUsername,
+                branch_id: branchId,
+                branch_name: branchName,
             });
+            socketDelivered = delivered;
             
             if (!delivered) {
                 console.warn("No authenticated client web socket was connected for incoming call", {
@@ -875,18 +937,26 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 });
             }
         } else if (recipientPanel === "enduser") {
+            socketDelivered = hasConnectedStaffVoiceCallSocket(clientUsername);
             emitStaffVoiceCallIncoming(clientUsername, {
                 call_id: callId,
                 status: "ringing",
                 other_participant_name: caller.name,
+                other_participant_username: callerUsername,
+                branch_id: branchId,
+                branch_name: branchName,
                 initiated_by: "staff",
                 recipient_panel: "enduser",
             });
         } else if (recipientPanel === "ca") {
+            socketDelivered = hasConnectedCAVoiceCallSocket(clientUsername);
             emitCAVoiceCallIncoming(clientUsername, {
                 call_id: callId,
                 status: "ringing",
                 other_participant_name: caller.name,
+                other_participant_username: callerUsername,
+                branch_id: branchId,
+                branch_name: branchName,
                 initiated_by: "staff",
                 recipient_panel: "ca",
             });
@@ -897,12 +967,17 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 clientUsername,
                 recipientPanel,
                 {
-                    title: "Incoming voice call",
-                    body: `${caller.name} is calling you`,
+                    title: `${caller.name} is calling`,
+                    body: `Branch: ${branchName || branchId}`,
                     data: {
                         type: "IN_APP_VOICE_CALL",
                         call_id: callId,
                         panel: recipientPanel,
+                        caller_name: caller.name,
+                        caller_username: callerUsername,
+                        caller_role: caller.type,
+                        branch_id: branchId,
+                        branch_name: branchName,
                         direction: recipientPanel === "ca"
                             ? "incoming_ca"
                             : recipientPanel === "enduser"
@@ -910,7 +985,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                                 : "incoming",
                     },
                 },
-                { throwOnError: recipientPanel === "ca" }
+                { throwOnError: !socketDelivered }
             );
         } catch (pushError) {
             if (recipientPanel === "ca") {
@@ -942,6 +1017,9 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 call_id: callId,
                 status: "ringing",
                 other_participant_name: client.name,
+                other_participant_username: clientUsername,
+                branch_id: branchId,
+                branch_name: branchName,
                 expires_at: createdRows[0]?.expires_at || null,
                 create_date: createdRows[0]?.create_date || null,
             },
@@ -1029,6 +1107,7 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
             getAssignedStaff(branchId, clientUsername, staffUsername),
             liveKitConfig(),
         ]);
+        const branchName = await getVoiceCallBranchName(branchId);
         await updateExpiredInvites();
 
         const [existingRows] = await pool.query(
@@ -1052,6 +1131,9 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                     call_id: existing.call_id,
                     status: existing.status,
                     other_participant_name: staff.name,
+                    other_participant_username: staffUsername,
+                    branch_id: branchId,
+                    branch_name: branchName,
                     expires_at: existing.expires_at,
                     create_date: existing.create_date,
                 },
@@ -1169,10 +1251,14 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
             connection.release();
         }
 
+        const socketDelivered = hasConnectedStaffVoiceCallSocket(staffUsername);
         emitStaffVoiceCallIncoming(staffUsername, {
             call_id: callId,
             status: "ringing",
             other_participant_name: client.name,
+            other_participant_username: clientUsername,
+            branch_id: branchId,
+            branch_name: branchName,
             initiated_by: "client",
             recipient_panel: "enduser",
         });
@@ -1182,15 +1268,21 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                 staffUsername,
                 "enduser",
                 {
-                    title: "Incoming voice call",
-                    body: `${client.name} is calling you`,
+                    title: `${client.name} is calling`,
+                    body: `Branch: ${branchName || branchId}`,
                     data: {
                         type: "IN_APP_VOICE_CALL",
                         call_id: callId,
                         panel: "enduser",
+                        caller_name: client.name,
+                        caller_username: clientUsername,
+                        caller_role: "client",
+                        branch_id: branchId,
+                        branch_name: branchName,
                         direction: "incoming_staff",
                     },
-                }
+                },
+                { throwOnError: !socketDelivered }
             );
         } catch (pushError) {
             console.warn(`Unable to push incoming voice call to staff ${staffUsername}:`, pushError);
@@ -1208,6 +1300,9 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                 call_id: callId,
                 status: "ringing",
                 other_participant_name: staff.name,
+                other_participant_username: staffUsername,
+                branch_id: branchId,
+                branch_name: branchName,
                 expires_at: createdRows[0]?.expires_at || null,
                 create_date: createdRows[0]?.create_date || null,
             },
@@ -1221,6 +1316,164 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
             }
         }
         return sendError(res, error, "Failed to create voice call");
+    }
+});
+
+const VOICE_CALL_HISTORY_STATUSES = new Set([
+    "ringing",
+    "accepted",
+    "rejected",
+    "cancelled",
+    "missed",
+    "ended",
+    "failed",
+]);
+
+async function loadVoiceCallHistory({ branchId, username, panel, page, limit, status, direction }) {
+    const offset = (page - 1) * limit;
+    let where;
+    let whereParams;
+    let otherName;
+    let otherUsername;
+    let callDirection;
+    let selectParams = [];
+
+    if (panel === "enduser") {
+        where = `c.branch_id = ?
+                 AND (c.caller_username = ?
+                      OR (c.client_username = ? AND c.recipient_panel = 'enduser'))`;
+        whereParams = [branchId, username, username];
+        otherName = "CASE WHEN c.caller_username = ? THEN c.client_name ELSE c.caller_name END";
+        otherUsername = "CASE WHEN c.caller_username = ? THEN c.client_username ELSE c.caller_username END";
+        callDirection = `CASE
+            WHEN (c.caller_username = ? AND c.initiated_by = 'client')
+              OR (c.client_username = ? AND c.recipient_panel = 'enduser')
+            THEN 'incoming' ELSE 'outgoing' END`;
+        selectParams = [username, username, username, username];
+    } else {
+        where = "c.branch_id = ? AND c.client_username = ?";
+        whereParams = [branchId, username];
+        if (panel === "ca") where += " AND c.recipient_panel = 'ca'";
+        otherName = "c.caller_name";
+        otherUsername = "c.caller_username";
+        callDirection = panel === "ca"
+            ? "'incoming'"
+            : "CASE WHEN c.initiated_by = 'client' THEN 'outgoing' ELSE 'incoming' END";
+    }
+
+    const baseQuery = `SELECT c.call_id, c.status, c.branch_id,
+                              bl.name AS branch_name,
+                              ${callDirection} AS direction,
+                              ${otherName} AS other_participant_name,
+                              ${otherUsername} AS other_participant_username,
+                              c.initiated_by, c.recipient_panel,
+                              c.create_date, c.accepted_at, c.ended_at, c.end_reason,
+                              CASE WHEN c.accepted_at IS NULL THEN NULL
+                                   ELSE TIMESTAMPDIFF(SECOND, c.accepted_at,
+                                       COALESCE(c.ended_at, NOW())) END AS duration_seconds
+                       FROM in_app_voice_calls c
+                       LEFT JOIN branch_list bl ON bl.branch_id = c.branch_id
+                       WHERE ${where}`;
+    const filterSql = [];
+    const filterParams = [];
+    if (status) {
+        filterSql.push("history.status = ?");
+        filterParams.push(status);
+    }
+    if (direction) {
+        filterSql.push("history.direction = ?");
+        filterParams.push(direction);
+    }
+    const filtered = filterSql.length ? `WHERE ${filterSql.join(" AND ")}` : "";
+    const [countRows] = await pool.query(
+        `SELECT COUNT(*) AS total FROM (${baseQuery}) history ${filtered}`,
+        [...selectParams, ...whereParams, ...filterParams]
+    );
+    const [rows] = await pool.query(
+        `SELECT * FROM (${baseQuery}) history ${filtered}
+         ORDER BY history.create_date DESC, history.call_id DESC
+         LIMIT ? OFFSET ?`,
+        [...selectParams, ...whereParams, ...filterParams, limit, offset]
+    );
+    const total = Number(countRows[0]?.total || 0);
+    return {
+        items: rows,
+        pagination: {
+            page,
+            limit,
+            total,
+            total_pages: Math.max(1, Math.ceil(total / limit)),
+        },
+    };
+}
+
+function voiceCallHistoryOptions(req) {
+    const requestedPage = Number.parseInt(req.query?.page, 10);
+    const requestedLimit = Number.parseInt(req.query?.limit, 10);
+    const status = String(req.query?.status || "").trim().toLowerCase();
+    const direction = String(req.query?.direction || "").trim().toLowerCase();
+    if (status && !VOICE_CALL_HISTORY_STATUSES.has(status)) {
+        const error = new Error("Invalid voice call status filter");
+        error.status = 400;
+        throw error;
+    }
+    if (direction && !["incoming", "outgoing"].includes(direction)) {
+        const error = new Error("direction must be incoming or outgoing");
+        error.status = 400;
+        throw error;
+    }
+    return {
+        page: Number.isFinite(requestedPage) ? Math.max(1, requestedPage) : 1,
+        limit: Number.isFinite(requestedLimit)
+            ? Math.min(100, Math.max(1, requestedLimit))
+            : 25,
+        status: status || null,
+        direction: direction || null,
+    };
+}
+
+router.get("/history", auth, validateBranch, async (req, res) => {
+    try {
+        res.set("Cache-Control", "no-store");
+        const data = await loadVoiceCallHistory({
+            branchId: req.branch_id,
+            username: requestUsername(req),
+            panel: "enduser",
+            ...voiceCallHistoryOptions(req),
+        });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        return sendError(res, error, "Failed to load voice call history");
+    }
+});
+
+router.get("/client/history", validateClientVoiceCallSession, async (req, res) => {
+    try {
+        res.set("Cache-Control", "no-store");
+        const data = await loadVoiceCallHistory({
+            branchId: req.branch_id,
+            username: req.client_username,
+            panel: "client",
+            ...voiceCallHistoryOptions(req),
+        });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        return sendError(res, error, "Failed to load voice call history");
+    }
+});
+
+router.get("/ca/history", validateCaSession, async (req, res) => {
+    try {
+        res.set("Cache-Control", "no-store");
+        const data = await loadVoiceCallHistory({
+            branchId: req.branch_id,
+            username: req.ca_username,
+            panel: "ca",
+            ...voiceCallHistoryOptions(req),
+        });
+        return res.status(200).json({ success: true, data });
+    } catch (error) {
+        return sendError(res, error, "Failed to load voice call history");
     }
 });
 
@@ -1302,7 +1555,15 @@ router.get("/:call_id", auth, validateBranch, async (req, res) => {
         );
         return res.status(200).json({
             success: true,
-            data: callView(call, "caller"),
+            data: {
+                ...callView(call, "caller"),
+                accepted_on_another_device:
+                    call.initiated_by === "client" &&
+                    call.recipient_panel === "enduser" &&
+                    call.status === "accepted" &&
+                    Boolean(call.accepted_by_session_hash) &&
+                    call.accepted_by_session_hash !== requestVoiceCallSessionHash(req),
+            },
         });
     } catch (error) {
         return sendError(res, error, "Failed to load voice call");
@@ -1331,6 +1592,16 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
             });
         }
         if (call.status !== "ringing") {
+            if (
+                action === "accept" &&
+                call.status === "accepted" &&
+                call.accepted_by_session_hash === requestVoiceCallSessionHash(req)
+            ) {
+                return res.status(200).json({
+                    success: true,
+                    data: { call_id: call.call_id, status: "accepted" },
+                });
+            }
             await updateExpiredInvites();
             return res.status(409).json({
                 success: false,
@@ -1341,6 +1612,7 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
+                 accepted_by_session_hash = IF(? = 'accepted', ?, accepted_by_session_hash),
                  end_reason = IF(? = 'rejected', 'staff_declined', end_reason),
                  ended_at = IF(? = 'rejected', NOW(), ended_at)
              WHERE call_id = ? AND caller_username = ?
@@ -1349,6 +1621,8 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
             [
                 nextStatus,
                 nextStatus,
+                nextStatus,
+                requestVoiceCallSessionHash(req),
                 nextStatus,
                 nextStatus,
                 call.call_id,
@@ -1360,6 +1634,9 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
                 success: false,
                 message: "This call has already been answered or ended",
             });
+        }
+        if (action === "accept") {
+            void notifyCallAnswered(call, requestUsername(req), "enduser");
         }
         if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
@@ -1379,6 +1656,17 @@ router.post("/:call_id/token", auth, validateBranch, async (req, res) => {
             requestUsername(req),
             "caller"
         );
+        if (
+            call.initiated_by === "client" &&
+            call.recipient_panel === "enduser" &&
+            call.accepted_by_session_hash &&
+            call.accepted_by_session_hash !== requestVoiceCallSessionHash(req)
+        ) {
+            return res.status(409).json({
+                success: false,
+                message: "This call was answered on another office session",
+            });
+        }
         const data = await issueParticipantToken(call, "caller");
         return res.status(200).json({ success: true, data });
     } catch (error) {
@@ -1409,7 +1697,8 @@ router.post("/:call_id/end", auth, validateBranch, async (req, res) => {
                     requestUsername(req),
                 ]
             );
-            await deleteCallRoom(call);
+            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
+            else await deleteCallRoom(call);
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -1447,7 +1736,13 @@ router.get("/staff/:call_id", auth, validateBranch, async (req, res) => {
         await getStaffCaller(req.branch_id, requestUsername(req));
         return res.status(200).json({
             success: true,
-            data: callView(call, "client"),
+            data: {
+                ...callView(call, "client"),
+                accepted_on_another_device:
+                    call.status === "accepted" &&
+                    Boolean(call.accepted_by_session_hash) &&
+                    call.accepted_by_session_hash !== requestVoiceCallSessionHash(req),
+            },
         });
     } catch (error) {
         return sendError(res, error, "Failed to load incoming staff call");
@@ -1478,6 +1773,16 @@ router.post("/staff/:call_id/respond", auth, validateBranch, async (req, res) =>
             });
         }
         if (call.status !== "ringing") {
+            if (
+                action === "accept" &&
+                call.status === "accepted" &&
+                call.accepted_by_session_hash === requestVoiceCallSessionHash(req)
+            ) {
+                return res.status(200).json({
+                    success: true,
+                    data: { call_id: call.call_id, status: "accepted" },
+                });
+            }
             await updateExpiredInvites();
             return res.status(409).json({
                 success: false,
@@ -1488,18 +1793,31 @@ router.post("/staff/:call_id/respond", auth, validateBranch, async (req, res) =>
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
+                 accepted_by_session_hash = IF(? = 'accepted', ?, accepted_by_session_hash),
                  end_reason = IF(? = 'rejected', 'staff_declined', end_reason),
                  ended_at = IF(? = 'rejected', NOW(), ended_at)
              WHERE call_id = ? AND client_username = ?
                AND initiated_by = 'staff' AND recipient_panel = 'enduser'
                AND status = 'ringing' AND expires_at > NOW()`,
-            [nextStatus, nextStatus, nextStatus, nextStatus, call.call_id, username]
+            [
+                nextStatus,
+                nextStatus,
+                nextStatus,
+                requestVoiceCallSessionHash(req),
+                nextStatus,
+                nextStatus,
+                call.call_id,
+                username,
+            ]
         );
         if (result.affectedRows !== 1) {
             return res.status(409).json({
                 success: false,
                 message: "This call has already been answered or ended",
             });
+        }
+        if (action === "accept") {
+            void notifyCallAnswered(call, username, "enduser");
         }
         if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
@@ -1523,6 +1841,15 @@ router.post("/staff/:call_id/token", auth, validateBranch, async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: "Voice call not found",
+            });
+        }
+        if (
+            call.accepted_by_session_hash &&
+            call.accepted_by_session_hash !== requestVoiceCallSessionHash(req)
+        ) {
+            return res.status(409).json({
+                success: false,
+                message: "This call was answered on another office session",
             });
         }
         await getStaffCaller(req.branch_id, requestUsername(req));
@@ -1563,7 +1890,8 @@ router.post("/staff/:call_id/end", auth, validateBranch, async (req, res) => {
                     username,
                 ]
             );
-            await deleteCallRoom(call);
+            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
+            else await deleteCallRoom(call);
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -1600,7 +1928,14 @@ router.get("/client/:call_id", validateClientVoiceCallSession, async (req, res) 
         }
         return res.status(200).json({
             success: true,
-            data: callView(call, "client"),
+            data: {
+                ...callView(call, "client"),
+                accepted_on_another_device:
+                    call.initiated_by === "staff" &&
+                    call.recipient_panel === "client" &&
+                    call.status === "accepted" &&
+                    call.accepted_by_session_hash !== req.client_voice_call_session_hash,
+            },
         });
     } catch (error) {
         return sendError(res, error, "Failed to load voice call");
@@ -1628,6 +1963,16 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
                 message: "This call is not an incoming staff call",
             });
         }
+        if (
+            action === "accept" &&
+            call.status === "accepted" &&
+            call.accepted_by_session_hash === req.client_voice_call_session_hash
+        ) {
+            return res.status(200).json({
+                success: true,
+                data: { call_id: call.call_id, status: "accepted" },
+            });
+        }
         if (call.status !== "ringing") {
             await updateExpiredInvites();
             return res.status(409).json({
@@ -1639,6 +1984,7 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
+                 accepted_by_session_hash = IF(? = 'accepted', ?, accepted_by_session_hash),
                  end_reason = IF(? = 'rejected', 'client_declined', end_reason),
                  ended_at = IF(? = 'rejected', NOW(), ended_at)
              WHERE call_id = ? AND client_username = ?
@@ -1646,6 +1992,8 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
             [
                 nextStatus,
                 nextStatus,
+                nextStatus,
+                req.client_voice_call_session_hash,
                 nextStatus,
                 nextStatus,
                 call.call_id,
@@ -1655,8 +2003,11 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
         if (result.affectedRows !== 1) {
             return res.status(409).json({
                 success: false,
-                message: "This call has already been answered or ended",
+                message: "This call has already been answered on another device or ended",
             });
+        }
+        if (action === "accept") {
+            void notifyCallAnswered(call, req.client_username, "client");
         }
         if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
@@ -1676,6 +2027,16 @@ router.post("/client/:call_id/token", validateClientVoiceCallSession, async (req
             req.client_username,
             "client"
         );
+        if (
+            call.initiated_by === "staff" &&
+            call.recipient_panel === "client" &&
+            call.accepted_by_session_hash !== req.client_voice_call_session_hash
+        ) {
+            return res.status(409).json({
+                success: false,
+                message: "This call was accepted on another device",
+            });
+        }
         const data = await issueParticipantToken(call, "client");
         return res.status(200).json({ success: true, data });
     } catch (error) {
@@ -1706,7 +2067,8 @@ router.post("/client/:call_id/end", validateClientVoiceCallSession, async (req, 
                     req.client_username,
                 ]
             );
-            await deleteCallRoom(call);
+            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
+            else await deleteCallRoom(call);
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -1743,7 +2105,13 @@ router.get("/ca/:call_id", validateCaSession, async (req, res) => {
         }
         return res.status(200).json({
             success: true,
-            data: callView(call, "client"),
+            data: {
+                ...callView(call, "client"),
+                accepted_on_another_device:
+                    call.status === "accepted" &&
+                    Boolean(call.accepted_by_session_hash) &&
+                    call.accepted_by_session_hash !== req.ca_voice_call_session_hash,
+            },
         });
     } catch (error) {
         return sendError(res, error, "Failed to load voice call");
@@ -1772,6 +2140,16 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
             });
         }
         if (call.status !== "ringing") {
+            if (
+                action === "accept" &&
+                call.status === "accepted" &&
+                call.accepted_by_session_hash === req.ca_voice_call_session_hash
+            ) {
+                return res.status(200).json({
+                    success: true,
+                    data: { call_id: call.call_id, status: "accepted" },
+                });
+            }
             await updateExpiredInvites();
             return res.status(409).json({
                 success: false,
@@ -1782,6 +2160,7 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
+                 accepted_by_session_hash = IF(? = 'accepted', ?, accepted_by_session_hash),
                  end_reason = IF(? = 'rejected', 'ca_declined', end_reason),
                  ended_at = IF(? = 'rejected', NOW(), ended_at)
              WHERE call_id = ? AND client_username = ?
@@ -1790,6 +2169,8 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
             [
                 nextStatus,
                 nextStatus,
+                nextStatus,
+                req.ca_voice_call_session_hash,
                 nextStatus,
                 nextStatus,
                 call.call_id,
@@ -1801,6 +2182,9 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
                 success: false,
                 message: "This call has already been answered or ended",
             });
+        }
+        if (action === "accept") {
+            void notifyCallAnswered(call, req.ca_username, "ca");
         }
         if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
@@ -1824,6 +2208,15 @@ router.post("/ca/:call_id/token", validateCaSession, async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: "Voice call not found",
+            });
+        }
+        if (
+            call.accepted_by_session_hash &&
+            call.accepted_by_session_hash !== req.ca_voice_call_session_hash
+        ) {
+            return res.status(409).json({
+                success: false,
+                message: "This call was answered on another device",
             });
         }
         const data = await issueParticipantToken(call, "client");
@@ -1862,7 +2255,8 @@ router.post("/ca/:call_id/end", validateCaSession, async (req, res) => {
                     req.ca_username,
                 ]
             );
-            await deleteCallRoom(call);
+            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
+            else await deleteCallRoom(call);
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
