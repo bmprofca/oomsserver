@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { Server } from "socket.io";
 import pool from "../db.js";
 import { checkToken } from "../middleware/auth.js";
@@ -12,6 +13,7 @@ import {
 
 let socketServer;
 let resolveCapability;
+let reconcileVoiceCallsAfterDisconnect;
 
 function voiceCallRoom(panel, username) {
     return `voice-call:${panel}:${String(username || "").trim().toLowerCase()}`;
@@ -19,6 +21,31 @@ function voiceCallRoom(panel, username) {
 
 function watchKey(panel, username) {
     return `${panel}:${String(username || "").trim().toLowerCase()}`;
+}
+
+function voiceCallSessionId(credentials, token) {
+    const fcmToken = String(credentials.voice_call_fcm_token || "").trim();
+    if (fcmToken) {
+        return `fcm:${crypto.createHash("sha256").update(fcmToken).digest("hex")}`;
+    }
+    const sessionId = String(credentials.voice_call_session_id || "").trim();
+    if (sessionId && /^[A-Za-z0-9:_-]{8,160}$/.test(sessionId)) {
+        return sessionId;
+    }
+    return `session:${crypto.createHash("sha256").update(token).digest("hex")}`;
+}
+
+export function getConnectedVoiceCallSessions(username, panel) {
+    if (!socketServer) return [];
+    const room = voiceCallRoom(panel, username);
+    const socketIds = socketServer.sockets.adapter.rooms.get(room);
+    if (!socketIds) return [];
+    return Array.from(socketIds)
+        .map((socketId) => {
+            const identity = socketServer.sockets.sockets.get(socketId)?.data.voiceCallIdentity;
+            return identity?.voiceCallPresence ? identity.sessionId : null;
+        })
+        .filter(Boolean);
 }
 
 async function notifyCapabilityWatchers(panel, username) {
@@ -91,8 +118,34 @@ export function emitCAVoiceCallIncoming(username, call) {
     socketServer.to(voiceCallRoom("ca", username)).emit("voice_call_incoming", call);
 }
 
-export function setupSocketIO(server, capabilityResolver) {
+export function emitVoiceCallAnswered(username, panel, call, acceptedSessionId) {
+    if (!socketServer) return;
+    const room = voiceCallRoom(panel, username);
+    const socketIds = socketServer.sockets.adapter.rooms.get(room);
+    if (!socketIds) return;
+    for (const socketId of socketIds) {
+        const socket = socketServer.sockets.sockets.get(socketId);
+        if (
+            socket?.data.voiceCallIdentity?.voiceCallPresence &&
+            socket.data.voiceCallIdentity.sessionId === acceptedSessionId
+        ) {
+            continue;
+        }
+        socket?.emit("voice_call_answered", call);
+    }
+}
+
+export function emitVoiceCallCancelled(username, panel, call) {
+    if (!socketServer) return;
+    const socketPanel = panel === "enduser" ? "staff" : panel;
+    socketServer
+        .to(voiceCallRoom(socketPanel, username))
+        .emit("voice_call_cancelled", call);
+}
+
+export function setupSocketIO(server, capabilityResolver, disconnectReconciler) {
     resolveCapability = capabilityResolver;
+    reconcileVoiceCallsAfterDisconnect = disconnectReconciler;
     const io = new Server(server, {
         cors: {
             origin: "*",
@@ -137,6 +190,11 @@ export function setupSocketIO(server, capabilityResolver) {
                     panel: "enduser",
                     username,
                     branchId: voiceCallBranchId,
+                    sessionId: voiceCallSessionId(credentials, token),
+                    voiceCallPresence: Boolean(
+                        credentials.voice_call_session_id || credentials.voice_call_fcm_token
+                    ),
+                    sessionHash: crypto.createHash("sha256").update(token).digest("hex"),
                 };
                 socket.emit("auth_status", true);
                 if (voiceCallBranchId) {
@@ -205,6 +263,11 @@ export function setupSocketIO(server, capabilityResolver) {
                     panel: "client",
                     username,
                     branchId: String(clientRows[0].branch_id || "").trim(),
+                    sessionId: voiceCallSessionId(credentials, token),
+                    voiceCallPresence: Boolean(
+                        credentials.voice_call_session_id || credentials.voice_call_fcm_token
+                    ),
+                    sessionHash: crypto.createHash("sha256").update(token).digest("hex"),
                 };
 
                 if (typeof acknowledge === "function") {
@@ -248,7 +311,16 @@ export function setupSocketIO(server, capabilityResolver) {
                     return;
                 }
                 await socket.join(voiceCallRoom("ca", username));
-                socket.data.voiceCallIdentity = { panel: "ca", username, branchId };
+                socket.data.voiceCallIdentity = {
+                    panel: "ca",
+                    username,
+                    branchId,
+                    sessionId: voiceCallSessionId(credentials, token),
+                    voiceCallPresence: Boolean(
+                        credentials.voice_call_session_id || credentials.voice_call_fcm_token
+                    ),
+                    sessionHash: crypto.createHash("sha256").update(token).digest("hex"),
+                };
                 if (typeof acknowledge === "function") acknowledge({ authenticated: true });
                 void notifyCapabilityWatchers("ca", username);
             } catch (error) {
@@ -328,6 +400,19 @@ export function setupSocketIO(server, capabilityResolver) {
                 setTimeout(() => {
                     void notifyCapabilityWatchers(panel, identity.username);
                 }, 0);
+                if (typeof reconcileVoiceCallsAfterDisconnect === "function") {
+                    for (const delay of [5000, 30000, 90000]) {
+                        const timer = setTimeout(() => {
+                            void reconcileVoiceCallsAfterDisconnect(identity).catch((error) => {
+                                console.error(
+                                    "VOICE-CALL DISCONNECT RECONCILIATION ERROR:",
+                                    error
+                                );
+                            });
+                        }, delay);
+                        timer.unref?.();
+                    }
+                }
             }
             // console.log(`❌ Socket ${socket.id} disconnected:`, reason);
         });

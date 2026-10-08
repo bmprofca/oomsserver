@@ -27,16 +27,33 @@ audio is not enabled.
   reconnection to recover an invitation sent while disconnected. Mobile
   clients and CAs continue to receive incoming-call push notifications.
 - If an account is signed in on multiple devices or app sessions, the first
-  session to accept an incoming call owns that call. Other sessions stop
-  ringing, see that the call was answered elsewhere, and cannot obtain a
-  LiveKit join token. Mobile sessions also receive a silent push to cancel
-  their local incoming-call notification. The accepting session can safely
-  repeat its accept or reconnect request.
+  session to accept an incoming call owns that call. Other sessions receive a
+  `voice_call_answered` event, stop ringing, and dismiss the incoming-call UI.
+  Mobile sessions also receive a push naming the person who answered and
+  cancel their local incoming-call notification. Other sessions cannot obtain
+  a LiveKit join token; the accepting session can safely repeat its accept or
+  reconnect request.
 - Callers hear a ringback tone while an invitation is ringing; recipients hear
   an incoming-call tone. Both stop when the call is answered or ends.
 - After an accepted call ends, clients disconnect from LiveKit first and the
   server removes the room after a short grace period so the other participant
   can observe the ended status and disconnect cleanly.
+- When a new call is initiated, the server reconciles active call records with
+  LiveKit. If the room for an old active record no longer exists, the record is
+  ended so a missed LiveKit end webhook cannot block future calls.
+- LiveKit join events record when a call has actually connected. If its
+  participants disconnect or its room finishes, the server releases the active
+  call so a closed browser or app cannot block the next call. If a call is
+  accepted but no participant joins, an empty room is reconciled after a
+  45-second join grace.
+- When an authenticated call socket disconnects, the server checks LiveKit for
+  accepted calls involving that account after five seconds, then retries at 30
+  and 90 seconds. This allows LiveKit's transport-disconnect detection to settle.
+  An empty or missing room is marked ended; a room with a participant remains
+  active.
+- Configure the LiveKit webhook to deliver `participant_joined`,
+  `participant_left`, and `room_finished` events to
+  `/api/v1/voice-calls/webhook`; the endpoint verifies each event signature.
 
 ## Database update
 
@@ -44,11 +61,17 @@ After the original voice-call and LiveKit settings migrations, run:
 
 ```powershell
 npm run migrate:voice-call-direction
+npm run migrate:voice-call-sessions
+npm run migrate:voice-call-connection
 ```
 
-This adds `initiated_by` and `recipient_panel`, the incoming-call indexes, and
-the accepted-session binding that lets only the session that answered an
-incoming call join its LiveKit room. The migration script is safe to rerun.
+These add `initiated_by` and `recipient_panel`, the incoming-call indexes,
+accepted-session binding, and per-session ringing/decline tracking. A recipient
+session that declines dismisses only its own incoming-call UI; the call is
+rejected and the LiveKit room removed only after every session that was notified
+has declined. Connection tracking distinguishes a call that disconnected after
+joining from one still within its initial join grace. The migration scripts are
+safe to rerun.
 
 ## Main API routes
 

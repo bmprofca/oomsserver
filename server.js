@@ -19,6 +19,7 @@ import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
 import {
     resolveVoiceCallCapability,
+    reconcileVoiceCallsAfterSocketDisconnect,
     updateExpiredInvites,
 } from "./routes/voiceCalls.js";
 
@@ -91,7 +92,11 @@ app.get("/health", (req, res) => {
 });
 
 const server = http.createServer(app);
-const WsIo = setupSocketIO(server, resolveVoiceCallCapability);
+const WsIo = setupSocketIO(
+    server,
+    resolveVoiceCallCapability,
+    reconcileVoiceCallsAfterSocketDisconnect
+);
 
 
 server.listen(PORT, '0.0.0.0', () => {

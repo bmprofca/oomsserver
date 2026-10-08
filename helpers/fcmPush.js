@@ -202,7 +202,7 @@ export async function sendPushToUser(
     username,
     panel,
     { title, body, data = {} },
-    { throwOnError = false } = {}
+    { throwOnError = false, excludeTokens = [] } = {}
 ) {
     const messaging = getFirebaseMessaging();
     if (!messaging) {
@@ -222,7 +222,10 @@ export async function sendPushToUser(
             return { successCount: 0, failureCount: 0 };
         }
 
-        const tokens = rows.map((r) => String(r.fcm_token)).filter(Boolean);
+        const excludedTokens = new Set(excludeTokens.map(String).filter(Boolean));
+        const tokens = rows
+            .map((r) => String(r.fcm_token))
+            .filter((token) => token && !excludedTokens.has(token));
         if (tokens.length === 0) {
             if (throwOnError) throw new Error(`No FCM device is registered for ${panel}`);
             return { successCount: 0, failureCount: 0 };
@@ -243,6 +246,8 @@ export async function sendPushToUser(
         const pushType = String(stringData.type || "").toUpperCase();
         const isVoiceCall = pushType === "IN_APP_VOICE_CALL";
         const isVoiceCallControl = pushType === "IN_APP_VOICE_CALL_ANSWERED";
+        const isVoiceCallCancelled = pushType === "IN_APP_VOICE_CALL_CANCELLED";
+        const isVoiceCallLifecycleControl = isVoiceCallControl || isVoiceCallCancelled;
         const notificationData = isVoiceCall
             ? { ...stringData, title: String(title || ""), body: String(body || "") }
             : stringData;
@@ -256,7 +261,7 @@ export async function sendPushToUser(
 
             const message = {
                 tokens: batch,
-                ...(!isVoiceCall && !isVoiceCallControl ? {
+                ...(!isVoiceCall && !isVoiceCallLifecycleControl ? {
                     notification: {
                         title: String(title || ""),
                         body: String(body || ""),
@@ -265,8 +270,8 @@ export async function sendPushToUser(
                 data: notificationData,
                 android: {
                     priority: "high",
-                    ...(isVoiceCall || isVoiceCallControl ? { ttl: 45_000 } : {}),
-                    ...(!isVoiceCall && !isVoiceCallControl ? {
+                    ...(isVoiceCall || isVoiceCallLifecycleControl ? { ttl: 45_000 } : {}),
+                    ...(!isVoiceCall && !isVoiceCallLifecycleControl ? {
                         notification: {
                             sound: "default",
                             channelId: "ooms_task_updates",
@@ -275,21 +280,28 @@ export async function sendPushToUser(
                 },
                 apns: {
                     headers: {
-                        "apns-push-type": isVoiceCallControl ? "background" : "alert",
-                        "apns-priority": isVoiceCallControl ? "5" : "10",
-                        ...(isVoiceCall || isVoiceCallControl
+                        "apns-push-type": isVoiceCallCancelled ? "background" : "alert",
+                        "apns-priority": isVoiceCallCancelled ? "5" : "10",
+                        ...(isVoiceCall || isVoiceCallLifecycleControl
                             ? { "apns-expiration": String(Math.floor(Date.now() / 1000) + 45) }
                             : {}),
                     },
                     payload: {
                         aps: {
+                            ...(isVoiceCallCancelled ? { "content-available": 1 } : {}),
                             ...(isVoiceCall ? {
                                 alert: {
                                     title: String(title || ""),
                                     body: String(body || ""),
                                 },
                             } : {}),
-                            ...(isVoiceCallControl ? { "content-available": 1 } : { sound: "default" }),
+                            ...(isVoiceCallCancelled ? {} : isVoiceCallControl ? {
+                                alert: {
+                                    title: String(title || ""),
+                                    body: String(body || ""),
+                                },
+                                sound: "default",
+                            } : { sound: "default" }),
                         },
                     },
                 },

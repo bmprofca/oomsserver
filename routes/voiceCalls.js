@@ -14,7 +14,10 @@ import { sendPushToUser } from "../helpers/fcmPush.js";
 import {
     emitCAVoiceCallIncoming,
     emitStaffVoiceCallIncoming,
+    emitVoiceCallAnswered,
+    emitVoiceCallCancelled,
     emitVoiceCallIncoming,
+    getConnectedVoiceCallSessions,
     hasConnectedCAVoiceCallSocket,
     hasConnectedClientVoiceCallSocket,
     hasConnectedStaffVoiceCallSocket,
@@ -28,6 +31,7 @@ const router = express.Router();
 const INVITE_TTL_SECONDS = 45;
 const MAX_CALL_INVITES_PER_MINUTE = 10;
 const ACTIVE_CALL_STATUSES = ["ringing", "accepted"];
+const ACCEPTED_CALL_EMPTY_ROOM_GRACE_SECONDS = 45;
 const ENDED_ROOM_CLEANUP_DELAY_MS = 5000;
 
 async function liveKitConfig({ requireEnabled = true } = {}) {
@@ -105,19 +109,138 @@ function requestVoiceCallSessionHash(req) {
     return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-async function notifyCallAnswered(call, username, panel) {
+function requestVoiceCallSessionId(req) {
+    const fcmToken = String(req.headers["x-fcm-token"] || "").trim();
+    if (fcmToken) {
+        return `fcm:${crypto.createHash("sha256").update(fcmToken).digest("hex")}`;
+    }
+    const sessionId = String(req.headers["x-voice-call-session-id"] || "").trim();
+    if (/^[A-Za-z0-9:_-]{8,160}$/.test(sessionId)) return sessionId;
+    return `session:${requestVoiceCallSessionHash(req)}`;
+}
+
+async function recipientVoiceCallSessionIds(connection, username, panel) {
+    const sessionIds = new Set(getConnectedVoiceCallSessions(username, panel));
+    const [tokenRows] = await connection.query(
+        `SELECT fcm_token FROM fcm_tokens WHERE username = ? AND panel = ?`,
+        [username, panel]
+    );
+    for (const row of tokenRows) {
+        const token = String(row.fcm_token || "").trim();
+        if (token) {
+            sessionIds.add(`fcm:${crypto.createHash("sha256").update(token).digest("hex")}`);
+        }
+    }
+    return Array.from(sessionIds);
+}
+
+async function saveRecipientVoiceCallSessions(connection, callId, sessionIds) {
+    for (const sessionId of sessionIds) {
+        await connection.query(
+            `INSERT IGNORE INTO in_app_voice_call_sessions (call_id, session_id)
+             VALUES (?, ?)`,
+            [callId, sessionId]
+        );
+    }
+}
+
+async function declineCallSession(call, req, endReason) {
+    const connection = await pool.getConnection();
+    let transactionStarted = false;
+    try {
+        await connection.beginTransaction();
+        transactionStarted = true;
+        const [lockedRows] = await connection.query(
+            `SELECT status
+             FROM in_app_voice_calls
+             WHERE call_id = ?
+             LIMIT 1 FOR UPDATE`,
+            [call.call_id]
+        );
+        if (!lockedRows.length || lockedRows[0].status !== "ringing") {
+            const error = new Error("This call is no longer available");
+            error.status = 409;
+            throw error;
+        }
+
+        await connection.query(
+            `INSERT INTO in_app_voice_call_sessions (call_id, session_id, status)
+             VALUES (?, ?, 'declined')
+             ON DUPLICATE KEY UPDATE status = 'declined'`,
+            [call.call_id, requestVoiceCallSessionId(req)]
+        );
+        const [counts] = await connection.query(
+            `SELECT COUNT(*) AS total,
+                    SUM(status = 'declined') AS declined
+             FROM in_app_voice_call_sessions
+             WHERE call_id = ?`,
+            [call.call_id]
+        );
+        const allSessionsDeclined =
+            Number(counts[0]?.total || 0) > 0 &&
+            Number(counts[0]?.declined || 0) >= Number(counts[0]?.total || 0);
+        if (allSessionsDeclined) {
+            await connection.query(
+                `UPDATE in_app_voice_calls
+                 SET status = 'rejected', end_reason = ?, ended_at = NOW()
+                 WHERE call_id = ? AND status = 'ringing'`,
+                [endReason, call.call_id]
+            );
+        }
+        await connection.commit();
+        transactionStarted = false;
+        return allSessionsDeclined ? "rejected" : "ringing";
+    } catch (error) {
+        if (transactionStarted) await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function hasDeclinedCallSession(callId, req) {
+    const [rows] = await pool.query(
+        `SELECT 1
+         FROM in_app_voice_call_sessions
+         WHERE call_id = ? AND session_id = ? AND status = 'declined'
+         LIMIT 1`,
+        [callId, requestVoiceCallSessionId(req)]
+    );
+    return rows.length > 0;
+}
+
+async function notifyCallAnswered(
+    call,
+    username,
+    panel,
+    answeredByName,
+    acceptedSessionId,
+    acceptingDeviceFcmToken
+) {
+    const answeredCall = {
+        call_id: call.call_id,
+        answered_by_name: String(answeredByName || "Another OOMS user"),
+    };
+    emitVoiceCallAnswered(
+        username,
+        panel,
+        answeredCall,
+        acceptedSessionId
+    );
     try {
         const result = await sendPushToUser(
             username,
             panel,
             {
                 title: "Call answered",
-                body: "This call was answered on another device.",
+                body: `${answeredCall.answered_by_name} already answered this call.`,
                 data: {
                     type: "IN_APP_VOICE_CALL_ANSWERED",
                     call_id: call.call_id,
+                    answered_by_name: answeredCall.answered_by_name,
                 },
-            }
+            },
+            { excludeTokens: acceptingDeviceFcmToken ? [acceptingDeviceFcmToken] : [] }
         );
         if (result.failureCount > 0) {
             console.warn("Some devices did not receive the voice-call answer update", {
@@ -127,6 +250,40 @@ async function notifyCallAnswered(call, username, panel) {
         }
     } catch (error) {
         console.error("Unable to notify other devices that the voice call was answered:", error);
+    }
+}
+
+function voiceCallRecipient(call) {
+    if (call.initiated_by === "client") {
+        return { username: call.caller_username, panel: "enduser" };
+    }
+    return {
+        username: call.client_username,
+        panel: call.recipient_panel,
+    };
+}
+
+async function notifyCallCancelled(call) {
+    const recipient = voiceCallRecipient(call);
+    const event = { call_id: call.call_id };
+    emitVoiceCallCancelled(recipient.username, recipient.panel, event);
+    try {
+        const result = await sendPushToUser(recipient.username, recipient.panel, {
+            title: "Call cancelled",
+            body: `${call.caller_name} cancelled the call.`,
+            data: {
+                type: "IN_APP_VOICE_CALL_CANCELLED",
+                call_id: call.call_id,
+            },
+        });
+        if (result.failureCount > 0) {
+            console.warn("Some devices did not receive the voice-call cancellation", {
+                call_id: call.call_id,
+                failure_count: result.failureCount,
+            });
+        }
+    } catch (error) {
+        console.error("Unable to notify devices that the voice call was cancelled:", error);
     }
 }
 
@@ -586,6 +743,98 @@ export async function updateExpiredInvites() {
     );
 }
 
+async function findActiveCallsForParticipants(connection, config, firstUsername, secondUsername) {
+    const [activeRows] = await connection.query(
+        `SELECT call_id, provider_room, status, connected_at,
+                accepted_at <= DATE_SUB(NOW(), INTERVAL ${ACCEPTED_CALL_EMPTY_ROOM_GRACE_SECONDS} SECOND)
+                    AS accepted_join_grace_elapsed
+         FROM in_app_voice_calls
+         WHERE status IN ('ringing', 'accepted')
+           AND (
+               client_username IN (?, ?) OR caller_username IN (?, ?)
+           )`,
+        [firstUsername, secondUsername, firstUsername, secondUsername]
+    );
+    if (!activeRows.length) return activeRows;
+
+    const rooms = await roomService(config).listRooms(
+        activeRows.map((call) => call.provider_room)
+    );
+    const roomsByName = new Map(rooms.map((room) => [room.name, room]));
+    for (const call of activeRows) {
+        const room = roomsByName.get(call.provider_room);
+        const roomMissing = !room;
+        const roomHasNoParticipants =
+            Boolean(room) && Number(room.numParticipants) === 0;
+        const acceptedRoomEmpty =
+            call.status === "accepted" &&
+            roomHasNoParticipants &&
+            (Boolean(call.connected_at) ||
+                Number(call.accepted_join_grace_elapsed) === 1);
+        if (roomMissing || acceptedRoomEmpty) {
+            await connection.query(
+                `UPDATE in_app_voice_calls
+                 SET status = IF(status = 'ringing', 'missed', 'ended'),
+                     end_reason = ?, ended_at = NOW()
+                 WHERE call_id = ? AND status IN ('ringing', 'accepted')`,
+                [
+                    roomMissing ? "provider_room_missing" : "provider_room_empty",
+                    call.call_id,
+                ]
+            );
+            if (acceptedRoomEmpty) {
+                scheduleCallRoomCleanup(call);
+            }
+        }
+    }
+
+    return activeRows.filter((call) => {
+        const room = roomsByName.get(call.provider_room);
+        return room &&
+            !(
+                call.status === "accepted" &&
+                Number(room.numParticipants) === 0 &&
+                (Boolean(call.connected_at) ||
+                    Number(call.accepted_join_grace_elapsed) === 1)
+            );
+    });
+}
+
+export async function reconcileVoiceCallsAfterSocketDisconnect(identity) {
+    const username = String(identity?.username || "").trim();
+    if (!username) return;
+
+    const [calls] = await pool.query(
+        `SELECT call_id, provider_room
+         FROM in_app_voice_calls
+         WHERE status = 'accepted'
+           AND (caller_username = ? OR client_username = ?)`,
+        [username, username]
+    );
+    if (!calls.length) return;
+
+    const config = await liveKitConfig({ requireEnabled: false });
+    const service = roomService(config);
+    const rooms = await service.listRooms(calls.map((call) => call.provider_room));
+    const roomsByName = new Map(rooms.map((room) => [room.name, room]));
+
+    for (const call of calls) {
+        const room = roomsByName.get(call.provider_room);
+        if (room && Number(room.numParticipants) > 0) continue;
+
+        const [result] = await pool.query(
+            `UPDATE in_app_voice_calls
+             SET status = 'ended', end_reason = 'participant_disconnected',
+                 ended_at = NOW()
+             WHERE call_id = ? AND status = 'accepted'`,
+            [call.call_id]
+        );
+        if (result.affectedRows) {
+            scheduleCallRoomCleanup(call);
+        }
+    }
+}
+
 async function loadAuthorizedCall(callId, branchId, username, participant) {
     const [rows] = await pool.query(
             `SELECT c.call_id, c.branch_id, bl.name AS branch_name,
@@ -623,10 +872,11 @@ function endedByName(call) {
     }[call.end_reason] || null);
 }
 
-function callView(call, participant) {
+function callView(call, participant, sessionDeclined = false) {
     return {
         call_id: call.call_id,
         status: call.status,
+        session_declined: sessionDeclined,
         other_participant_name:
             participant === "client" ? call.caller_name : call.client_name,
         other_participant_username:
@@ -635,6 +885,9 @@ function callView(call, participant) {
         branch_name: call.branch_name || "",
         expires_at: call.expires_at,
         accepted_at: call.accepted_at,
+        accepted_by_name: call.status === "accepted"
+            ? call.initiated_by === "client" ? call.caller_name : call.client_name
+            : null,
         ended_at: call.ended_at,
         end_reason: call.end_reason,
         ended_by_name: endedByName(call),
@@ -850,15 +1103,11 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 throw error;
             }
 
-            const [activeRows] = await connection.query(
-                `SELECT call_id
-                 FROM in_app_voice_calls
-                 WHERE status IN ('ringing', 'accepted')
-                   AND (
-                       client_username IN (?, ?) OR caller_username IN (?, ?)
-                   )
-                 LIMIT 1`,
-                [callerUsername, clientUsername, callerUsername, clientUsername]
+            const activeRows = await findActiveCallsForParticipants(
+                connection,
+                config,
+                callerUsername,
+                clientUsername
             );
             if (activeRows.length) {
                 await connection.rollback();
@@ -889,6 +1138,11 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 });
             }
 
+            const recipientSessionIds = await recipientVoiceCallSessionIds(
+                connection,
+                clientUsername,
+                recipientPanel
+            );
             await connection.query(
                 `INSERT INTO in_app_voice_calls
                     (call_id, branch_id, caller_username, client_username,
@@ -909,6 +1163,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                     INVITE_TTL_SECONDS,
                 ]
             );
+            await saveRecipientVoiceCallSessions(connection, callId, recipientSessionIds);
             await connection.commit();
             transactionStarted = false;
         } catch (transactionError) {
@@ -1185,13 +1440,11 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                 throw error;
             }
 
-            const [activeRows] = await connection.query(
-                `SELECT call_id
-                 FROM in_app_voice_calls
-                 WHERE status IN ('ringing', 'accepted')
-                   AND (client_username = ? OR caller_username = ?)
-                 LIMIT 1 FOR UPDATE`,
-                [clientUsername, staffUsername]
+            const activeRows = await findActiveCallsForParticipants(
+                connection,
+                config,
+                clientUsername,
+                staffUsername
             );
             if (activeRows.length) {
                 const error = new Error("You or this staff member is already in another call");
@@ -1213,6 +1466,11 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                 throw error;
             }
 
+            const recipientSessionIds = await recipientVoiceCallSessionIds(
+                connection,
+                staffUsername,
+                "enduser"
+            );
             callId = crypto.randomUUID();
             providerRoom = `voice_${callId.replace(/-/g, "")}`;
             await roomService(config).createRoom({
@@ -1241,6 +1499,7 @@ router.post("/client/create", validateClientVoiceCallSession, async (req, res) =
                     INVITE_TTL_SECONDS,
                 ]
             );
+            await saveRecipientVoiceCallSessions(connection, callId, recipientSessionIds);
             await connection.commit();
             transactionStarted = false;
             createdRoom = "";
@@ -1488,9 +1747,14 @@ router.get("/client/incoming", validateClientVoiceCallSession, async (req, res) 
              WHERE branch_id = ? AND client_username = ?
                AND initiated_by = 'staff' AND recipient_panel = 'client'
                AND status = 'ringing' AND expires_at > NOW()
+               AND NOT EXISTS (
+                   SELECT 1 FROM in_app_voice_call_sessions s
+                   WHERE s.call_id = in_app_voice_calls.call_id
+                     AND s.session_id = ? AND s.status = 'declined'
+               )
              ORDER BY create_date DESC
              LIMIT 1`,
-            [req.branch_id, req.client_username]
+            [req.branch_id, req.client_username, requestVoiceCallSessionId(req)]
         );
         return res.status(200).json({ success: true, data: rows[0] || null });
     } catch (error) {
@@ -1514,9 +1778,19 @@ router.get("/incoming", auth, validateBranch, async (req, res) => {
                    OR (client_username = ? AND initiated_by = 'staff' AND recipient_panel = 'enduser')
                )
                AND status = 'ringing' AND expires_at > NOW()
+               AND NOT EXISTS (
+                   SELECT 1 FROM in_app_voice_call_sessions s
+                   WHERE s.call_id = in_app_voice_calls.call_id
+                     AND s.session_id = ? AND s.status = 'declined'
+               )
              ORDER BY create_date DESC
              LIMIT 1`,
-            [req.branch_id, requestUsername(req), requestUsername(req)]
+            [
+                req.branch_id,
+                requestUsername(req),
+                requestUsername(req),
+                requestVoiceCallSessionId(req),
+            ]
         );
         return res.status(200).json({ success: true, data: rows[0] || null });
     } catch (error) {
@@ -1534,9 +1808,14 @@ router.get("/ca/incoming", validateCaSession, async (req, res) => {
              WHERE branch_id = ? AND client_username = ?
                AND initiated_by = 'staff' AND recipient_panel = 'ca'
                AND status = 'ringing' AND expires_at > NOW()
+               AND NOT EXISTS (
+                   SELECT 1 FROM in_app_voice_call_sessions s
+                   WHERE s.call_id = in_app_voice_calls.call_id
+                     AND s.session_id = ? AND s.status = 'declined'
+               )
              ORDER BY create_date DESC
              LIMIT 1`,
-            [req.branch_id, req.ca_username]
+            [req.branch_id, req.ca_username, requestVoiceCallSessionId(req)]
         );
         return res.status(200).json({ success: true, data: rows[0] || null });
     } catch (error) {
@@ -1556,7 +1835,7 @@ router.get("/:call_id", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             data: {
-                ...callView(call, "caller"),
+                ...callView(call, "caller", await hasDeclinedCallSession(call.call_id, req)),
                 accepted_on_another_device:
                     call.initiated_by === "client" &&
                     call.recipient_panel === "enduser" &&
@@ -1608,7 +1887,15 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
                 message: "This call is no longer available",
             });
         }
-        const nextStatus = action === "accept" ? "accepted" : "rejected";
+        if (action === "decline") {
+            const status = await declineCallSession(call, req, "staff_declined");
+            if (status === "rejected") await deleteCallRoom(call);
+            return res.status(200).json({
+                success: true,
+                data: { call_id: call.call_id, status, session_declined: true },
+            });
+        }
+        const nextStatus = "accepted";
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
@@ -1636,9 +1923,15 @@ router.post("/:call_id/respond", auth, validateBranch, async (req, res) => {
             });
         }
         if (action === "accept") {
-            void notifyCallAnswered(call, requestUsername(req), "enduser");
+            void notifyCallAnswered(
+                call,
+                requestUsername(req),
+                "enduser",
+                call.caller_name,
+                requestVoiceCallSessionId(req),
+                req.headers["x-fcm-token"]
+            );
         }
-        if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
             success: true,
             data: { call_id: call.call_id, status: nextStatus },
@@ -1685,7 +1978,7 @@ router.post("/:call_id/end", auth, validateBranch, async (req, res) => {
         let nextStatus = call.status;
         if (ACTIVE_CALL_STATUSES.includes(call.status)) {
             nextStatus = call.status === "ringing" ? "cancelled" : "ended";
-            await pool.query(
+            const [endResult] = await pool.query(
                 `UPDATE in_app_voice_calls
                  SET status = ?, end_reason = ?, ended_at = NOW()
                  WHERE call_id = ? AND caller_username = ?
@@ -1697,8 +1990,14 @@ router.post("/:call_id/end", auth, validateBranch, async (req, res) => {
                     requestUsername(req),
                 ]
             );
-            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
-            else await deleteCallRoom(call);
+            if (endResult.affectedRows) {
+                if (nextStatus === "cancelled") {
+                    void notifyCallCancelled(call);
+                    await deleteCallRoom(call);
+                } else {
+                    scheduleCallRoomCleanup(call);
+                }
+            }
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -1737,7 +2036,7 @@ router.get("/staff/:call_id", auth, validateBranch, async (req, res) => {
         return res.status(200).json({
             success: true,
             data: {
-                ...callView(call, "client"),
+                ...callView(call, "client", await hasDeclinedCallSession(call.call_id, req)),
                 accepted_on_another_device:
                     call.status === "accepted" &&
                     Boolean(call.accepted_by_session_hash) &&
@@ -1789,7 +2088,15 @@ router.post("/staff/:call_id/respond", auth, validateBranch, async (req, res) =>
                 message: "This call is no longer available",
             });
         }
-        const nextStatus = action === "accept" ? "accepted" : "rejected";
+        if (action === "decline") {
+            const status = await declineCallSession(call, req, "staff_declined");
+            if (status === "rejected") await deleteCallRoom(call);
+            return res.status(200).json({
+                success: true,
+                data: { call_id: call.call_id, status, session_declined: true },
+            });
+        }
+        const nextStatus = "accepted";
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
@@ -1817,9 +2124,15 @@ router.post("/staff/:call_id/respond", auth, validateBranch, async (req, res) =>
             });
         }
         if (action === "accept") {
-            void notifyCallAnswered(call, username, "enduser");
+            void notifyCallAnswered(
+                call,
+                username,
+                "enduser",
+                call.client_name,
+                requestVoiceCallSessionId(req),
+                req.headers["x-fcm-token"]
+            );
         }
-        if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
             success: true,
             data: { call_id: call.call_id, status: nextStatus },
@@ -1878,7 +2191,7 @@ router.post("/staff/:call_id/end", auth, validateBranch, async (req, res) => {
         }
         if (ACTIVE_CALL_STATUSES.includes(call.status)) {
             const nextStatus = call.status === "ringing" ? "cancelled" : "ended";
-            await pool.query(
+            const [endResult] = await pool.query(
                 `UPDATE in_app_voice_calls
                  SET status = ?, end_reason = ?, ended_at = NOW()
                  WHERE call_id = ? AND client_username = ?
@@ -1890,8 +2203,14 @@ router.post("/staff/:call_id/end", auth, validateBranch, async (req, res) => {
                     username,
                 ]
             );
-            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
-            else await deleteCallRoom(call);
+            if (endResult.affectedRows) {
+                if (nextStatus === "cancelled") {
+                    void notifyCallCancelled(call);
+                    await deleteCallRoom(call);
+                } else {
+                    scheduleCallRoomCleanup(call);
+                }
+            }
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -1929,7 +2248,7 @@ router.get("/client/:call_id", validateClientVoiceCallSession, async (req, res) 
         return res.status(200).json({
             success: true,
             data: {
-                ...callView(call, "client"),
+                ...callView(call, "client", await hasDeclinedCallSession(call.call_id, req)),
                 accepted_on_another_device:
                     call.initiated_by === "staff" &&
                     call.recipient_panel === "client" &&
@@ -1980,7 +2299,15 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
                 message: "This call is no longer available",
             });
         }
-        const nextStatus = action === "accept" ? "accepted" : "rejected";
+        if (action === "decline") {
+            const status = await declineCallSession(call, req, "client_declined");
+            if (status === "rejected") await deleteCallRoom(call);
+            return res.status(200).json({
+                success: true,
+                data: { call_id: call.call_id, status, session_declined: true },
+            });
+        }
+        const nextStatus = "accepted";
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
@@ -2007,9 +2334,15 @@ router.post("/client/:call_id/respond", validateClientVoiceCallSession, async (r
             });
         }
         if (action === "accept") {
-            void notifyCallAnswered(call, req.client_username, "client");
+            void notifyCallAnswered(
+                call,
+                req.client_username,
+                "client",
+                call.client_name,
+                requestVoiceCallSessionId(req),
+                req.headers["x-fcm-token"]
+            );
         }
-        if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
             success: true,
             data: { call_id: call.call_id, status: nextStatus },
@@ -2055,7 +2388,7 @@ router.post("/client/:call_id/end", validateClientVoiceCallSession, async (req, 
         let nextStatus = call.status;
         if (ACTIVE_CALL_STATUSES.includes(call.status)) {
             nextStatus = call.status === "ringing" ? "cancelled" : "ended";
-            await pool.query(
+            const [endResult] = await pool.query(
                 `UPDATE in_app_voice_calls
                  SET status = ?, end_reason = ?, ended_at = NOW()
                  WHERE call_id = ? AND client_username = ?
@@ -2067,8 +2400,14 @@ router.post("/client/:call_id/end", validateClientVoiceCallSession, async (req, 
                     req.client_username,
                 ]
             );
-            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
-            else await deleteCallRoom(call);
+            if (endResult.affectedRows) {
+                if (nextStatus === "cancelled") {
+                    void notifyCallCancelled(call);
+                    await deleteCallRoom(call);
+                } else {
+                    scheduleCallRoomCleanup(call);
+                }
+            }
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -2106,7 +2445,7 @@ router.get("/ca/:call_id", validateCaSession, async (req, res) => {
         return res.status(200).json({
             success: true,
             data: {
-                ...callView(call, "client"),
+                ...callView(call, "client", await hasDeclinedCallSession(call.call_id, req)),
                 accepted_on_another_device:
                     call.status === "accepted" &&
                     Boolean(call.accepted_by_session_hash) &&
@@ -2156,7 +2495,15 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
                 message: "This call is no longer available",
             });
         }
-        const nextStatus = action === "accept" ? "accepted" : "rejected";
+        if (action === "decline") {
+            const status = await declineCallSession(call, req, "ca_declined");
+            if (status === "rejected") await deleteCallRoom(call);
+            return res.status(200).json({
+                success: true,
+                data: { call_id: call.call_id, status, session_declined: true },
+            });
+        }
+        const nextStatus = "accepted";
         const [result] = await pool.query(
             `UPDATE in_app_voice_calls
              SET status = ?, accepted_at = IF(? = 'accepted', NOW(), accepted_at),
@@ -2184,9 +2531,15 @@ router.post("/ca/:call_id/respond", validateCaSession, async (req, res) => {
             });
         }
         if (action === "accept") {
-            void notifyCallAnswered(call, req.ca_username, "ca");
+            void notifyCallAnswered(
+                call,
+                req.ca_username,
+                "ca",
+                call.client_name,
+                requestVoiceCallSessionId(req),
+                req.headers["x-fcm-token"]
+            );
         }
-        if (action === "decline") await deleteCallRoom(call);
         return res.status(200).json({
             success: true,
             data: { call_id: call.call_id, status: nextStatus },
@@ -2243,7 +2596,7 @@ router.post("/ca/:call_id/end", validateCaSession, async (req, res) => {
         let nextStatus = call.status;
         if (ACTIVE_CALL_STATUSES.includes(call.status)) {
             nextStatus = call.status === "ringing" ? "cancelled" : "ended";
-            await pool.query(
+            const [endResult] = await pool.query(
                 `UPDATE in_app_voice_calls
                  SET status = ?, end_reason = ?, ended_at = NOW()
                  WHERE call_id = ? AND client_username = ?
@@ -2255,8 +2608,14 @@ router.post("/ca/:call_id/end", validateCaSession, async (req, res) => {
                     req.ca_username,
                 ]
             );
-            if (nextStatus === "ended") scheduleCallRoomCleanup(call);
-            else await deleteCallRoom(call);
+            if (endResult.affectedRows) {
+                if (nextStatus === "cancelled") {
+                    void notifyCallCancelled(call);
+                    await deleteCallRoom(call);
+                } else {
+                    scheduleCallRoomCleanup(call);
+                }
+            }
         }
         const finalCall = await loadAuthorizedCall(
             req.params.call_id,
@@ -2290,6 +2649,28 @@ router.post("/webhook", async (req, res) => {
             req.rawBody.toString("utf8"),
             req.headers.authorization
         );
+        if (event.event === "participant_joined" && event.room?.name) {
+            await pool.query(
+                `UPDATE in_app_voice_calls
+                 SET connected_at = COALESCE(connected_at, NOW())
+                 WHERE provider_room = ? AND status = 'accepted'`,
+                [event.room.name]
+            );
+        }
+        if (event.event === "participant_left" && event.room?.name) {
+            const rooms = await roomService(config).listRooms([event.room.name]);
+            const room = rooms.find((candidate) => candidate.name === event.room.name);
+            if (!room || Number(room.numParticipants) === 0) {
+                await pool.query(
+                    `UPDATE in_app_voice_calls
+                     SET status = 'ended', end_reason = 'participants_disconnected',
+                         ended_at = NOW()
+                     WHERE provider_room = ? AND status = 'accepted'`,
+                    [event.room.name]
+                );
+                scheduleCallRoomCleanup({ provider_room: event.room.name });
+            }
+        }
         if (event.event === "room_finished" && event.room?.name) {
             await pool.query(
                 `UPDATE in_app_voice_calls
