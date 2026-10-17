@@ -597,7 +597,7 @@ router.get("/global-search", auth, validateBranch, async (req, res) => {
         const clients = takeUnique(people.filter((row) => row.user_type === "client"), "username", limit)
             .map((row) => mapPerson(row, "/client/profile/"));
         const ca = takeUnique(people.filter((row) => row.user_type === "ca"), "username", limit)
-            .map((row) => mapPerson(row, "/staff/office-assistance/ca-profile/"));
+            .map((row) => mapPerson(row, "/office-assistance/ca-profile/"));
 
         return res.status(200).json({
             success: true,

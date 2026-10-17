@@ -59,7 +59,7 @@ Searches the current branch in parallel (limit **6** each). One failing query re
 | `firms` | `firms` | `/client/profile/:username/firms` |
 | `tasks` | `tasks` + firm + service | `/task/:task_id` |
 | `staff` | `branch_mapping` type `staff` | `/staff/view/profile/:username` |
-| `ca` | `clients` `user_type = ca` | `/staff/office-assistance/ca-profile/:username` |
+| `ca` | `clients` `user_type = ca` | `/office-assistance/ca-profile/:username` |
 | `agents` | `clients` `user_type = agent` | `/settings/agent-profile/:username` |
 
 Empty `q` returns empty arrays. Client modules are **not** searched here — they are filtered in `CLIENT/src/data/softwareModules.js`.
