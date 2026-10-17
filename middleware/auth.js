@@ -1,4 +1,4 @@
-import pool from "../db.js";
+import pool, { isTransientDbError } from "../db.js";
 import { getSubscriptionStatus, hasFeatureAccess } from "../services/subscriptionService.js";
 
 async function queryTokenRows(username, token, extraJoin = "", extraWhere = "", extraParams = []) {
@@ -19,8 +19,11 @@ async function queryTokenRows(username, token, extraJoin = "", extraWhere = "", 
         if (tokenRows.length) {
             return tokenRows;
         }
-    } catch (_) {
-        // try legacy table below
+    } catch (err) {
+        // A dropped/refused DB connection must not look like an invalid token
+        // (that would log the user out). Surface it so the caller can answer 503.
+        if (isTransientDbError(err)) throw err;
+        // otherwise try legacy table below
     }
 
     try {
@@ -36,7 +39,8 @@ async function queryTokenRows(username, token, extraJoin = "", extraWhere = "", 
             baseParams
         );
         return legacyRows;
-    } catch (_) {
+    } catch (err) {
+        if (isTransientDbError(err)) throw err;
         return [];
     }
 }
@@ -50,6 +54,7 @@ async function checkToken(username, token) {
         }
         return false;
     } catch (err) {
+        if (isTransientDbError(err)) throw err;
         console.error("Token check error:", err);
         return false;
     }
@@ -71,6 +76,7 @@ async function checkAdminToken(username, token) {
         }
         return false;
     } catch (err) {
+        if (isTransientDbError(err)) throw err;
         console.error("Admin token check error:", err);
         return false;
     }
@@ -88,7 +94,17 @@ async function auth(req, res, next) {
         });
     }
 
-    const isValid = await checkToken(username, token);
+    let isValid;
+    try {
+        isValid = await checkToken(username, token);
+    } catch (err) {
+        console.error("Auth DB unavailable:", err?.code || err?.message || err);
+        return res.status(503).json({
+            success: false,
+            code: "DB_UNAVAILABLE",
+            message: "Database temporarily unavailable. Please retry in a moment."
+        });
+    }
 
     if (!isValid) {
         return res.status(401).json({

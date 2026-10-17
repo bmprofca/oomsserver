@@ -1,5 +1,6 @@
 import "./utils/timezone.js";
 import "dotenv/config";
+import "./utils/devErrorLog.js";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -50,6 +51,8 @@ app.use((req, res, next) => {
 
 app.use(express.json({
     strict: false,
+    // Exports post their rows in the body; the 100kb default is too small for "all records".
+    limit: process.env.JSON_BODY_LIMIT || "15mb",
     verify: (req, _res, buf) => {
         if (
             req.originalUrl.includes("/api/v1/webhook/razorpay") ||
@@ -104,6 +107,14 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log("OOMS API started");
     console.log(`Access: ${accessUrl}`);
     generateDatabaseContext();
+
+    // Background jobs send campaigns / mutate shared data. A local dev server that
+    // points at the shared database must not run them too (double sends, extra DB
+    // connections). Set DISABLE_BACKGROUND_JOBS=1 in a local .env to skip them.
+    if (process.env.DISABLE_BACKGROUND_JOBS === "1") {
+        console.log("Background jobs disabled (DISABLE_BACKGROUND_JOBS=1)");
+        return;
+    }
     startEmailBroadcastCron();
     startAttendanceWeeklyOffCron();
     startOneChattingCampaignCron();

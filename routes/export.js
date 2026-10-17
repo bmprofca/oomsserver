@@ -9,7 +9,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import nodemailer from "nodemailer";
 import ExcelJS from "exceljs";
-import PDFDocument from "pdfkit";
+import { buildTablePdf } from "../utils/pdfTable.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -172,347 +172,10 @@ async function generateCSV(data, columns) {
     return Buffer.from([headers, ...rows].join('\n'), 'utf-8');
 }
 
-// Generate PDF file from data - Professional Table Format (No Icons)
+// Generate PDF file from data: content-sized columns, wrapped rows, repeated
+// table header, page numbers and a Unicode font (see utils/pdfTable.js).
 async function generatePDF(data, columns, title, subtitle = '') {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
-        // Use landscape layout for better table display
-        const doc = new PDFDocument({ 
-            margin: 40,
-            size: 'A4',
-            layout: 'landscape'
-        });
-        
-        doc.on('data', chunk => chunks.push(chunk));
-        doc.on('end', () => resolve(Buffer.concat(chunks)));
-        doc.on('error', reject);
-        
-        // Color scheme
-        const colors = {
-            primary: '#1e3a5f',
-            secondary: '#2563eb',
-            headerBg: '#1e40af',
-            headerText: '#ffffff',
-            rowEven: '#f8fafc',
-            rowOdd: '#ffffff',
-            border: '#cbd5e1',
-            borderDark: '#94a3b8',
-            text: '#1e293b',
-            textLight: '#64748b',
-            accent: '#059669',
-            summaryBg: '#f0fdf4'
-        };
-        
-        let currentY = 0;
-        
-        // Helper function to draw a line
-        const drawLine = (y, color = colors.border, lineWidth = 0.5) => {
-            doc.strokeColor(color).lineWidth(lineWidth).moveTo(40, y).lineTo(doc.page.width - 40, y).stroke();
-        };
-        
-        // ============ HEADER SECTION ============
-        const drawHeader = () => {
-            // Header background
-            doc.rect(40, 30, doc.page.width - 80, 85).fill(colors.primary);
-            
-            // Title
-            doc.fillColor(colors.headerText)
-                .fontSize(22)
-                .font('Helvetica-Bold')
-                .text(title, 55, 48, { align: 'left' });
-            
-            // Subtitle
-            if (subtitle) {
-                doc.fontSize(10)
-                    .font('Helvetica')
-                    .text(subtitle, 55, 78, { align: 'left' });
-            }
-            
-            // Company/Report label on right side
-            doc.fontSize(9)
-                .font('Helvetica-Oblique')
-                .text('Professional Report', doc.page.width - 80, 55, { align: 'right' });
-            
-            return 130;
-        };
-        
-        // ============ INFO BOX ============
-        const drawInfoBox = (startY) => {
-            const boxHeight = 48;
-            doc.fillColor('#f1f5f9')
-                .rect(40, startY, doc.page.width - 80, boxHeight)
-                .fill();
-            
-            doc.fillColor(colors.text);
-            
-            // Left column - Export Information
-            doc.fontSize(8).font('Helvetica-Bold')
-                .text('EXPORT INFORMATION', 55, startY + 8);
-            
-            doc.fontSize(8).font('Helvetica')
-                .text(`Export Date: ${new Date().toLocaleDateString('en-GB', { 
-                    day: '2-digit', 
-                    month: 'long', 
-                    year: 'numeric' 
-                })}`, 55, startY + 22);
-            
-            doc.text(`Export Time: ${new Date().toLocaleTimeString('en-US', { 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit' 
-            })}`, 55, startY + 34);
-            
-            // Right column - Statistics
-            doc.font('Helvetica-Bold')
-                .text('STATISTICS', doc.page.width - 200, startY + 8, { align: 'right' });
-            
-            doc.font('Helvetica')
-                .text(`Total Records: ${data.length.toLocaleString()}`, doc.page.width - 200, startY + 22, { align: 'right' })
-                .text(`Total Columns: ${columns.length}`, doc.page.width - 200, startY + 34, { align: 'right' });
-            
-            return startY + boxHeight + 15;
-        };
-        
-        // ============ TABLE SECTION ============
-        const tableLeft = 40;
-        const tableRight = doc.page.width - 40;
-        const tableWidth = tableRight - tableLeft;
-        
-        // Calculate dynamic column widths based on content
-        const calculateColumnWidths = () => {
-            const widths = columns.map((col, idx) => {
-                // Get max content length for this column
-                let maxContentLength = col.header.length;
-                data.slice(0, 100).forEach(row => {
-                    const value = row[col.key] !== undefined && row[col.key] !== null ? String(row[col.key]) : '-';
-                    maxContentLength = Math.max(maxContentLength, value.length);
-                });
-                // Limit width between 60 and 200 pixels
-                return Math.min(Math.max(65, maxContentLength * 5.5), 200);
-            });
-            
-            // Adjust widths to fit available space
-            let totalWidth = widths.reduce((sum, w) => sum + w, 0);
-            if (totalWidth > tableWidth) {
-                const ratio = tableWidth / totalWidth;
-                widths.forEach((w, i) => widths[i] = w * ratio);
-            }
-            return widths;
-        };
-        
-        const columnWidths = calculateColumnWidths();
-        
-        // Function to draw table header
-        const drawTableHeader = (y) => {
-            let currentX = tableLeft;
-            
-            // Header background
-            doc.fillColor(colors.headerBg)
-                .rect(tableLeft, y, tableWidth, 38)
-                .fill();
-            
-            // Header top border
-            drawLine(y, colors.headerBg, 1);
-            
-            // Header text
-            doc.fillColor(colors.headerText)
-                .font('Helvetica-Bold')
-                .fontSize(9);
-            
-            columns.forEach((col, idx) => {
-                doc.text(col.header, currentX + 10, y + 13, { 
-                    width: columnWidths[idx] - 20,
-                    align: 'left'
-                });
-                currentX += columnWidths[idx];
-            });
-            
-            // Header bottom border
-            drawLine(y + 38, colors.borderDark, 0.8);
-            
-            return y + 38;
-        };
-        
-        // Function to draw table row
-        const drawTableRow = (row, y, rowIndex) => {
-            let currentX = tableLeft;
-            const isEven = rowIndex % 2 === 0;
-            
-            // Row background
-            if (isEven) {
-                doc.fillColor(colors.rowEven).rect(tableLeft, y, tableWidth, 30).fill();
-            } else {
-                doc.fillColor(colors.rowOdd).rect(tableLeft, y, tableWidth, 30).fill();
-            }
-            
-            // Row bottom border
-            drawLine(y + 30, colors.border, 0.3);
-            
-            // Row data
-            doc.fillColor(colors.text)
-                .font('Helvetica')
-                .fontSize(8);
-            
-            columns.forEach((col, idx) => {
-                let value = row[col.key] !== undefined && row[col.key] !== null ? String(row[col.key]) : '-';
-                
-                // Truncate long values
-                const maxChars = Math.floor((columnWidths[idx] - 20) / 5.5);
-                if (value.length > maxChars && maxChars > 15) {
-                    value = value.substring(0, maxChars - 3) + '...';
-                }
-                
-                doc.text(value, currentX + 10, y + 10, { 
-                    width: columnWidths[idx] - 20,
-                    align: 'left'
-                });
-                currentX += columnWidths[idx];
-            });
-            
-            return y + 30;
-        };
-        
-        // Draw header and info box
-        let currentRowY = drawHeader();
-        currentRowY = drawInfoBox(currentRowY);
-        
-        // Draw table header
-        currentRowY = drawTableHeader(currentRowY);
-        
-        // Calculate rows per page
-        const rowsPerPage = Math.floor((doc.page.height - currentRowY - 100) / 30);
-        let rowCount = 0;
-        
-        // Draw data rows
-        for (let i = 0; i < data.length; i++) {
-            // Check if we need a new page
-            if (rowCount >= rowsPerPage && rowsPerPage > 5) {
-                doc.addPage();
-                
-                // Redraw elements on new page
-                currentRowY = drawHeader();
-                currentRowY = drawInfoBox(currentRowY);
-                currentRowY = drawTableHeader(currentRowY);
-                rowCount = 0;
-            }
-            
-            currentRowY = drawTableRow(data[i], currentRowY, i);
-            rowCount++;
-        }
-        
-        // Draw bottom border of table
-        drawLine(currentRowY, colors.borderDark, 0.8);
-        
-        // ============ SUMMARY SECTION ============
-        const summaryY = currentRowY + 20;
-        
-        // Only add summary if there's space on the page
-        if (summaryY + 80 < doc.page.height - 40) {
-            // Summary box background
-            doc.fillColor(colors.summaryBg)
-                .rect(tableLeft, summaryY, tableWidth, 70)
-                .fill();
-            
-            // Summary title
-            doc.fillColor(colors.accent)
-                .font('Helvetica-Bold')
-                .fontSize(10)
-                .text('SUMMARY REPORT', tableLeft + 15, summaryY + 10);
-            
-            // Divider line
-            drawLine(summaryY + 28, '#bbf7d0', 0.5);
-            
-            // Collect summary data
-            const summaryItems = [];
-            
-            // Add total records
-            summaryItems.push({ 
-                label: 'Total Records', 
-                value: data.length.toLocaleString(),
-                type: 'count'
-            });
-            
-            // Find numeric columns for summary
-            columns.forEach((col) => {
-                let hasNumeric = false;
-                let total = 0;
-                let count = 0;
-                
-                // Check first 20 rows if column contains numbers
-                data.slice(0, 20).forEach(row => {
-                    const val = parseFloat(row[col.key]);
-                    if (!isNaN(val) && isFinite(val) && row[col.key] !== null && row[col.key] !== '') {
-                        hasNumeric = true;
-                    }
-                });
-                
-                if (hasNumeric) {
-                    data.forEach(row => {
-                        const val = parseFloat(row[col.key]);
-                        if (!isNaN(val) && isFinite(val)) {
-                            total += val;
-                            count++;
-                        }
-                    });
-                    if (count > 0) {
-                        summaryItems.push({
-                            label: col.header,
-                            value: '₹ ' + total.toLocaleString('en-IN', { 
-                                minimumFractionDigits: 2, 
-                                maximumFractionDigits: 2 
-                            }),
-                            type: 'currency'
-                        });
-                    }
-                }
-            });
-            
-            // Display summary items in a grid
-            const itemsPerRow = 4;
-            const itemWidth = (tableWidth - 30) / itemsPerRow;
-            let summaryX = tableLeft + 15;
-            
-            summaryItems.slice(0, 8).forEach((item, idx) => {
-                const colIdx = idx % itemsPerRow;
-                if (colIdx === 0 && idx > 0) {
-                    summaryX = tableLeft + 15;
-                }
-                
-                // Label
-                doc.fillColor('#065f46')
-                    .font('Helvetica-Bold')
-                    .fontSize(8)
-                    .text(item.label, summaryX, summaryY + 40);
-                
-                // Value
-                doc.fillColor(colors.accent)
-                    .font('Helvetica')
-                    .fontSize(10)
-                    .text(item.value, summaryX, summaryY + 55);
-                
-                summaryX += itemWidth;
-            });
-        }
-        
-        // ============ FOOTER ============
-        const footerY = doc.page.height - 35;
-        
-        // Footer line
-        drawLine(footerY - 10, colors.border, 0.5);
-        
-        // Footer text
-        doc.fillColor(colors.textLight)
-            .fontSize(7)
-            .font('Helvetica-Oblique')
-            .text(
-                `Generated by OOMS System • Page ${doc.page.number} • ${new Date().toLocaleString()}`, 
-                40, 
-                footerY, 
-                { align: 'center', width: doc.page.width - 80 }
-            );
-        
-        doc.end();
-    });
+    return buildTablePdf({ title, subtitle, data, columns });
 }
 
 // Send email with attachment
@@ -780,6 +443,79 @@ router.post("/request", auth, validateBranch, async (req, res) => {
     } catch (error) {
         console.error("Export request error:", error);
         return fail(res, error.message);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /export/download — generate the file synchronously and stream it back.
+// Same payload shape as /export/request (data + columns + file_type), minus email.
+// Used by the web "Download now" option; large exports should still use /request.
+// ---------------------------------------------------------------------------
+const DOWNLOAD_MAX_ROWS = Number(process.env.EXPORT_DOWNLOAD_MAX_ROWS) || 20000;
+
+function safeFileStem(value, fallback = "export") {
+    const stem = String(value || fallback)
+        .replace(/[^A-Za-z0-9 _-]+/g, "")
+        .trim()
+        .replace(/\s+/g, "_")
+        .slice(0, 60);
+    return stem || fallback;
+}
+
+router.post("/download", auth, validateBranch, async (req, res) => {
+    try {
+        const { file_type, title, subtitle, data, columns, file_name } = req.body || {};
+
+        if (!file_type || !["excel", "csv", "pdf"].includes(file_type)) {
+            return fail(res, "file_type must be 'excel', 'csv', or 'pdf'");
+        }
+        if (!Array.isArray(data) || !data.length) {
+            return fail(res, "data must be a non-empty array");
+        }
+        if (data.length > DOWNLOAD_MAX_ROWS) {
+            return fail(res, `Too many rows for a direct download (${data.length}). Use email export instead.`, 413);
+        }
+        if (!Array.isArray(columns) || !columns.length) {
+            return fail(res, "columns must be a non-empty array with {header, key}");
+        }
+        for (const col of columns) {
+            if (!col || !col.header || !col.key) {
+                return fail(res, "Each column must have 'header' and 'key' properties");
+            }
+        }
+
+        const reportTitle = String(title || "Export").slice(0, 120);
+        let buffer;
+        let mime;
+        let ext;
+        switch (file_type) {
+            case "excel":
+                buffer = await generateExcel(data, columns, reportTitle.slice(0, 31));
+                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                ext = "xlsx";
+                break;
+            case "csv":
+                // UTF-8 BOM so Excel opens ₹ and Indian names correctly
+                buffer = Buffer.concat([Buffer.from("\uFEFF", "utf-8"), await generateCSV(data, columns)]);
+                mime = "text/csv; charset=utf-8";
+                ext = "csv";
+                break;
+            default:
+                buffer = await generatePDF(data, columns, reportTitle, subtitle || `Total Records: ${data.length}`);
+                mime = "application/pdf";
+                ext = "pdf";
+        }
+
+        const stamp = new Date().toISOString().slice(0, 10);
+        const downloadName = `${safeFileStem(file_name || reportTitle)}_${stamp}.${ext}`;
+        res.setHeader("Content-Type", mime);
+        res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+        res.setHeader("Content-Length", buffer.length);
+        res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+        return res.status(200).end(Buffer.from(buffer));
+    } catch (error) {
+        console.error("Export download error:", error);
+        return fail(res, error.message || "Failed to generate export", 500);
     }
 });
 

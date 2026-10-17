@@ -466,19 +466,16 @@ async function handleBillingTaskList(req, res) {
 
         const gstSettings = await fetchBranchGstSettings(pool, branch_id);
 
-        const list = [];
-        for (let index = 0; index < rows.length; index++) {
-            const element = rows[index];
-
-            const create_by = await USER_SNIPPED_DATA(element?.create_by);
-            const complete_by = element?.complete_by
-                ? await USER_SNIPPED_DATA(element?.complete_by)
-                : null;
-            const client_profile = await USER_SNIPPED_DATA(element?.username);
-            const firm_data = await SINGLE_FIRM_DATA(element?.firm_id);
-            const service_data = await SINGLE_SERVICE_DATA(element?.service_id);
-
-            const staffs = await SINGLE_TASK_STAFF_LIST(element?.task_id);
+        // Build rows a few at a time (lookups are cached in helpers/function.js).
+        const buildBillingItem = async (element) => {
+            const [create_by, complete_by, client_profile, firm_data, service_data, staffs] = await Promise.all([
+                USER_SNIPPED_DATA(element?.create_by),
+                element?.complete_by ? USER_SNIPPED_DATA(element?.complete_by) : Promise.resolve(null),
+                USER_SNIPPED_DATA(element?.username),
+                SINGLE_FIRM_DATA(element?.firm_id),
+                SINGLE_SERVICE_DATA(element?.service_id),
+                SINGLE_TASK_STAFF_LIST(element?.task_id),
+            ]);
             const object = {
                 task_id: element?.task_id,
                 client: {
@@ -532,7 +529,15 @@ async function handleBillingTaskList(req, res) {
                 object.invoice_no = element?.invoice_no;
             }
 
-            list.push(object);
+            return object;
+        };
+
+        const BILLING_LIST_CONCURRENCY = 5;
+        const list = new Array(rows.length);
+        for (let i = 0; i < rows.length; i += BILLING_LIST_CONCURRENCY) {
+            const chunk = rows.slice(i, i + BILLING_LIST_CONCURRENCY);
+            const built = await Promise.all(chunk.map((el) => buildBillingItem(el)));
+            built.forEach((obj, j) => { list[i + j] = obj; });
         }
 
         return res.status(200).json({
@@ -583,6 +588,37 @@ router.get("/stats", auth, validateBranch, async (req, res) => {
             success: false,
             message: "Failed to fetch billing stats",
             error: error.message
+        });
+    }
+});
+
+/**
+ * GET /billing/pending-count
+ * Lightweight count for the sidebar badge: completed tasks not yet billed
+ * (same definition as the Billing page "Pending" tab: status = 'complete' AND billing_status = '0').
+ */
+router.get("/pending-count", auth, validateBranch, async (req, res) => {
+    try {
+        const branch_id = req.branch_id;
+        const [rows] = await pool.query(
+            `SELECT COUNT(*) AS total
+             FROM tasks
+             WHERE branch_id = ?
+               AND status = 'complete'
+               AND billing_status = '0'`,
+            [branch_id]
+        );
+        return res.status(200).json({
+            success: true,
+            message: "Pending billing count retrieved successfully",
+            data: { pending: Number(rows[0]?.total) || 0 },
+        });
+    } catch (error) {
+        console.error("Billing pending-count error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch pending billing count",
+            error: error.message,
         });
     }
 });

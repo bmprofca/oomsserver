@@ -1033,17 +1033,37 @@ router.get("/list", auth, validateBranch, async (req, res) => {
 
         const gstSettings = await fetchBranchGstSettings(pool, branch_id);
 
-        const list = [];
-        for (let index = 0; index < rows.length; index++) {
-            const element = rows[index];
+        // Per-request memo: the same creator / client / firm / service repeats across
+        // rows, so look each one up once. Rows are then built a few at a time instead
+        // of strictly one after another (was ~8 sequential remote queries per row).
+        const lookupCache = new Map();
+        const cachedLookup = (kind, key, fn) => {
+            if (key === undefined || key === null || key === "") return fn(key);
+            const cacheKey = `${kind}:${key}`;
+            if (!lookupCache.has(cacheKey)) {
+                lookupCache.set(
+                    cacheKey,
+                    Promise.resolve(fn(key)).catch((err) => {
+                        lookupCache.delete(cacheKey);
+                        throw err;
+                    })
+                );
+            }
+            return lookupCache.get(cacheKey);
+        };
+        const userLookup = (u) => cachedLookup("user", u, USER_SNIPPED_DATA);
+        const firmLookup = (id) => cachedLookup("firm", id, SINGLE_FIRM_DATA);
+        const serviceLookup = (id) => cachedLookup("service", id, SINGLE_SERVICE_DATA);
 
-            const create_by = await USER_SNIPPED_DATA(element?.create_by);
-            const modify_by = await USER_SNIPPED_DATA(element?.modify_by || element?.create_by);
-            const client_profile = await USER_SNIPPED_DATA(element?.username);
-            const firm_data = await SINGLE_FIRM_DATA(element?.firm_id);
-            const service_data = await SINGLE_SERVICE_DATA(element?.service_id);
-
-            const staffs = await SINGLE_TASK_STAFF_LIST(element?.task_id);
+        const buildTaskListItem = async (element) => {
+            const [create_by, modify_by, client_profile, firm_data, service_data, staffs] = await Promise.all([
+                userLookup(element?.create_by),
+                userLookup(element?.modify_by || element?.create_by),
+                userLookup(element?.username),
+                firmLookup(element?.firm_id),
+                serviceLookup(element?.service_id),
+                SINGLE_TASK_STAFF_LIST(element?.task_id),
+            ]);
             const feesNum = Number(element?.fees) || 0;
             const gst = resolveGst({
                 fees: feesNum,
@@ -1102,16 +1122,24 @@ router.get("/list", auth, validateBranch, async (req, res) => {
                 ? (element?.ca_approval || 'pending')
                 : null;
             if (has_ca) {
-                const ca_data = await USER_SNIPPED_DATA(element?.ca_id);
+                const ca_data = await userLookup(element?.ca_id);
                 object.ca = ca_data;
             }
 
             const inUser = normalizeInUser(element?.in_user);
             object.in_user = inUser
-                ? await USER_SNIPPED_DATA(inUser)
+                ? await userLookup(inUser)
                 : null;
 
-            list.push(object);
+            return object;
+        };
+
+        const TASK_LIST_CONCURRENCY = 5;
+        const list = new Array(rows.length);
+        for (let i = 0; i < rows.length; i += TASK_LIST_CONCURRENCY) {
+            const chunk = rows.slice(i, i + TASK_LIST_CONCURRENCY);
+            const built = await Promise.all(chunk.map((el) => buildTaskListItem(el)));
+            built.forEach((obj, j) => { list[i + j] = obj; });
         }
 
         return res.status(200).json({

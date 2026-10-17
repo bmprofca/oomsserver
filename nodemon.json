@@ -4,6 +4,7 @@
     "controllers",
     "middleware",
     "helpers",
+    "utils",
     "server.js",
     "db.js"
   ],
@@ -15,4 +16,3 @@
   ],
   "exec": "node server.js"
 }
-

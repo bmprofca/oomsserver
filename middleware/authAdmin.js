@@ -11,7 +11,17 @@ async function authAdmin(req, res, next) {
         });
     }
 
-    const isValid = await checkAdminToken(username, token);
+    let isValid;
+    try {
+        isValid = await checkAdminToken(username, token);
+    } catch (err) {
+        console.error("Admin auth DB unavailable:", err?.code || err?.message || err);
+        return res.status(503).json({
+            success: false,
+            code: "DB_UNAVAILABLE",
+            message: "Database temporarily unavailable. Please retry in a moment."
+        });
+    }
 
     if (!isValid) {
         return res.status(401).json({

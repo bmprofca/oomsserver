@@ -126,6 +126,38 @@ router.get('/list', auth, validateBranch, async (req, res) => {
         const gstSettings = await fetchBranchGstSettings(pool, branch_id);
         const asOfDate = toDateOnly(new Date());
 
+        // One grouped query for compliance firm counts instead of one per row, and a
+        // per-request cache for creator/modifier lookups (a handful of staff repeat).
+        const complianceIds = rows
+            .filter((r) => r.is_added === 1 && r.type === "compliance")
+            .map((r) => r.service_id);
+        const firmCountByService = new Map();
+        if (complianceIds.length) {
+            const [countRows] = await pool.query(
+                `SELECT service_id, COUNT(*) AS firm_count
+                 FROM compliance_firms
+                 WHERE branch_id = ?
+                   AND service_id IN (?)
+                   AND is_deleted = '0'
+                 GROUP BY service_id`,
+                [branch_id, complianceIds]
+            );
+            for (const cr of countRows) {
+                firmCountByService.set(cr.service_id, Number(cr.firm_count || 0));
+            }
+        }
+        const userCache = new Map();
+        const userLookup = (u) => {
+            if (u === undefined || u === null || u === "") return USER_SNIPPED_DATA(u);
+            if (!userCache.has(u)) {
+                userCache.set(u, Promise.resolve(USER_SNIPPED_DATA(u)).catch((err) => {
+                    userCache.delete(u);
+                    throw err;
+                }));
+            }
+            return userCache.get(u);
+        };
+
         const data = [];
         for (let i = 0; i < rows.length; i++) {
             const el = rows[i];
@@ -151,8 +183,10 @@ router.get('/list', auth, validateBranch, async (req, res) => {
                 continue;
             }
 
-            const create_by = await USER_SNIPPED_DATA(el.create_by);
-            const modify_by = await USER_SNIPPED_DATA(el.modify_by);
+            const [create_by, modify_by] = await Promise.all([
+                userLookup(el.create_by),
+                userLookup(el.modify_by),
+            ]);
             const feesNum = Number(el.fees) || 0;
             const gst = resolveGst({ fees: feesNum, asOfDate, settings: gstSettings });
 
@@ -165,17 +199,8 @@ router.get('/list', auth, validateBranch, async (req, res) => {
             item.modify_by = modify_by;
 
             if (rowIsCompliance) {
-                const [[firmRow]] = await pool.query(
-                    `SELECT COUNT(*) AS firm_count
-                     FROM compliance_firms
-                     WHERE branch_id = ?
-                       AND service_id = ?
-                       AND is_deleted = '0'`,
-                    [branch_id, el.service_id]
-                );
-
                 item.due_date = el.due_date;
-                item.firm_count = Number(firmRow?.firm_count || 0);
+                item.firm_count = firmCountByService.get(el.service_id) || 0;
             } else {
                 item.remark = el.remark;
             }

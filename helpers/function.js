@@ -534,7 +534,7 @@ async function GET_FIRMS_BY_USERNAME({
 
 }
 
-async function USER_SNIPPED_DATA(username = "") {
+async function USER_SNIPPED_DATA_UNCACHED(username = "") {
     const data = await USER_DATA(username);
     return {
         username,
@@ -861,7 +861,7 @@ function FORMAT_CLIENT_DELETE_BLOCKERS_MESSAGE(blockers = []) {
     return `This client cannot be deleted because it is linked to ${parts.join(", ")} and ${last}.`;
 }
 
-async function SINGLE_FIRM_DATA(firm_id = "") {
+async function SINGLE_FIRM_DATA_UNCACHED(firm_id = "") {
     const [row] = await pool.query("SELECT * FROM firms WHERE firm_id = ?", [firm_id]);
     if (row.length > 0) {
         return {
@@ -886,7 +886,7 @@ async function SINGLE_FIRM_DATA(firm_id = "") {
     return {};
 }
 
-async function SINGLE_SERVICE_DATA(service_id = "") {
+async function SINGLE_SERVICE_DATA_UNCACHED(service_id = "") {
     const [row] = await pool.query("SELECT * FROM services WHERE service_id = ?", [service_id]);
     if (row.length > 0) {
         const modify_by_user = await USER_SNIPPED_DATA(row[0]?.modify_by);
@@ -931,6 +931,62 @@ async function SINGLE_TASK_STAFF_LIST(task_id = "") {
 
 }
 
+
+// ---------------------------------------------------------------------------
+// Short-lived lookup cache. List endpoints call these helpers once per row, and
+// the same user / firm / service repeats across rows and across the parallel
+// requests a page makes. Against a remote MySQL host every lookup is a slow
+// round trip, so identical lookups within LOOKUP_CACHE_TTL_MS share one query.
+// Each caller gets its own shallow copy so mutations never leak between rows.
+// ---------------------------------------------------------------------------
+const LOOKUP_CACHE_TTL_MS = Number(process.env.LOOKUP_CACHE_TTL_MS) || 10000;
+const LOOKUP_CACHE_MAX = 5000;
+const lookupCache = new Map();
+
+function cachedLookup(kind, key, loader) {
+    if (key === undefined || key === null || key === "" || LOOKUP_CACHE_TTL_MS <= 0) {
+        return loader(key);
+    }
+    const cacheKey = `${kind}:${key}`;
+    const now = Date.now();
+    const hit = lookupCache.get(cacheKey);
+    if (hit && hit.expires > now) {
+        return hit.promise.then((v) => (v && typeof v === "object" ? { ...v } : v));
+    }
+    const promise = Promise.resolve(loader(key));
+    lookupCache.set(cacheKey, { promise, expires: now + LOOKUP_CACHE_TTL_MS });
+    promise.catch(() => lookupCache.delete(cacheKey));
+    if (lookupCache.size > LOOKUP_CACHE_MAX) {
+        for (const [k, v] of lookupCache) {
+            if (v.expires <= now || lookupCache.size > LOOKUP_CACHE_MAX) lookupCache.delete(k);
+            if (lookupCache.size <= LOOKUP_CACHE_MAX * 0.8) break;
+        }
+    }
+    return promise.then((v) => (v && typeof v === "object" ? { ...v } : v));
+}
+
+/** Drop cached lookups, e.g. right after editing a user, firm or service. */
+function INVALIDATE_LOOKUP_CACHE(kind, key) {
+    if (!kind) { lookupCache.clear(); return; }
+    if (key === undefined) {
+        for (const k of lookupCache.keys()) if (k.startsWith(`${kind}:`)) lookupCache.delete(k);
+        return;
+    }
+    lookupCache.delete(`${kind}:${key}`);
+}
+
+function USER_SNIPPED_DATA(username = "") {
+    return cachedLookup("user", username, USER_SNIPPED_DATA_UNCACHED);
+}
+
+function SINGLE_FIRM_DATA(firm_id = "") {
+    return cachedLookup("firm", firm_id, SINGLE_FIRM_DATA_UNCACHED);
+}
+
+function SINGLE_SERVICE_DATA(service_id = "") {
+    return cachedLookup("service", service_id, SINGLE_SERVICE_DATA_UNCACHED);
+}
+
 export {
     RANDOM_STRING,
     UNIQUE_RANDOM_STRING,
@@ -957,4 +1013,5 @@ export {
     SINGLE_TASK_STAFF_LIST,
     BANK_SNIPPED_DATA,
     CAPITAL_SNIPPED_DATA,
+    INVALIDATE_LOOKUP_CACHE,
 };

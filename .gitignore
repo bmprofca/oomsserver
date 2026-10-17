@@ -16,3 +16,4 @@ scratch/
 .well-known/
 *-firebase-adminsdk-*.json
 firebase-service-account*.json
+logs/
