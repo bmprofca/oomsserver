@@ -29,6 +29,17 @@ import {
 } from "../ai/connections.js";
 import { createHealthTracker, runWithFailover } from "../ai/failover.js";
 import { checkQuestion, createSafetyLimiter } from "../ai/safety.js";
+import {
+    MAX_MCP_CONNECTORS,
+    connectorBaseUrl,
+    createMcpConnector,
+    deleteMcpConnector,
+    getMcpConnector,
+    listConnectorMembers,
+    listMcpConnectors,
+    rotateMcpConnector,
+    updateMcpConnector,
+} from "../ai/mcpConnectors.js";
 import * as store from "../ai/store.js";
 import { collectIdentifiers, sanitizeBlock, scrubText } from "../ai/redact.js";
 import { aiLog, hashUser } from "../ai/log.js";
@@ -46,6 +57,11 @@ import { aiLog, hashUser } from "../ai/log.js";
  *   DELETE /connections/:id            delete a connection and its key (admin)
  *   PUT    /connections/order          set failover priority (admin)
  *   POST   /connections/:id/test       test a saved connection (admin)
+ *   GET    /mcp-connectors             remote MCP connectors (Claude custom connector) (admin)
+ *   POST   /mcp-connectors             create one; returns its secret URL once (admin)
+ *   PATCH  /mcp-connectors/:id         rename / switch on-off / change member (admin)
+ *   POST   /mcp-connectors/:id/rotate  new secret URL; the old one stops working (admin)
+ *   DELETE /mcp-connectors/:id         delete (admin)
  *   POST   /chat                       ask a question (SSE stream, or JSON with stream:false)
  *   GET    /conversations              own conversations in this branch
  *   GET    /conversations/:id          messages of one own conversation
@@ -104,6 +120,10 @@ const updateConnectionSchema = z.object({
 }).strict();
 
 const orderSchema = z.object({ ids: z.array(z.string().regex(CONNECTION_ID_RE)).min(1).max(MAX_CONNECTIONS) }).strict();
+
+const memberId = z.string().trim().regex(/^[A-Za-z0-9_.@-]{1,100}$/, "Choose a team member");
+const createMcpSchema = z.object({ label: label.optional(), run_as: memberId }).strict();
+const updateMcpSchema = z.object({ label: label.optional(), enabled: z.boolean().optional(), run_as: memberId.optional() }).strict();
 
 const testSchema = z.object({
     provider: z.enum(AI_PROVIDER_IDS),
@@ -379,6 +399,93 @@ export function createAiRouter({
         } catch (err) {
             aiLog("connection_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
             res.status(500).json({ success: false, message: "Failed to test the connection" });
+        }
+    });
+
+    /* ------------------------- remote MCP connectors (Claude) ------------------------- */
+
+    const mcpPayload = async (req) => {
+        const url = connectorBaseUrl(req);
+        return {
+            connectors: await listMcpConnectors(db, req.aiCtx.branch_id),
+            members: await listConnectorMembers(db, req.aiCtx.branch_id),
+            endpoint: url.endpoint,
+            public: url.public,
+            limits: { max_connectors: MAX_MCP_CONNECTORS },
+        };
+    };
+    const connectorUrl = (req, token) => `${connectorBaseUrl(req).endpoint}/${token}`;
+    const isActiveMember = async (branchId, username) =>
+        (await listConnectorMembers(db, branchId)).some((m) => m.username === username);
+
+    router.get("/mcp-connectors", requireBranchAdmin, async (req, res) => {
+        try {
+            res.json({ success: true, data: await mcpPayload(req) });
+        } catch (err) {
+            aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "Failed to load connectors" });
+        }
+    });
+
+    router.post("/mcp-connectors", requireBranchAdmin, async (req, res) => {
+        const parsed = createMcpSchema.safeParse(req.body || {});
+        if (!parsed.success) return res.status(400).json({ success: false, code: "INVALID_CONNECTOR", message: zodMessage(parsed.error) });
+        try {
+            if (!(await isActiveMember(req.aiCtx.branch_id, parsed.data.run_as))) {
+                return res.status(400).json({ success: false, code: "INVALID_MEMBER", message: "Choose an active team member of this branch." });
+            }
+            const { id, token } = await createMcpConnector(db, req.aiCtx.branch_id, req.aiCtx.username, { label: parsed.data.label, runAs: parsed.data.run_as });
+            adminLog(req, "mcp_connector_created", { member: hashUser(parsed.data.run_as) });
+            res.status(201).json({ success: true, data: { id, url: connectorUrl(req, token), ...(await mcpPayload(req)) } });
+        } catch (err) {
+            if (err?.code === "CONNECTOR_LIMIT") return res.status(400).json({ success: false, code: "CONNECTOR_LIMIT", message: err.message });
+            aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "Failed to create the connector" });
+        }
+    });
+
+    router.patch("/mcp-connectors/:id", requireBranchAdmin, validConnectionId, async (req, res) => {
+        const parsed = updateMcpSchema.safeParse(req.body || {});
+        if (!parsed.success) return res.status(400).json({ success: false, code: "INVALID_CONNECTOR", message: zodMessage(parsed.error) });
+        try {
+            if (!(await getMcpConnector(db, req.aiCtx.branch_id, req.params.id))) return res.status(404).json({ success: false, message: "Connector not found" });
+            if (parsed.data.run_as && !(await isActiveMember(req.aiCtx.branch_id, parsed.data.run_as))) {
+                return res.status(400).json({ success: false, code: "INVALID_MEMBER", message: "Choose an active team member of this branch." });
+            }
+            await updateMcpConnector(db, req.aiCtx.branch_id, req.aiCtx.username, req.params.id, {
+                label: parsed.data.label,
+                enabled: parsed.data.enabled,
+                runAs: parsed.data.run_as,
+            });
+            adminLog(req, "mcp_connector_updated");
+            res.json({ success: true, data: await mcpPayload(req) });
+        } catch (err) {
+            aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "Failed to update the connector" });
+        }
+    });
+
+    router.post("/mcp-connectors/:id/rotate", requireBranchAdmin, validConnectionId, async (req, res) => {
+        try {
+            const token = await rotateMcpConnector(db, req.aiCtx.branch_id, req.aiCtx.username, req.params.id);
+            if (!token) return res.status(404).json({ success: false, message: "Connector not found" });
+            adminLog(req, "mcp_connector_rotated");
+            res.json({ success: true, data: { id: req.params.id, url: connectorUrl(req, token), ...(await mcpPayload(req)) } });
+        } catch (err) {
+            aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "Failed to regenerate the URL" });
+        }
+    });
+
+    router.delete("/mcp-connectors/:id", requireBranchAdmin, validConnectionId, async (req, res) => {
+        try {
+            const ok = await deleteMcpConnector(db, req.aiCtx.branch_id, req.params.id);
+            if (!ok) return res.status(404).json({ success: false, message: "Connector not found" });
+            adminLog(req, "mcp_connector_deleted");
+            res.json({ success: true, data: await mcpPayload(req) });
+        } catch (err) {
+            aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "Failed to delete the connector" });
         }
     });
 

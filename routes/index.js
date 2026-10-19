@@ -48,6 +48,7 @@ import accountRoutes from "./account.js";
 import fcmRoutes from "./fcm.js";
 import voiceCallRoutes from "./voiceCalls.js";
 import aiRoutes from "./ai.js";
+import mcpRemoteRoutes from "./mcpRemote.js";
 
 
 router.use("/auth", authRoutes);
@@ -100,5 +101,7 @@ router.use("/account", accountRoutes);
 router.use("/fcm", fcmRoutes);
 router.use("/voice-calls", voiceCallRoutes);
 router.use("/ai", aiRoutes);
+// Remote MCP endpoint for custom connectors (Claude etc.); authenticated by the secret URL.
+router.use("/mcp", mcpRemoteRoutes);
 
 export default router;

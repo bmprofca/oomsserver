@@ -1,4 +1,4 @@
--- AI assistant: per-branch settings, AI connections (failover), chat history and tool-call audit log.
+-- AI assistant: per-branch settings, AI connections (failover), remote MCP connectors, chat history and tool-call audit log.
 -- The server also creates these tables automatically on first use (ai/schema.js).
 -- Idempotent. Every row is scoped by branch_id (+ username); tool result rows are never stored.
 -- Keep in sync with ai/schema.js.
@@ -44,6 +44,27 @@ CREATE TABLE IF NOT EXISTS branch_ai_connections (
     PRIMARY KEY (id),
     UNIQUE KEY uq_branch_ai_connection_id (connection_id),
     KEY idx_branch_ai_connections_branch (branch_id, priority)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS branch_mcp_connectors (
+    id INT NOT NULL AUTO_INCREMENT,
+    connector_id VARCHAR(40) NOT NULL,
+    branch_id VARCHAR(50) NOT NULL,
+    label VARCHAR(80) NULL,
+    token_hash CHAR(64) NOT NULL,
+    token_hint VARCHAR(16) NULL,
+    run_as_username VARCHAR(100) NOT NULL,
+    enabled ENUM('0','1') NOT NULL DEFAULT '1',
+    last_used_at DATETIME NULL,
+    last_client VARCHAR(120) NULL,
+    create_by VARCHAR(100) NULL,
+    create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modify_by VARCHAR(100) NULL,
+    modify_date DATETIME NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_branch_mcp_connector_id (connector_id),
+    UNIQUE KEY uq_branch_mcp_token_hash (token_hash),
+    KEY idx_branch_mcp_connectors_branch (branch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ai_conversations (

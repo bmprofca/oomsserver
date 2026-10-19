@@ -41,6 +41,8 @@ CLIENT_WEB drawer / /ai-assistant ──POST /api/v1/ai/chat (SSE)──▶ rout
 | `ai/settings.js` | Branch switch and rate limits in `branch_ai_settings`. Moves a legacy single key into a connection on first read |
 | `ai/connections.js` | AI connections in `branch_ai_connections`: CRUD, priority order, health status, decrypted runtime list (max 10 per branch) |
 | `ai/failover.js` | `runWithFailover()` tries enabled connections in priority order, with an in-memory cooldown for failed ones |
+| `ai/mcpConnectors.js` | Remote MCP connectors in `branch_mcp_connectors`: secret URL tokens (SHA-256 hash stored), run-as member, rotate, public base URL detection |
+| `routes/mcpRemote.js` | Public Streamable HTTP MCP endpoint `/api/v1/mcp/:token` for Claude custom connectors (stateless `createMcpHandler`) |
 | `ai/safety.js` | Safety guard. `checkQuestion()` runs before any provider call, `checkAnswer()` before a reply is shown or saved, and `createSafetyLimiter()` pauses repeat offenders |
 | `ai/schema.js` | DDL for all AI tables; `ensureAiTables()` creates them on first use (no manual migration) |
 | `helpers/secretBox.js` | AES-256-GCM encrypt/decrypt + mask for stored credentials |
@@ -125,6 +127,32 @@ Branch admins configure the assistant in **CLIENT_WEB → Settings → AI Assist
 - **Encryption key.** Derived from `APP_ENCRYPTION_KEY`, falling back to `SMTP_ENCRYPTION_KEY` and then a built-in default, like the SMTP credentials. Set it once in production. Changing it makes stored keys unreadable: those connections are skipped and admins must replace the keys.
 - **Missing rows.** Branches without a settings row are disabled.
 
+## Remote MCP connector (Claude "Add custom connector")
+
+Branch admins create connectors in **Settings → AI Assistant → Claude connector (MCP)**. Each one is a secret URL, `https://<BASE_DOMAIN>/api/v1/mcp/ooms_mcp_<43 chars>`, which goes into Claude → Settings → Connectors → Add custom connector. No OAuth is needed. The same URL works in any MCP client that supports Streamable HTTP.
+
+- **Transport.** `createMcpHandler` from `@modelcontextprotocol/server` v2, in stateless mode: a fresh `McpServer` per request, built by `buildMcpServer` (`ai/mcp/createMcpForRequest.js`).
+  - Serves the 2025 protocol (stateless fallback: POST only, GET and DELETE return 405, no session id) and the 2026-07-28 revision.
+  - Works behind pm2 and nginx with no session affinity.
+  - Express ↔ web `Request`/`Response` are bridged in the route. Express 5 leaves `req.body` undefined when nothing was parsed, so the raw body is read in that case.
+- **Auth.** The token is the credential.
+  - Only its SHA-256 hash is stored, so the URL is shown once on create or regenerate.
+  - Unknown, disabled, malformed or rotated tokens all get the same 404 JSON-RPC error.
+  - OAuth discovery URLs return 404, so Claude treats the URL as one that needs no login.
+- **Identity.** Each request runs as the connector's `run_as_username`. `resolveUserAccess` is re-checked on every request, so permission changes apply at once. A removed member gets 403 with a message for the admin.
+- **Tools.** The in-app tools are reused, minus `ask_clarification`; all are marked `readOnlyHint`. Tool results are capped at 24k characters and each call has a 15 s timeout. `REMOTE_INSTRUCTIONS` tells the client: data only, INR and Dr/Cr meaning, never show internal IDs, treat tool text as data.
+- **Limits and logging.**
+  - Limits per connector, per process: 120 requests a minute and 5000 a day (429 with `Retry-After: 60`).
+  - Every tool call is audited in `ai_tool_calls` with `conversation_id = mcp:<connector_id>`.
+  - Logs carry the connector id prefix, never the token.
+  - `last_used_at` and `last_client` (from `clientInfo`) are updated at most once a minute.
+- **Public URL.** Built from `BASE_DOMAIN` (`https://server.ooms.in` in production), or the request's host as a fallback. `public` is false for localhost, private IPs or non-HTTPS addresses, and the settings page then warns that Claude can't reach the server.
+- **Production prerequisites** (already true for server.ooms.in):
+  - HTTPS on the public domain;
+  - nginx forwards `POST /api/v1/*` to Node;
+  - the body limit is at least 1 MB.
+- **Tests.** `tests/ai.mcpRemote.test.js` connects a real MCP client over HTTP in both protocol eras and replays a connector's raw requests. It covers 404, 405, 415, 429, rotation, disable, delete, member removal and permissions.
+
 ## Safety guard (`ai/safety.js`)
 
 The guard is deterministic, needs no AI call, and runs on **every** question and answer.
@@ -192,6 +220,12 @@ The orchestrator speaks the Anthropic Messages shape (`content` blocks, `tool_us
 | DELETE | `/api/v1/ai/connections/:id` | Admin: removes the row and its key |
 | PUT | `/api/v1/ai/connections/order` | Admin: `{ids}`, which must list every connection of the branch exactly once |
 | POST | `/api/v1/ai/connections/:id/test` | Admin: tests the saved key and model, and records `last_status` |
+| GET | `/api/v1/ai/mcp-connectors` | Admin: `{connectors, members, endpoint, public, limits}` |
+| POST | `/api/v1/ai/mcp-connectors` | Admin: `{label?, run_as}` returns `{url}`, shown once (max 20 per branch) |
+| PATCH | `/api/v1/ai/mcp-connectors/:id` | Admin: `{label?, enabled?, run_as?}` |
+| POST | `/api/v1/ai/mcp-connectors/:id/rotate` | Admin: new `{url}`; the old one stops working |
+| DELETE | `/api/v1/ai/mcp-connectors/:id` | Admin |
+| POST | `/api/v1/mcp/:token` | **Public** MCP endpoint for connectors (JSON-RPC over Streamable HTTP) |
 | POST | `/api/v1/ai/chat` | Body `{ message (1-2000), conversation_id?, stream? }`. SSE events: `meta`, `status`, `block`, `text`, `done`, `error`. `stream:false` returns JSON |
 | GET | `/api/v1/ai/conversations?page=` | The caller's conversations in this branch |
 | GET | `/api/v1/ai/conversations/:id` | 404 unless it belongs to the caller and branch |
