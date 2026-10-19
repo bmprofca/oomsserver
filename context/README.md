@@ -31,6 +31,7 @@ Modular agent playbooks for the OOMS API. Tag the relevant file(s) instead of re
 | [`help-support.md`](./help-support.md) | Platform help contacts + FAQs (`/help-support`) |
 | [`auth-sessions.md`](./auth-sessions.md) | `tokens` list/revoke + logout `all_sessions` |
 | [`wallet.md`](./wallet.md) | Razorpay platform config, wallet recharge, payment requests |
+| [`ai-assistant.md`](./ai-assistant.md) | AI assistant: `/ai` routes, MCP tools, permission matrix, limits, setup |
 
 ## Pair with client
 

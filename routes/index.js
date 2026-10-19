@@ -47,6 +47,7 @@ import backupRoutes from "./backup.js";
 import accountRoutes from "./account.js";
 import fcmRoutes from "./fcm.js";
 import voiceCallRoutes from "./voiceCalls.js";
+import aiRoutes from "./ai.js";
 
 
 router.use("/auth", authRoutes);
@@ -98,5 +99,6 @@ router.use("/backup", backupRoutes);
 router.use("/account", accountRoutes);
 router.use("/fcm", fcmRoutes);
 router.use("/voice-calls", voiceCallRoutes);
+router.use("/ai", aiRoutes);
 
 export default router;

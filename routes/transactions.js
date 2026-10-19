@@ -24,6 +24,7 @@ import {
     generateLedgerPdfBuffer,
 } from "../helpers/ledgerReport.js";
 import { buildLedgerDownloadFilename } from "../helpers/ledgerFilename.js";
+import { getOppositePartySnippet } from "../helpers/transactionParty.js";
 import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
 import { formatCompliancePeriodLabel } from "../helpers/compliancePeriodLabel.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
@@ -216,52 +217,6 @@ function capitalRowToItem(element, balance) {
         status: true,
         balance: balance ?? 0
     };
-}
-
-async function getOppositePartySnippet(branch_id, party_type, party_id) {
-    if (!party_type || !party_id) return {};
-    const type = String(party_type).trim();
-    const id = String(party_id).trim();
-    if (type === "client") {
-        const [rows] = await pool.query(
-            `SELECT p.name, p.email, p.mobile, p.country_code, c.username
-             FROM clients c
-             LEFT JOIN profile p ON p.username = c.username AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username)
-             WHERE c.username = ? AND c.branch_id = ? AND c.is_deleted = '0' LIMIT 1`,
-            [id, branch_id]
-        );
-        const r = rows?.[0];
-        if (!r) return {};
-        return {
-            client: {
-                username: r?.username,
-                name: r?.name ?? null,
-                email: r?.email ?? null,
-                mobile: r?.mobile ?? null,
-                country_code: r?.country_code ?? null
-            }
-        };
-    }
-    if (type === "bank") {
-        const [rows] = await pool.query(
-            "SELECT bank_id, account_no, holder, ifsc, bank, branch, type FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
-            [branch_id, id]
-        );
-        const r = rows?.[0];
-        if (!r) return {};
-        return {
-            bank: {
-                bank_id: r?.bank_id,
-                bank: r?.bank ?? null,
-                account_no: r?.account_no ?? null,
-                holder: r?.holder ?? null,
-                ifsc: r?.ifsc ?? null,
-                branch: r?.branch ?? null,
-                type: r?.type ?? null
-            }
-        };
-    }
-    return {};
 }
 
 async function resolvePartySnippet(party_type, party_id) {

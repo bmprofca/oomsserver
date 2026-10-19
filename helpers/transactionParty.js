@@ -1,3 +1,5 @@
+import pool from "../db.js";
+
 /** Party types supported on sale/purchase create and edit. */
 export const TRANSACTION_PARTY_TYPES = ["client", "ca", "staff", "bank", "capital"];
 
@@ -71,4 +73,54 @@ export async function validateTransactionParty(db, branch_id, party_type, party_
     }
 
     return { partyTypeVal, partyIdVal };
+}
+
+/**
+ * Opposite-party display snippet for ledger rows (client / bank).
+ * Moved unchanged from routes/transactions.js so ledger statements can be built outside that route.
+ */
+export async function getOppositePartySnippet(branch_id, party_type, party_id) {
+    if (!party_type || !party_id) return {};
+    const type = String(party_type).trim();
+    const id = String(party_id).trim();
+    if (type === "client") {
+        const [rows] = await pool.query(
+            `SELECT p.name, p.email, p.mobile, p.country_code, c.username
+             FROM clients c
+             LEFT JOIN profile p ON p.username = c.username AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username)
+             WHERE c.username = ? AND c.branch_id = ? AND c.is_deleted = '0' LIMIT 1`,
+            [id, branch_id]
+        );
+        const r = rows?.[0];
+        if (!r) return {};
+        return {
+            client: {
+                username: r?.username,
+                name: r?.name ?? null,
+                email: r?.email ?? null,
+                mobile: r?.mobile ?? null,
+                country_code: r?.country_code ?? null
+            }
+        };
+    }
+    if (type === "bank") {
+        const [rows] = await pool.query(
+            "SELECT bank_id, account_no, holder, ifsc, bank, branch, type FROM banks WHERE branch_id = ? AND bank_id = ? LIMIT 1",
+            [branch_id, id]
+        );
+        const r = rows?.[0];
+        if (!r) return {};
+        return {
+            bank: {
+                bank_id: r?.bank_id,
+                bank: r?.bank ?? null,
+                account_no: r?.account_no ?? null,
+                holder: r?.holder ?? null,
+                ifsc: r?.ifsc ?? null,
+                branch: r?.branch ?? null,
+                type: r?.type ?? null
+            }
+        };
+    }
+    return {};
 }
