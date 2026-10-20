@@ -131,3 +131,8 @@ export function sanitizeBlock(block, ids = new Set()) {
             return block;
     }
 }
+
+/** True when text contains something shaped like an OOMS internal ID (usr_…, APP…_BRN…). */
+export function containsInternalId(text) {
+    return ID_PATTERNS.some((re) => new RegExp(re.source).test(String(text || "")));
+}

@@ -43,6 +43,8 @@ CLIENT_WEB drawer / /ai-assistant ──POST /api/v1/ai/chat (SSE)──▶ rout
 | `ai/failover.js` | `runWithFailover()` tries enabled connections in priority order, with an in-memory cooldown for failed ones |
 | `ai/mcpConnectors.js` | Remote MCP connectors in `branch_mcp_connectors`: secret URL tokens (SHA-256 hash stored), run-as member, rotate, public base URL detection |
 | `routes/mcpRemote.js` | Public Streamable HTTP MCP endpoint `/api/v1/mcp/:token` for Claude custom connectors (stateless `createMcpHandler`) |
+| `ai/actions/*` | Read-write mode: `definitions.js` (the 4 actions: permission, prepare, execute), `pending.js` (`ai_pending_actions`), `execute.js` (confirm / cancel with re-checks), `senders.js` (real WhatsApp / email / document delivery via existing OOMS helpers), `recipients.js`, `mode.js` |
+| `ai/tools/actions.js` | Prepare-only write tools, `list_client_documents`, and connector-only `confirm_action` / `cancel_action` |
 | `ai/safety.js` | Safety guard. `checkQuestion()` runs before any provider call, `checkAnswer()` before a reply is shown or saved, and `createSafetyLimiter()` pauses repeat offenders |
 | `ai/schema.js` | DDL for all AI tables; `ensureAiTables()` creates them on first use (no manual migration) |
 | `helpers/secretBox.js` | AES-256-GCM encrypt/decrypt + mask for stored credentials |
@@ -126,6 +128,42 @@ Branch admins configure the assistant in **CLIENT_WEB → Settings → AI Assist
 - **Admin only.** Only branch admins (`branch_mapping.type = 'admin'`) can read or change settings and connections (`requireBranchAdmin`). A connection's provider can only change together with a new key. Deleting a connection removes its row and key.
 - **Encryption key.** Derived from `APP_ENCRYPTION_KEY`, falling back to `SMTP_ENCRYPTION_KEY` and then a built-in default, like the SMTP credentials. Set it once in production. Changing it makes stored keys unreadable: those connections are skipped and admins must replace the keys.
 - **Missing rows.** Branches without a settings row are disabled.
+
+## Read-write mode (send and share, with confirmation)
+
+`branch_ai_settings.access_mode` (in-app) and `branch_mcp_connectors.access_mode` (per connector) are `read` (the default) or `read_write`. Switching to `read_write` needs `acknowledge_write: true`, which the settings page sends from its confirmation dialog. Both columns are added automatically to existing tables (`AI_COLUMN_MIGRATIONS`).
+
+| Action tool | What it prepares | Permission (server-side) | Channel requirements |
+|---|---|---|---|
+| `send_whatsapp` | Free-text WhatsApp to a client or team member | `broadcast_send` | Branch channel `ooms web` (others only send templates) and the BusinessPro plan, same as `/broadcast/whatsapp` |
+| `send_email` | Email (subject + plain body, sent as HTML paragraphs) | `broadcast_send` | Active branch SMTP; recipient not in `email_unsubscribes` |
+| `share_client_documents` | Up to 10 vault documents, by WhatsApp and/or email | Any branch member (as the app's document share) | "Document Share" email template and SMTP; WhatsApp "document sharing" template on the branch channel |
+| `share_ledger_statement` | Client ledger PDF for a period (≤ 366 days, default this FY) | `finance_report` | Same as documents |
+
+**Flow.**
+1. A tool validates the recipient, channel, permission and content. It stores an `ai_pending_actions` row (status `pending`, 15-minute expiry) and returns an `action` block. **Nothing is sent at this point.**
+2. In the app, the user clicks **Confirm & send** on the card (`POST /ai/actions/:id/confirm`). The model has no confirm tool in-app.
+3. On connectors, `confirm_action` and `cancel_action` exist and are annotated as non-read-only (`destructiveHint` on confirm), so Claude asks its user before calling them. `REMOTE_WRITE_INSTRUCTIONS` tells the client to get explicit approval first.
+
+**At confirmation** (`ai/actions/execute.js`):
+- the action must belong to the same user and branch, still be pending and not expired;
+- read-write mode must still be on for its source;
+- the permission is re-resolved;
+- an atomic `pending → executing` update means an action runs at most once.
+
+The outcome is stored in `result`, an audit row is written (`ai_tool_calls`, `tool_name = action:<type>`), and the card shows the state again when the conversation is reopened.
+
+**Recipients.** Only this branch's clients (`clients.user_type='client'`) and active team members can receive anything. Phone numbers and emails come from their latest `profile` row; schemas never accept a free number or address.
+
+**Content safety.**
+- Outgoing text is rejected if it contains internal IDs (`containsInternalId`) or system details (`checkAnswer`).
+- Delivery errors are shortened, with URLs and IP addresses stripped.
+
+**Limits.** 10 confirmations per user per minute and 300 per day.
+
+**Known existing-app issues these actions inherit:**
+- With the "OOMS System" WhatsApp channel, a failed document-sharing template send is reported as success by `sendWhatsappByChannel`.
+- Document links are public OneSaaS URLs.
 
 ## Remote MCP connector (Claude "Add custom connector")
 
@@ -213,13 +251,16 @@ The orchestrator speaks the Anthropic Messages shape (`content` blocks, `tool_us
 |--------|------|-------|
 | GET | `/api/v1/ai/status` | `{enabled, configured, can_manage}` for the current branch (any member) |
 | GET | `/api/v1/ai/settings` | Admin: `{settings, connections (keys masked), providers, efforts, limits}` |
-| PUT | `/api/v1/ai/settings` | Admin: `{enabled, rate_per_min, rate_per_day}`. Enabling needs an active connection (`NO_ACTIVE_CONNECTION`) |
+| PUT | `/api/v1/ai/settings` | Admin: `{enabled, rate_per_min, rate_per_day, access_mode?, acknowledge_write?}`. Enabling needs an active connection (`NO_ACTIVE_CONNECTION`) |
 | POST | `/api/v1/ai/settings/test` | Admin: `{provider, api_key, model, effort?}`. Tests an unsaved key: a model lookup, then one 16-token request, so missing credit is detected |
 | POST | `/api/v1/ai/connections` | Admin: `{label?, provider, model, effort?, api_key, enabled?}`. Added last in the order. Key format checked per provider; max 10 (`CONNECTION_LIMIT`) |
 | PATCH | `/api/v1/ai/connections/:id` | Admin: any of `{label, model, effort, enabled, api_key, provider}`. Provider change requires `api_key` |
 | DELETE | `/api/v1/ai/connections/:id` | Admin: removes the row and its key |
 | PUT | `/api/v1/ai/connections/order` | Admin: `{ids}`, which must list every connection of the branch exactly once |
 | POST | `/api/v1/ai/connections/:id/test` | Admin: tests the saved key and model, and records `last_status` |
+| GET | `/api/v1/ai/actions/:id` | The caller's own action: `{status, message, channels}` |
+| POST | `/api/v1/ai/actions/:id/confirm` | Send a pending action (owner only; read-write mode re-checked). 409 if not pending; 403 `AI_ACTION_MODE_OFF` / `AI_ACTION_DENIED` |
+| POST | `/api/v1/ai/actions/:id/cancel` | Cancel a pending action |
 | GET | `/api/v1/ai/mcp-connectors` | Admin: `{connectors, members, endpoint, public, limits}` |
 | POST | `/api/v1/ai/mcp-connectors` | Admin: `{label?, run_as}` returns `{url}`, shown once (max 20 per branch) |
 | PATCH | `/api/v1/ai/mcp-connectors/:id` | Admin: `{label?, enabled?, run_as?}` |

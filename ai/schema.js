@@ -17,6 +17,7 @@ export const AI_TABLE_DDL = [
         api_key_hint VARCHAR(16) NULL,
         rate_per_min INT NOT NULL DEFAULT 6,
         rate_per_day INT NOT NULL DEFAULT 200,
+        access_mode VARCHAR(20) NOT NULL DEFAULT 'read',
         create_by VARCHAR(100) NULL,
         create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         modify_by VARCHAR(100) NULL,
@@ -61,6 +62,7 @@ export const AI_TABLE_DDL = [
         token_hint VARCHAR(16) NULL,
         run_as_username VARCHAR(100) NOT NULL,
         enabled ENUM('0','1') NOT NULL DEFAULT '1',
+        access_mode VARCHAR(20) NOT NULL DEFAULT 'read',
         last_used_at DATETIME NULL,
         last_client VARCHAR(120) NULL,
         create_by VARCHAR(100) NULL,
@@ -71,6 +73,27 @@ export const AI_TABLE_DDL = [
         UNIQUE KEY uq_branch_mcp_connector_id (connector_id),
         UNIQUE KEY uq_branch_mcp_token_hash (token_hash),
         KEY idx_branch_mcp_connectors_branch (branch_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    // Write actions proposed by the AI (send WhatsApp / email, share documents). Nothing is
+    // executed until a person confirms: the chat card (in-app) or confirm_action (connector).
+    `CREATE TABLE IF NOT EXISTS ai_pending_actions (
+        id BIGINT NOT NULL AUTO_INCREMENT,
+        action_id VARCHAR(40) NOT NULL,
+        branch_id VARCHAR(50) NOT NULL,
+        username VARCHAR(100) NOT NULL,
+        source VARCHAR(60) NOT NULL,
+        action_type VARCHAR(40) NOT NULL,
+        payload JSON NOT NULL,
+        preview JSON NOT NULL,
+        status ENUM('pending','executing','done','partial','failed','cancelled','expired') NOT NULL DEFAULT 'pending',
+        result JSON NULL,
+        expires_at DATETIME NOT NULL,
+        decided_at DATETIME NULL,
+        decided_by VARCHAR(100) NULL,
+        create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_ai_pending_action_id (action_id),
+        KEY idx_ai_pending_owner (branch_id, username, status, create_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     `CREATE TABLE IF NOT EXISTS ai_conversations (
         id BIGINT NOT NULL AUTO_INCREMENT,
@@ -127,6 +150,30 @@ export const AI_TABLE_DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];
 
+/**
+ * Columns added after a table may already exist in production (CREATE TABLE IF NOT EXISTS
+ * does not alter existing tables). Each is added once if missing.
+ */
+export const AI_COLUMN_MIGRATIONS = [
+    { table: "branch_ai_settings", column: "access_mode", ddl: "ALTER TABLE branch_ai_settings ADD COLUMN access_mode VARCHAR(20) NOT NULL DEFAULT 'read' AFTER rate_per_day" },
+    { table: "branch_mcp_connectors", column: "access_mode", ddl: "ALTER TABLE branch_mcp_connectors ADD COLUMN access_mode VARCHAR(20) NOT NULL DEFAULT 'read' AFTER enabled" },
+];
+
+async function ensureColumns(db) {
+    for (const m of AI_COLUMN_MIGRATIONS) {
+        const [rows] = await db.query(
+            "SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            [m.table, m.column]
+        );
+        if (Number(rows?.[0]?.n) > 0) continue;
+        try {
+            await db.query(m.ddl);
+        } catch (err) {
+            if (err?.code !== "ER_DUP_FIELDNAME") throw err; // another process added it first
+        }
+    }
+}
+
 const ensured = new WeakMap();
 
 /** Create the AI tables once per db handle; retried on the next call if it fails. */
@@ -135,6 +182,7 @@ export function ensureAiTables(db) {
     if (!p) {
         p = (async () => {
             for (const ddl of AI_TABLE_DDL) await db.query(ddl);
+            await ensureColumns(db);
         })().catch((err) => {
             ensured.delete(db);
             throw err;

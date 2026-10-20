@@ -24,7 +24,7 @@ function newToken() {
     return `${MCP_TOKEN_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
 }
 
-const COLUMNS = `c.connector_id, c.label, c.token_hint, c.run_as_username, c.enabled, c.last_used_at, c.last_client,
+const COLUMNS = `c.connector_id, c.label, c.token_hint, c.run_as_username, c.enabled, c.access_mode, c.last_used_at, c.last_client,
     c.create_by, c.create_date, c.modify_date,
     (SELECT p.name FROM profile p WHERE p.username = c.run_as_username ORDER BY p.id DESC LIMIT 1) AS run_as_name`;
 
@@ -36,6 +36,7 @@ function toPublic(row) {
         run_as: row.run_as_username,
         run_as_name: row.run_as_name || null,
         enabled: String(row.enabled) === "1",
+        access_mode: row.access_mode === "read_write" ? "read_write" : "read",
         last_used_at: row.last_used_at || null,
         last_client: row.last_client || null,
         create_date: row.create_date || null,
@@ -63,13 +64,19 @@ export async function getMcpConnector(db, branchId, connectorId) {
 export async function findConnectorByToken(db, token) {
     if (!MCP_TOKEN_RE.test(String(token || ""))) return null;
     const [rows] = await db.query(
-        `SELECT connector_id, branch_id, run_as_username, enabled, last_used_at
+        `SELECT connector_id, branch_id, run_as_username, enabled, access_mode, last_used_at
          FROM branch_mcp_connectors WHERE token_hash = ? LIMIT 1`,
         [hashToken(token)]
     );
     const row = rows?.[0];
     if (!row || String(row.enabled) !== "1") return null;
-    return { id: row.connector_id, branchId: row.branch_id, runAs: row.run_as_username, lastUsedAt: row.last_used_at };
+    return {
+        id: row.connector_id,
+        branchId: row.branch_id,
+        runAs: row.run_as_username,
+        accessMode: row.access_mode === "read_write" ? "read_write" : "read",
+        lastUsedAt: row.last_used_at,
+    };
 }
 
 export class ConnectorLimitError extends Error {
@@ -94,7 +101,7 @@ export async function createMcpConnector(db, branchId, username, { label, runAs 
     return { id, token };
 }
 
-export async function updateMcpConnector(db, branchId, username, connectorId, { label, enabled, runAs }) {
+export async function updateMcpConnector(db, branchId, username, connectorId, { label, enabled, runAs, accessMode }) {
     const sets = [];
     const params = [];
     if (label !== undefined) {
@@ -108,6 +115,10 @@ export async function updateMcpConnector(db, branchId, username, connectorId, { 
     if (runAs !== undefined) {
         sets.push("run_as_username = ?");
         params.push(runAs);
+    }
+    if (accessMode !== undefined) {
+        sets.push("access_mode = ?");
+        params.push(accessMode === "read_write" ? "read_write" : "read");
     }
     if (!sets.length) return true;
     const [result] = await db.query(

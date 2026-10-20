@@ -89,7 +89,25 @@ export function clarificationBlock({ question, options = [] }) {
 }
 
 /** Validate an arbitrary block object (used on blocks read back from storage). */
+/**
+ * A write action waiting for confirmation (read-write mode). Rendered as a card with
+ * Confirm / Cancel; the current state is looked up by action_id when shown again.
+ *   { type: "action", action_id, action_type, title, fields: [{label, value}], body?, items?, expires_minutes }
+ */
+export function actionBlock({ actionId, actionType, preview, expiresMinutes }) {
+    return {
+        type: "action",
+        action_id: actionId,
+        action_type: actionType,
+        title: String(preview.title || "Confirm action").slice(0, 120),
+        fields: (preview.fields || []).slice(0, 10).map((f) => ({ label: String(f.label).slice(0, 40), value: String(f.value ?? "").slice(0, 300) })),
+        ...(preview.body ? { body: String(preview.body).slice(0, 5000) } : {}),
+        ...(preview.items?.length ? { items: preview.items.slice(0, 10).map((i) => String(i).slice(0, 200)) } : {}),
+        expires_minutes: expiresMinutes,
+    };
+}
+
 export function isValidBlock(block) {
     if (!block || typeof block !== "object") return false;
-    return ["table", "kpi", "chart", "clarification"].includes(block.type);
+    return ["table", "kpi", "chart", "clarification", "action"].includes(block.type);
 }

@@ -15,7 +15,10 @@ import { getProviderForConnection, createProvider } from "../ai/providers/index.
 import { ProviderError } from "../ai/providers/errors.js";
 import { ensureAiTables } from "../ai/schema.js";
 import { AI_PROVIDER_IDS, MODEL_ID_PATTERN, getProviderInfo, publicProviderCatalog } from "../ai/providers/catalog.js";
-import { AI_EFFORTS, getBranchAiSettings, saveBranchAiSettings } from "../ai/settings.js";
+import { AI_ACCESS_MODES, AI_EFFORTS, getBranchAiSettings, saveBranchAiSettings } from "../ai/settings.js";
+import { cancelAction, confirmAction } from "../ai/actions/execute.js";
+import { getActionStates, getPendingAction } from "../ai/actions/pending.js";
+import { isWriteModeOn } from "../ai/actions/mode.js";
 import {
     MAX_CONNECTIONS,
     createConnection,
@@ -29,6 +32,7 @@ import {
 } from "../ai/connections.js";
 import { createHealthTracker, runWithFailover } from "../ai/failover.js";
 import { checkQuestion, createSafetyLimiter } from "../ai/safety.js";
+import { createConnectorLimiter } from "./mcpRemote.js";
 import {
     MAX_MCP_CONNECTORS,
     connectorBaseUrl,
@@ -62,6 +66,9 @@ import { aiLog, hashUser } from "../ai/log.js";
  *   PATCH  /mcp-connectors/:id         rename / switch on-off / change member (admin)
  *   POST   /mcp-connectors/:id/rotate  new secret URL; the old one stops working (admin)
  *   DELETE /mcp-connectors/:id         delete (admin)
+ *   GET    /actions/:id                state of a write action proposed in chat
+ *   POST   /actions/:id/confirm        a person confirms → the action is sent (read-write mode)
+ *   POST   /actions/:id/cancel         a person cancels the action
  *   POST   /chat                       ask a question (SSE stream, or JSON with stream:false)
  *   GET    /conversations              own conversations in this branch
  *   GET    /conversations/:id          messages of one own conversation
@@ -95,11 +102,23 @@ function keyFormatError(providerId, apiKey) {
     return `This does not look like a ${info.label} API key (${info.keyPlaceholder})`;
 }
 
+const accessModeFields = {
+    access_mode: z.enum(AI_ACCESS_MODES).optional(),
+    // Switching to read-write must be explicitly acknowledged (the settings page shows a confirmation).
+    acknowledge_write: z.boolean().optional(),
+};
+const requireAcknowledgement = (body, ctx) => {
+    if (body.access_mode === "read_write" && body.acknowledge_write !== true) {
+        ctx.addIssue({ code: "custom", path: ["acknowledge_write"], message: "Confirm that the assistant may send messages and share documents" });
+    }
+};
+
 const settingsSchema = z.object({
     enabled: z.boolean(),
     rate_per_min: z.number().int().min(1).max(60),
     rate_per_day: z.number().int().min(1).max(5000),
-}).strict();
+    ...accessModeFields,
+}).strict().superRefine(requireAcknowledgement);
 
 const createConnectionSchema = z.object({
     label: label.optional(),
@@ -123,7 +142,7 @@ const orderSchema = z.object({ ids: z.array(z.string().regex(CONNECTION_ID_RE)).
 
 const memberId = z.string().trim().regex(/^[A-Za-z0-9_.@-]{1,100}$/, "Choose a team member");
 const createMcpSchema = z.object({ label: label.optional(), run_as: memberId }).strict();
-const updateMcpSchema = z.object({ label: label.optional(), enabled: z.boolean().optional(), run_as: memberId.optional() }).strict();
+const updateMcpSchema = z.object({ label: label.optional(), enabled: z.boolean().optional(), run_as: memberId.optional(), ...accessModeFields }).strict().superRefine(requireAcknowledgement);
 
 const testSchema = z.object({
     provider: z.enum(AI_PROVIDER_IDS),
@@ -249,7 +268,7 @@ export function createAiRouter({
             const active = connections.some((c) => c.enabled);
             res.json({
                 success: true,
-                data: { enabled: s.enabled && active, configured: connections.length > 0, can_manage: req.aiCtx.isAdmin },
+                data: { enabled: s.enabled && active, configured: connections.length > 0, can_manage: req.aiCtx.isAdmin, access_mode: s.access_mode },
             });
         } catch (err) {
             res.status(500).json({ success: false, message: "Failed to load AI status" });
@@ -276,12 +295,15 @@ export function createAiRouter({
                     return res.status(400).json({ success: false, code: "NO_ACTIVE_CONNECTION", message: "Add and switch on at least one AI connection before enabling the assistant." });
                 }
             }
+            const before = await getBranchAiSettings(db, req.aiCtx.branch_id);
             await saveBranchAiSettings(db, req.aiCtx.branch_id, req.aiCtx.username, {
                 enabled: body.enabled,
                 ratePerMin: body.rate_per_min,
                 ratePerDay: body.rate_per_day,
+                accessMode: body.access_mode,
             });
             adminLog(req, "settings_updated", { status: body.enabled ? "enabled" : "disabled" });
+            if (body.access_mode && body.access_mode !== before.access_mode) adminLog(req, "access_mode_changed", { status: body.access_mode });
             res.json({ success: true, data: await settingsPayload(req.aiCtx.branch_id) });
         } catch (err) {
             aiLog("settings_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
@@ -456,8 +478,9 @@ export function createAiRouter({
                 label: parsed.data.label,
                 enabled: parsed.data.enabled,
                 runAs: parsed.data.run_as,
+                accessMode: parsed.data.access_mode,
             });
-            adminLog(req, "mcp_connector_updated");
+            adminLog(req, "mcp_connector_updated", parsed.data.access_mode ? { status: parsed.data.access_mode } : {});
             res.json({ success: true, data: await mcpPayload(req) });
         } catch (err) {
             aiLog("mcp_connector_error", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
@@ -513,6 +536,12 @@ export function createAiRouter({
             const conversation = await store.getConversation(db, owner);
             if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
             const messages = await store.getMessages(db, { ...owner, limit: 200 });
+            // Write-action cards show their current state (pending / sent / cancelled / expired).
+            const actionIds = messages.flatMap((m) => (m.blocks || []).filter((b) => b?.type === "action" && b.action_id).map((b) => b.action_id));
+            const states = await getActionStates(db, { branchId: req.aiCtx.branch_id, username: req.aiCtx.username, actionIds: [...new Set(actionIds)].slice(0, 200) });
+            for (const m of messages) {
+                m.blocks = (m.blocks || []).map((b) => (b?.type === "action" && states.has(b.action_id) ? { ...b, state: actionView(states.get(b.action_id)) } : b));
+            }
             res.json({
                 success: true,
                 data: {
@@ -541,6 +570,61 @@ export function createAiRouter({
             res.json({ success: true });
         } catch (err) {
             res.status(500).json({ success: false, message: "Failed to delete conversation" });
+        }
+    });
+
+    /* ------------------------------- write actions ------------------------------- */
+
+    const ACTION_ID_RE = /^[0-9a-f-]{36}$/;
+    const confirmLimiter = createConnectorLimiter({ perMinute: 10, perDay: 300 });
+    const actionView = (state) => ({ status: state.status, message: state.result?.message || null, channels: state.result?.channels || null });
+
+    router.get("/actions/:id", async (req, res) => {
+        if (!ACTION_ID_RE.test(req.params.id)) return res.status(404).json({ success: false, message: "Action not found" });
+        try {
+            const action = await getPendingAction(db, { actionId: req.params.id, branchId: req.aiCtx.branch_id, username: req.aiCtx.username });
+            if (!action) return res.status(404).json({ success: false, message: "Action not found" });
+            res.json({ success: true, data: actionView(action) });
+        } catch (err) {
+            res.status(500).json({ success: false, message: "Failed to load the action" });
+        }
+    });
+
+    router.post("/actions/:id/confirm", async (req, res) => {
+        if (!ACTION_ID_RE.test(req.params.id)) return res.status(404).json({ success: false, message: "Action not found" });
+        if (!confirmLimiter(`${req.aiCtx.branch_id}:${req.aiCtx.username}`)) {
+            return res.status(429).json({ success: false, code: "AI_ACTION_RATE_LIMITED", message: "Too many confirmations. Please wait a minute." });
+        }
+        try {
+            const r = await confirmAction({
+                db,
+                senders: deps.senders,
+                actionId: req.params.id,
+                branchId: req.aiCtx.branch_id,
+                username: req.aiCtx.username,
+                isModeOn: (source) => isWriteModeOn(db, req.aiCtx.branch_id, source),
+                onAudit: (a) => store.addToolCallAudit(db, [{ ...a, conversationId: "action", branchId: req.aiCtx.branch_id, username: req.aiCtx.username, correlationId: req.cid }]).catch(() => {}),
+            });
+            aiLog("ai_action", { cid: req.cid, branch_id: req.aiCtx.branch_id, user: hashUser(req.aiCtx.username), status: r.status || r.code, error_code: r.ok ? undefined : r.code });
+            if (r.code === "NOT_FOUND") return res.status(404).json({ success: false, message: r.message });
+            if (r.code === "DENIED" || r.code === "MODE_OFF") return res.status(403).json({ success: false, code: `AI_ACTION_${r.code}`, message: r.message });
+            if (r.code === "NOT_PENDING") return res.status(409).json({ success: false, code: "AI_ACTION_NOT_PENDING", message: r.message, data: { status: r.status, message: r.result?.message || null, channels: r.result?.channels || null } });
+            res.json({ success: true, data: { status: r.status, message: r.message, channels: r.result?.channels || null } });
+        } catch (err) {
+            aiLog("ai_action", { cid: req.cid, status: "error", error_code: err?.code || "INTERNAL" });
+            res.status(500).json({ success: false, message: "The action could not be completed." });
+        }
+    });
+
+    router.post("/actions/:id/cancel", async (req, res) => {
+        if (!ACTION_ID_RE.test(req.params.id)) return res.status(404).json({ success: false, message: "Action not found" });
+        try {
+            const r = await cancelAction({ db, actionId: req.params.id, branchId: req.aiCtx.branch_id, username: req.aiCtx.username });
+            if (r.code === "NOT_FOUND") return res.status(404).json({ success: false, message: r.message });
+            if (!r.ok) return res.status(409).json({ success: false, code: "AI_ACTION_NOT_PENDING", message: r.message, data: { status: r.status } });
+            res.json({ success: true, data: { status: "cancelled", message: r.message } });
+        } catch (err) {
+            res.status(500).json({ success: false, message: "Failed to cancel the action" });
         }
     });
 
@@ -688,13 +772,15 @@ export function createAiRouter({
                 branchName = null;
             }
 
-            mcp = await createMcpForRequest(ctx, deps, {
+            // Read-write mode adds the prepare-only write tools (confirmed by a click on the card).
+            const chatCtx = Object.freeze({ ...ctx, accessMode: req.aiSettings.access_mode, source: "chat" });
+            mcp = await createMcpForRequest(chatCtx, deps, {
                 timeoutMs: config.toolTimeoutMs,
                 maxChars: config.toolResultMaxChars,
                 onAudit: (a) => audits.push(a),
             });
             const history = buildHistory(historyRows, { maxMessages: config.historyMessages, maxChars: config.maxContextChars });
-            const system = buildSystemPrompt({ today: ctx.today, branchName });
+            const system = buildSystemPrompt({ today: ctx.today, branchName, accessMode: req.aiSettings.access_mode });
             const deadline = started + config.requestTimeoutMs;
 
             // 3. Ask the highest-priority working connection; fail over to the next on provider errors.

@@ -1,4 +1,4 @@
--- AI assistant: per-branch settings, AI connections (failover), remote MCP connectors, chat history and tool-call audit log.
+-- AI assistant: per-branch settings, AI connections (failover), remote MCP connectors, pending write actions, chat history and tool-call audit log.
 -- The server also creates these tables automatically on first use (ai/schema.js).
 -- Idempotent. Every row is scoped by branch_id (+ username); tool result rows are never stored.
 -- Keep in sync with ai/schema.js.
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS branch_ai_settings (
     api_key_hint VARCHAR(16) NULL,
     rate_per_min INT NOT NULL DEFAULT 6,
     rate_per_day INT NOT NULL DEFAULT 200,
+    access_mode VARCHAR(20) NOT NULL DEFAULT 'read',
     create_by VARCHAR(100) NULL,
     create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     modify_by VARCHAR(100) NULL,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS branch_mcp_connectors (
     token_hint VARCHAR(16) NULL,
     run_as_username VARCHAR(100) NOT NULL,
     enabled ENUM('0','1') NOT NULL DEFAULT '1',
+    access_mode VARCHAR(20) NOT NULL DEFAULT 'read',
     last_used_at DATETIME NULL,
     last_client VARCHAR(120) NULL,
     create_by VARCHAR(100) NULL,
@@ -65,6 +67,26 @@ CREATE TABLE IF NOT EXISTS branch_mcp_connectors (
     UNIQUE KEY uq_branch_mcp_connector_id (connector_id),
     UNIQUE KEY uq_branch_mcp_token_hash (token_hash),
     KEY idx_branch_mcp_connectors_branch (branch_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS ai_pending_actions (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    action_id VARCHAR(40) NOT NULL,
+    branch_id VARCHAR(50) NOT NULL,
+    username VARCHAR(100) NOT NULL,
+    source VARCHAR(60) NOT NULL,
+    action_type VARCHAR(40) NOT NULL,
+    payload JSON NOT NULL,
+    preview JSON NOT NULL,
+    status ENUM('pending','executing','done','partial','failed','cancelled','expired') NOT NULL DEFAULT 'pending',
+    result JSON NULL,
+    expires_at DATETIME NOT NULL,
+    decided_at DATETIME NULL,
+    decided_by VARCHAR(100) NULL,
+    create_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_ai_pending_action_id (action_id),
+    KEY idx_ai_pending_owner (branch_id, username, status, create_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ai_conversations (
@@ -122,3 +144,7 @@ CREATE TABLE IF NOT EXISTS ai_tool_calls (
     KEY idx_ai_tool_branch (branch_id, create_date),
     KEY idx_ai_tool_conv (conversation_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Columns added after the first release (run once if your tables predate them; the server adds them automatically):
+-- ALTER TABLE branch_ai_settings ADD COLUMN access_mode VARCHAR(20) NOT NULL DEFAULT 'read' AFTER rate_per_day;
+-- ALTER TABLE branch_mcp_connectors ADD COLUMN access_mode VARCHAR(20) NOT NULL DEFAULT 'read' AFTER enabled;

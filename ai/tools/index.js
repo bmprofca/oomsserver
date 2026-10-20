@@ -5,6 +5,7 @@ import taskTools from "./tasks.js";
 import attendanceTools from "./attendance.js";
 import financeTools from "./finance.js";
 import reportTools from "./reports.js";
+import actionTools from "./actions.js";
 
 /**
  * ask_clarification — the model calls this when the user's request is ambiguous
@@ -31,13 +32,18 @@ export const askClarification = {
     },
 };
 
-/** Every registered OOMS tool. All are read-only: there are no write tools in this version. */
+/**
+ * Every registered OOMS tool. Read tools are always available (per permission). Write tools
+ * (tool.write) only PREPARE actions that a person confirms, and are only registered when the
+ * context is in read-write mode — see tools/actions.js.
+ */
 export const ALL_TOOLS = [
     ...staffTools,
     ...taskTools,
     ...attendanceTools,
     ...financeTools,
     ...reportTools,
+    ...actionTools,
     askClarification,
 ];
 

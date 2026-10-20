@@ -7,11 +7,14 @@ import { migrateLegacyKey } from "./connections.js";
  */
 
 export const AI_EFFORTS = ["low", "medium", "high"];
+/** read = answers only; read_write = may also propose sends that a person confirms. */
+export const AI_ACCESS_MODES = ["read", "read_write"];
 
 export const DEFAULT_BRANCH_AI_SETTINGS = Object.freeze({
     enabled: false,
     rate_per_min: 6,
     rate_per_day: 200,
+    access_mode: "read",
 });
 
 function normalize(row) {
@@ -20,6 +23,7 @@ function normalize(row) {
         enabled: String(row.enabled) === "1",
         rate_per_min: Number(row.rate_per_min) || DEFAULT_BRANCH_AI_SETTINGS.rate_per_min,
         rate_per_day: Number(row.rate_per_day) || DEFAULT_BRANCH_AI_SETTINGS.rate_per_day,
+        access_mode: AI_ACCESS_MODES.includes(row.access_mode) ? row.access_mode : "read",
         modify_date: row.modify_date || null,
         modify_by: row.modify_by || null,
     };
@@ -27,7 +31,7 @@ function normalize(row) {
 
 async function loadRow(db, branchId) {
     const [rows] = await db.query(
-        `SELECT enabled, rate_per_min, rate_per_day, modify_date, modify_by,
+        `SELECT enabled, rate_per_min, rate_per_day, access_mode, modify_date, modify_by,
                 provider, model, effort, api_key_enc, api_key_hint, create_by
          FROM branch_ai_settings WHERE branch_id = ? LIMIT 1`,
         [branchId]
@@ -42,20 +46,22 @@ export async function getBranchAiSettings(db, branchId) {
     return normalize(row);
 }
 
-export async function saveBranchAiSettings(db, branchId, username, { enabled, ratePerMin, ratePerDay }) {
+/** `accessMode` undefined keeps the current mode. */
+export async function saveBranchAiSettings(db, branchId, username, { enabled, ratePerMin, ratePerDay, accessMode }) {
     const current = await loadRow(db, branchId);
+    const mode = AI_ACCESS_MODES.includes(accessMode) ? accessMode : normalize(current).access_mode;
     if (current) {
         await db.query(
             `UPDATE branch_ai_settings
-             SET enabled = ?, rate_per_min = ?, rate_per_day = ?, modify_by = ?, modify_date = NOW()
+             SET enabled = ?, rate_per_min = ?, rate_per_day = ?, access_mode = ?, modify_by = ?, modify_date = NOW()
              WHERE branch_id = ?`,
-            [enabled ? "1" : "0", ratePerMin, ratePerDay, username, branchId]
+            [enabled ? "1" : "0", ratePerMin, ratePerDay, mode, username, branchId]
         );
     } else {
         await db.query(
-            `INSERT INTO branch_ai_settings (enabled, rate_per_min, rate_per_day, modify_by, modify_date, branch_id, create_by)
-             VALUES (?, ?, ?, ?, NOW(), ?, ?)`,
-            [enabled ? "1" : "0", ratePerMin, ratePerDay, username, branchId, username]
+            `INSERT INTO branch_ai_settings (enabled, rate_per_min, rate_per_day, access_mode, modify_by, modify_date, branch_id, create_by)
+             VALUES (?, ?, ?, ?, ?, NOW(), ?, ?)`,
+            [enabled ? "1" : "0", ratePerMin, ratePerDay, mode, username, branchId, username]
         );
     }
     return normalize(await loadRow(db, branchId));

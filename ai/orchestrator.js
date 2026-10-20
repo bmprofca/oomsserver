@@ -30,6 +30,11 @@ const STATUS_LABELS = {
     expense_report: "Totalling expenses",
     sales_report: "Totalling sales",
     dashboard_summary: "Preparing office snapshot",
+    list_client_documents: "Finding documents",
+    send_whatsapp: "Preparing WhatsApp message",
+    send_email: "Preparing email",
+    share_client_documents: "Preparing documents to share",
+    share_ledger_statement: "Preparing ledger statement",
     ask_clarification: "Preparing a question",
 };
 

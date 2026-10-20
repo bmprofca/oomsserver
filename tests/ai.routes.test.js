@@ -51,12 +51,12 @@ function memoryDb({ settings = { BR1: { enabled: "1" } }, connections = [{ branc
             Object.assign(branchSettings[b], { api_key_enc: null, api_key_hint: null });
             return { affectedRows: 1 };
         }],
-        [/UPDATE branch_ai_settings/, ([enabled, rpm, rpd, user, b]) => {
-            Object.assign(branchSettings[b], { enabled, rate_per_min: rpm, rate_per_day: rpd, modify_by: user });
+        [/UPDATE branch_ai_settings/, ([enabled, rpm, rpd, access_mode, user, b]) => {
+            Object.assign(branchSettings[b], { enabled, rate_per_min: rpm, rate_per_day: rpd, access_mode, modify_by: user });
             return { affectedRows: 1 };
         }],
-        [/INSERT INTO branch_ai_settings/, ([enabled, rpm, rpd, user, b]) => {
-            branchSettings[b] = { enabled, rate_per_min: rpm, rate_per_day: rpd, modify_by: user };
+        [/INSERT INTO branch_ai_settings/, ([enabled, rpm, rpd, access_mode, user, b]) => {
+            branchSettings[b] = { enabled, rate_per_min: rpm, rate_per_day: rpd, access_mode, modify_by: user };
             return { affectedRows: 1 };
         }],
         [/SELECT COUNT\(\*\) AS n, COALESCE\(MAX\(priority\)/, ([b]) => {
@@ -202,7 +202,7 @@ test("disabled branches get AI_DISABLED; enabled branches without an active conn
         assert.equal(r1.status, 404);
         assert.equal((await r1.json()).code, "AI_DISABLED");
         assert.equal((await app.call("/chat", { method: "POST", branch: "BR9", body: { message: "hi" } })).status, 404, "no settings row = disabled");
-        assert.deepEqual((await (await app.call("/status")).json()).data, { enabled: false, configured: true, can_manage: true });
+        assert.deepEqual((await (await app.call("/status")).json()).data, { enabled: false, configured: true, can_manage: true, access_mode: "read" });
     } finally {
         app.server.close();
     }

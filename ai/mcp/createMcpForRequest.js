@@ -32,7 +32,11 @@ export function buildMcpServer(ctx, deps, { timeoutMs, maxChars, onAudit, instru
             {
                 description: tool.description,
                 inputSchema: tool.input,
-                annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+                // Write tools must not claim to be read-only: MCP clients ask the user before
+                // calling them. Prepare tools change nothing until confirmed; confirm_action sends.
+                annotations: tool.write
+                    ? { readOnlyHint: false, destructiveHint: Boolean(tool.destructive), idempotentHint: false, openWorldHint: true }
+                    : { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
             },
             (args) => runTool(tool, ctx, args, deps, { timeoutMs, maxChars, onAudit })
         );
