@@ -87,16 +87,16 @@ export class ConnectorLimitError extends Error {
 }
 
 /** @returns {Promise<{id: string, token: string}>} the plain token — show it once */
-export async function createMcpConnector(db, branchId, username, { label, runAs }) {
+export async function createMcpConnector(db, branchId, username, { label, runAs, accessMode }) {
     const [[count]] = await db.query("SELECT COUNT(*) AS n FROM branch_mcp_connectors WHERE branch_id = ?", [branchId]);
     if (Number(count?.n) >= MAX_MCP_CONNECTORS) throw new ConnectorLimitError();
     const id = crypto.randomUUID();
     const token = newToken();
     await db.query(
         `INSERT INTO branch_mcp_connectors
-            (connector_id, branch_id, label, token_hash, token_hint, run_as_username, enabled, create_by, modify_by, modify_date)
-         VALUES (?, ?, ?, ?, ?, ?, '1', ?, ?, NOW())`,
-        [id, branchId, label || null, hashToken(token), `…${token.slice(-4)}`, runAs, username, username]
+            (connector_id, branch_id, label, token_hash, token_hint, run_as_username, enabled, access_mode, create_by, modify_by, modify_date)
+         VALUES (?, ?, ?, ?, ?, ?, '1', ?, ?, ?, NOW())`,
+        [id, branchId, label || null, hashToken(token), `…${token.slice(-4)}`, runAs, accessMode === "read_write" ? "read_write" : "read", username, username]
     );
     return { id, token };
 }

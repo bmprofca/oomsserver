@@ -62,7 +62,7 @@ import { aiLog, hashUser } from "../ai/log.js";
  *   PUT    /connections/order          set failover priority (admin)
  *   POST   /connections/:id/test       test a saved connection (admin)
  *   GET    /mcp-connectors             remote MCP connectors (Claude custom connector) (admin)
- *   POST   /mcp-connectors             create one; returns its secret URL once (admin)
+ *   POST   /mcp-connectors             create one (optionally read & write); returns its secret URL once (admin)
  *   PATCH  /mcp-connectors/:id         rename / switch on-off / change member (admin)
  *   POST   /mcp-connectors/:id/rotate  new secret URL; the old one stops working (admin)
  *   DELETE /mcp-connectors/:id         delete (admin)
@@ -141,7 +141,7 @@ const updateConnectionSchema = z.object({
 const orderSchema = z.object({ ids: z.array(z.string().regex(CONNECTION_ID_RE)).min(1).max(MAX_CONNECTIONS) }).strict();
 
 const memberId = z.string().trim().regex(/^[A-Za-z0-9_.@-]{1,100}$/, "Choose a team member");
-const createMcpSchema = z.object({ label: label.optional(), run_as: memberId }).strict();
+const createMcpSchema = z.object({ label: label.optional(), run_as: memberId, ...accessModeFields }).strict().superRefine(requireAcknowledgement);
 const updateMcpSchema = z.object({ label: label.optional(), enabled: z.boolean().optional(), run_as: memberId.optional(), ...accessModeFields }).strict().superRefine(requireAcknowledgement);
 
 const testSchema = z.object({
@@ -456,8 +456,12 @@ export function createAiRouter({
             if (!(await isActiveMember(req.aiCtx.branch_id, parsed.data.run_as))) {
                 return res.status(400).json({ success: false, code: "INVALID_MEMBER", message: "Choose an active team member of this branch." });
             }
-            const { id, token } = await createMcpConnector(db, req.aiCtx.branch_id, req.aiCtx.username, { label: parsed.data.label, runAs: parsed.data.run_as });
-            adminLog(req, "mcp_connector_created", { member: hashUser(parsed.data.run_as) });
+            const { id, token } = await createMcpConnector(db, req.aiCtx.branch_id, req.aiCtx.username, {
+                label: parsed.data.label,
+                runAs: parsed.data.run_as,
+                accessMode: parsed.data.access_mode,
+            });
+            adminLog(req, "mcp_connector_created", { member: hashUser(parsed.data.run_as), access_mode: parsed.data.access_mode || "read" });
             res.status(201).json({ success: true, data: { id, url: connectorUrl(req, token), ...(await mcpPayload(req)) } });
         } catch (err) {
             if (err?.code === "CONNECTOR_LIMIT") return res.status(400).json({ success: false, code: "CONNECTOR_LIMIT", message: err.message });

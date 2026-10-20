@@ -25,8 +25,8 @@ function memoryDb() {
             (b === "BR1" ? Object.entries(members).map(([username, type]) => ({ username, type, designation: null, name: username === "boss" ? "Office Boss" : "Staff One" })) : [])],
         [/FROM branch_mapping bm\s+LEFT JOIN profile/, () => [{ username: "usr_ARUN000001", type: "staff", name: "Arun Pawan", designation: "Accountant" }]],
         [/SELECT COUNT\(\*\) AS n FROM branch_mcp_connectors/, ([b]) => [{ n: connectors.filter((c) => c.branch_id === b).length }]],
-        [/INSERT INTO branch_mcp_connectors/, ([connector_id, branch_id, label, token_hash, token_hint, run_as_username]) => {
-            connectors.push({ id: ++seq, connector_id, branch_id, label, token_hash, token_hint, run_as_username, enabled: "1", last_used_at: null, last_client: null });
+        [/INSERT INTO branch_mcp_connectors/, ([connector_id, branch_id, label, token_hash, token_hint, run_as_username, access_mode]) => {
+            connectors.push({ id: ++seq, connector_id, branch_id, label, token_hash, token_hint, run_as_username, enabled: "1", access_mode, last_used_at: null, last_client: null });
             return { affectedRows: 1 };
         }],
         [/DELETE FROM branch_mcp_connectors/, ([b, id]) => {
@@ -143,6 +143,44 @@ test("admin creates a connector; the URL works with a real MCP client (2025 prot
         assert.ok(store.audits.length >= 1, "tool calls are audited");
         assert.match(String(store.audits[0][0]), /^mcp:/);
         assert.equal(store.connectors[0].last_client, "claude-ai 0.1.0");
+    } finally {
+        server.close();
+    }
+});
+
+test("connector created as read & write exposes send tools in Claude; read-only does not", async () => {
+    const { server, origin, admin, store } = await startServer();
+    try {
+        const noAck = await admin("/mcp-connectors", { method: "POST", body: { run_as: "boss", access_mode: "read_write" } });
+        assert.equal(noAck.status, 400, "read & write needs the acknowledgement");
+        assert.equal(store.connectors.length, 0);
+
+        const listTools = async (url) => {
+            const client = new Client({ name: "claude-ai", version: "0.1.0" });
+            await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+            const { tools } = await client.listTools();
+            const instructions = client.getInstructions() || "";
+            await client.close();
+            return { names: tools.map((t) => t.name), tools, instructions };
+        };
+
+        const rw = await createConnector(admin, origin, { run_as: "boss", access_mode: "read_write", acknowledge_write: true });
+        assert.equal(rw.connectors[0].access_mode, "read_write");
+        const write = await listTools(rw.localUrl);
+        for (const name of ["send_whatsapp", "send_email", "share_client_documents", "share_ledger_statement", "confirm_action", "cancel_action"]) {
+            assert.ok(write.names.includes(name), `${name} available in read & write`);
+        }
+        assert.equal(write.tools.find((t) => t.name === "confirm_action").annotations.readOnlyHint, false, "Claude asks before confirm");
+        assert.match(write.instructions, /explicit approval/);
+
+        const ro = await createConnector(admin, origin, { run_as: "boss" });
+        const read = await listTools(ro.localUrl);
+        assert.ok(!read.names.some((n) => /^(send_|share_|confirm_|cancel_)/.test(n)), "read-only has no write tools");
+        assert.match(read.instructions, /read-only/i);
+
+        // Switching an existing connector takes effect on the next request.
+        await admin(`/mcp-connectors/${ro.id}`, { method: "PATCH", body: { access_mode: "read_write", acknowledge_write: true } });
+        assert.ok((await listTools(ro.localUrl)).names.includes("confirm_action"));
     } finally {
         server.close();
     }
