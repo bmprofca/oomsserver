@@ -16,6 +16,7 @@ import { startAttendanceWeeklyOffCron } from "./cron/attendanceWeeklyOffCron.js"
 import { startOneChattingCampaignCron } from "./cron/oneChattingCampaignCron.js";
 import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
+import { startExecutiveSummaryCron } from "./cron/executiveSummaryCron.js";
 import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
 import { loadPlatformSettings } from "./helpers/platformSettings.js";
@@ -125,6 +126,7 @@ server.listen(PORT, "0.0.0.0", () => {
     startOneChattingCampaignCron();
     startSmsCampaignCron();
     startEmailBroadcastScheduleCron();
+    startExecutiveSummaryCron();
     const voiceCallExpiryTimer = setInterval(() => {
         updateExpiredInvites().catch((error) => {
             console.error("VOICE CALL EXPIRY WORKER ERROR:", error);
