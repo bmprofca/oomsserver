@@ -8,6 +8,7 @@ import firmRoutes from "./firm.js";
 import documentRoutes from "./document.js";
 import serviceRoutes from "./service.js";
 import billingRoutes from "./billing.js";
+import notificationRoutes from "./notifications.js";
 
 const router = express.Router();
 
@@ -20,5 +21,6 @@ router.use("/firm", firmRoutes);
 router.use("/document", documentRoutes);
 router.use("/service", serviceRoutes);
 router.use("/billing", billingRoutes);
+router.use("/notifications", notificationRoutes);
 
 export default router;

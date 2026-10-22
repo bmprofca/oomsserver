@@ -49,6 +49,11 @@ import fcmRoutes from "./fcm.js";
 import voiceCallRoutes from "./voiceCalls.js";
 import aiRoutes from "./ai.js";
 import mcpRemoteRoutes from "./mcpRemote.js";
+import ledgerGroupRoutes from "./ledgerGroups.js";
+import automationPolicyRoutes from "./automationPolicies.js";
+import notificationRoutes from "./notifications.js";
+import workflowTemplateRoutes from "./workflowTemplates.js";
+import broadcastReportRoutes from "./broadcastReport.js";
 
 
 router.use("/auth", authRoutes);
@@ -103,5 +108,10 @@ router.use("/voice-calls", voiceCallRoutes);
 router.use("/ai", aiRoutes);
 // Remote MCP endpoint for custom connectors (Claude etc.); authenticated by the secret URL.
 router.use("/mcp", mcpRemoteRoutes);
+router.use("/ledger-groups", ledgerGroupRoutes);
+router.use("/automation-policies", automationPolicyRoutes);
+router.use("/notifications", notificationRoutes);
+router.use("/workflow-templates", workflowTemplateRoutes);
+router.use("/broadcast-report", broadcastReportRoutes);
 
 export default router;

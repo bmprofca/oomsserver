@@ -17,6 +17,7 @@ import dashboardRoutes from "./dashboard.js";
 import invoiceFormatRoutes from "./invoiceFormats.js";
 import platformSettingsRoutes from "./platformSettings.js";
 import smsCompanyRoutes from "./smsCompany.js";
+import notificationRoutes from "./notifications.js";
 
 const router = express.Router();
 
@@ -38,5 +39,6 @@ router.use("/account-deletion", accountDeletionRoutes);
 router.use("/invoice-formats", invoiceFormatRoutes);
 router.use("/platform-settings", platformSettingsRoutes);
 router.use("/sms-company", smsCompanyRoutes);
+router.use("/notifications", notificationRoutes);
 
 export default router;

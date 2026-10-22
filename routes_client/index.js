@@ -8,6 +8,7 @@ import transactionRoutes from "./transaction.js";
 import reportRoutes from "./report.js";
 import documentRoutes from "./document.js";
 import branchRoutes from "./branch.js";
+import notificationRoutes from "./notifications.js";
 
 const router = express.Router();
 
@@ -20,5 +21,6 @@ router.use("/transaction", transactionRoutes);
 router.use("/report", reportRoutes);
 router.use("/document", documentRoutes);
 router.use("/branch", branchRoutes);
+router.use("/notifications", notificationRoutes);
 
 export default router;

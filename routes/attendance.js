@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
-import { auth, validateBranch } from "../middleware/auth.js";
+import { auth, checkSubscription, requireFeature, validateBranch } from "../middleware/auth.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 import { UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import {
     buildLeaveWageForDate,
@@ -585,7 +586,7 @@ router.get("/today-status", auth, validateBranch, requireStaffAttendance, async 
     }
 });
 
-router.post("/punch-in", auth, validateBranch, requireStaffAttendance, async (req, res) => {
+router.post("/punch-in", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -662,7 +663,7 @@ router.post("/punch-in", auth, validateBranch, requireStaffAttendance, async (re
     }
 });
 
-router.post("/punch-out", auth, validateBranch, requireStaffAttendance, async (req, res) => {
+router.post("/punch-out", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -753,7 +754,7 @@ router.post("/punch-out", auth, validateBranch, requireStaffAttendance, async (r
     }
 });
 
-router.post("/break/start", auth, validateBranch, requireStaffAttendance, async (req, res) => {
+router.post("/break/start", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -829,7 +830,7 @@ router.post("/break/start", auth, validateBranch, requireStaffAttendance, async 
     }
 });
 
-router.post("/break/end", auth, validateBranch, requireStaffAttendance, async (req, res) => {
+router.post("/break/end", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requireStaffAttendance, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const username = getUsername(req);
@@ -1420,7 +1421,7 @@ function isAttendanceApproved(row) {
     return Number(row?.is_approved) === 1;
 }
 
-router.post("/manage/punch-in", auth, validateBranch, async (req, res) => {
+router.post("/manage/punch-in", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -1496,7 +1497,7 @@ router.post("/manage/punch-in", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/manage/punch-out", auth, validateBranch, async (req, res) => {
+router.post("/manage/punch-out", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -1590,7 +1591,7 @@ router.post("/manage/punch-out", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/manage/break/start", auth, validateBranch, async (req, res) => {
+router.post("/manage/break/start", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -1684,7 +1685,7 @@ router.post("/manage/break/start", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/manage/break/end", auth, validateBranch, async (req, res) => {
+router.post("/manage/break/end", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -1764,7 +1765,7 @@ router.post("/manage/break/end", auth, validateBranch, async (req, res) => {
     }
 });
 
-router.post("/manage/approve", auth, validateBranch, async (req, res) => {
+router.post("/manage/approve", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -1904,7 +1905,7 @@ router.post("/manage/approve", auth, validateBranch, async (req, res) => {
  *   { items: [{ username, date }], apply_overtime?, apply_fine? }
  *   { select_all: true, from_date?, to_date?, date?, search?, apply_overtime?, apply_fine? }
  */
-router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
+router.post("/manage/bulk-approve", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);
@@ -2152,7 +2153,7 @@ router.post("/manage/bulk-approve", auth, validateBranch, async (req, res) => {
  * Always sets is_approved = 1. Times are MySQL TIME only.
  * Present may include in_time / out_time + optional overtime_enabled / fine_enabled.
  */
-router.post("/manage/mark", auth, validateBranch, async (req, res) => {
+router.post("/manage/mark", auth, validateBranch, checkSubscription, requireFeature("salary-management"), requirePermission("staff_view_manage"), async (req, res) => {
     const connection = await pool.getConnection();
     try {
         const actor = getUsername(req);

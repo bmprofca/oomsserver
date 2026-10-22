@@ -34,6 +34,9 @@ export const DEFAULT_PERMISSION_OPTIONS = [
     { p_option_id: "staff_wise_sales_view", name: "Staff Wise Sales View" },
     { p_option_id: "top_clients_view", name: "Top Clients View" },
     { p_option_id: "dashboard_statistics_view", name: "Dashboard Statistics View" },
+    { p_option_id: "ledger_group_manage", name: "Manage Ledger Groups" },
+    { p_option_id: "automation_manage", name: "Manage Automation Policies" },
+    { p_option_id: "workflow_template_manage", name: "Manage Workflow Templates" },
 ];
 
 const ALL_PERMISSION_IDS = DEFAULT_PERMISSION_OPTIONS.map((opt) => opt.p_option_id);
@@ -67,6 +70,9 @@ const MANAGER_PERMISSIONS = [
     "staff_wise_sales_view",
     "top_clients_view",
     "dashboard_statistics_view",
+    "ledger_group_manage",
+    "automation_manage",
+    "workflow_template_manage",
 ];
 
 const STAFF_PERMISSIONS = [

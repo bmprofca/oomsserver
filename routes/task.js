@@ -28,6 +28,7 @@ import {
     resolveGst,
     toDateOnly,
 } from "../helpers/gst.js";
+import { loadWorkflowTemplateSnapshot } from "../helpers/workflowTemplates.js";
 
 const router = express.Router();
 
@@ -198,7 +199,8 @@ router.post("/create", auth, validateBranch, async (req, res) => {
             notes: legacyNotes = null,
             attachments: legacyAttachments = [],
             voice_note_id = null,
-            meta: legacyMeta = {}
+            meta: legacyMeta = {},
+            workflow_template_id: legacyWorkflowTemplateId = null,
         } = body;
 
         const firmsPayload = body.firms != null ? (Array.isArray(body.firms) ? body.firms : [body.firms]) : [];
@@ -207,6 +209,7 @@ router.post("/create", auth, validateBranch, async (req, res) => {
         const subtasksPayload = body.subtasks != null ? (Array.isArray(body.subtasks) ? body.subtasks : []) : legacySubtasks;
         const assignmentPayload = body.assignment != null && typeof body.assignment === "object" ? body.assignment : legacyAssignment;
         const notesPayload = body.notes != null && typeof body.notes === "object" ? body.notes : null;
+        const workflowTemplateId = body.workflow_template_id || serviceObj?.workflow_template_id || legacyWorkflowTemplateId;
 
         let allFirmIds = [];
         let service_id, due_date, fees, service_category_id_final, meta_final;
@@ -381,6 +384,13 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                         "INSERT INTO task_status (branch_id, task_id, create_by, status) VALUES (?, ?, ?, ?)",
                         [branch_id, task_id, username, taskStatus]
                     );
+                    await loadWorkflowTemplateSnapshot(conn, {
+                        branch_id,
+                        service_id,
+                        workflow_template_id: workflowTemplateId,
+                        task_id,
+                        actor_username: username,
+                    });
 
                     // notes: note_type = "task", same as client notes create (text / file / voice), priority & status
                     const textItems = Array.isArray(notesText) ? notesText : (notesText ? [notesText] : []);
@@ -687,6 +697,13 @@ router.post("/create", auth, validateBranch, async (req, res) => {
                 "INSERT INTO task_status (branch_id, task_id, create_by, status) VALUES (?, ?, ?, ?)",
                 [branch_id, task_id, username, taskStatusLegacy]
             );
+            await loadWorkflowTemplateSnapshot(conn, {
+                branch_id,
+                service_id: service_id_legacy,
+                workflow_template_id: workflowTemplateId,
+                task_id,
+                actor_username: username,
+            });
 
             // notes: note_type = "task", same as client (text / file / voice), priority & status
             const legacyNotesText = Array.isArray(legacyNotes) ? legacyNotes : (legacyNotes != null ? [legacyNotes] : []);
