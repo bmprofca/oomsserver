@@ -5,23 +5,22 @@ import {
     getActiveMapping,
 } from "./wpSystemTemplateService.js";
 
-const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
-    .trim()
-    .replace(/\/$/, "");
-const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
-const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
+import { getPlatformSetting } from "../helpers/platformSettings.js";
+
+/** OneChatting base URL and developer tokens are platform settings (ADMIN → Platform Settings). */
+function getOnechattingBaseUrl() {
+    return String(getPlatformSetting("ONECHATTING_BASE_URL") || "").trim().replace(/\/$/, "");
+}
+const ONECHATTING_SEND_TEMPLATE_URL = () => `${getOnechattingBaseUrl()}/developer/message/send-template`;
+const ONECHATTING_TEMPLATE_LIST_URL = () => `${getOnechattingBaseUrl()}/developer/template/template-list`;
 
 function getSystemDeveloperToken() {
-    const token = process.env.ONECHATTING_SYSTEM_DEVELOPER_TOKEN
-        ? String(process.env.ONECHATTING_SYSTEM_DEVELOPER_TOKEN).trim()
-        : "";
+    const token = String(getPlatformSetting("ONECHATTING_SYSTEM_DEVELOPER_TOKEN") || "").trim();
     return token || null;
 }
 
 function getProjectDeveloperToken() {
-    const token = process.env.ONECHATTING_PROJECT_DEVELOPER_TOKEN
-        ? String(process.env.ONECHATTING_PROJECT_DEVELOPER_TOKEN).trim()
-        : "";
+    const token = String(getPlatformSetting("ONECHATTING_PROJECT_DEVELOPER_TOKEN") || "").trim();
     return token || null;
 }
 
@@ -109,7 +108,7 @@ async function resolveTemplateId(projectToken, templateName) {
     const limit = 100;
 
     while (page_no <= 50) {
-        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL, {
+        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL(), {
             headers: { token: projectToken },
             params: { status: "APPROVED", page_no, limit },
         });
@@ -146,13 +145,13 @@ async function listOneChattingProjectTemplates({
     const projectToken = getProjectDeveloperToken();
     if (!projectToken) {
         const err = new Error(
-            "ONECHATTING_PROJECT_DEVELOPER_TOKEN is not configured"
+            "OneChatting project developer token is not configured (Admin → Platform Settings)"
         );
         err.code = "MISSING_PROJECT_TOKEN";
         throw err;
     }
-    if (!ONECHATTING_TEMPLATE_LIST_URL || !ONECHATTING_BASE_URL) {
-        const err = new Error("ONECHATTING_BASE_URL is not configured");
+    if (!getOnechattingBaseUrl()) {
+        const err = new Error("OneChatting base URL is not configured (Admin → Platform Settings)");
         err.code = "MISSING_BASE_URL";
         throw err;
     }
@@ -168,7 +167,7 @@ async function listOneChattingProjectTemplates({
         if (status) params.status = String(status).trim();
         if (category) params.category = String(category).trim();
 
-        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL, {
+        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL(), {
             headers: { token: projectToken },
             params,
         });
@@ -276,7 +275,7 @@ async function sendOomsSystemTemplateMessage({
 
     try {
         const response = await axios.post(
-            ONECHATTING_SEND_TEMPLATE_URL,
+            ONECHATTING_SEND_TEMPLATE_URL(),
             {
                 number: recipientNumber,
                 template_id,

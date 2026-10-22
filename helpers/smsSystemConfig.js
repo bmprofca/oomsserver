@@ -5,7 +5,7 @@ import { normalizeFast2SmsRoute, maskFast2SmsAuthToken } from "./fast2sms.js";
 
 /**
  * Platform Fast2SMS config for OOMS System SMS channel only.
- * OTP continues to use sms_company_fast2sms_config / env.
+ * OTP uses the platform settings FAST2SMS_* / SMS_OTP_* (helpers/smsOtp.js).
  */
 
 export async function getSystemSmsConfigRow() {

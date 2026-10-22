@@ -5,7 +5,7 @@ import { checkSubscription, requirePlan } from "../middleware/auth.js";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA, FORMAT_DATE } from "../helpers/function.js";
-import { BASE_INVITATION_LINK, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
+import { getInvitationBaseLink, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
 import { buildBranchLogoUrl, buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
 import { resolveSoftwareUserByContact, STAFF_STATUS_OTP_TYPE } from "../helpers/authProfile.js";
@@ -257,7 +257,7 @@ function generateInvitationEmailHTML(invitationLink, staffName, designation, bra
             <p>This is an automated email from <strong>${APP_NAME}</strong></p>
             <p>Please do not reply to this email.</p>
             <p style="margin-top: 15px;">
-                <a href="${BASE_INVITATION_LINK}">Visit ${APP_NAME}</a>
+                <a href="${getInvitationBaseLink()}">Visit ${APP_NAME}</a>
             </p>
         </div>
     </div>
@@ -454,7 +454,7 @@ router.post('/create', auth, validateBranch, async (req, res) => {
             // Send invitation email if email is available
             if (userEmail) {
                 try {
-                    const invitationLink = `${BASE_INVITATION_LINK}/${invitation_token}`;
+                    const invitationLink = `${getInvitationBaseLink()}/${invitation_token}`;
                     const emailHTML = generateInvitationEmailHTML(
                         invitationLink,
                         userName,
@@ -489,7 +489,7 @@ router.post('/create', auth, validateBranch, async (req, res) => {
 
         // Include invitation link if token is available
         if (invitation_token) {
-            responseData.invitation_link = `${BASE_INVITATION_LINK}/${invitation_token}`;
+            responseData.invitation_link = `${getInvitationBaseLink()}/${invitation_token}`;
         }
 
         if (existingMap?.length) {

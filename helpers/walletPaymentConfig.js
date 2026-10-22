@@ -1,5 +1,6 @@
 import pool from "../db.js";
 import { UNIQUE_RANDOM_STRING } from "./function.js";
+import platformSettings from "./platformSettings.js";
 
 function trimStr(value) {
     return typeof value === "string" ? value.trim() : "";
@@ -61,19 +62,7 @@ export async function ensureWalletPaymentTables() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
-    // Fee columns on razorpay config (ignore if already present)
-    try {
-        await pool.query(`
-            ALTER TABLE razorpay_platform_config
-              ADD COLUMN gateway_fee_percent DECIMAL(8,4) NOT NULL DEFAULT 0 AFTER status
-        `);
-    } catch (_) {}
-    try {
-        await pool.query(`
-            ALTER TABLE razorpay_platform_config
-              ADD COLUMN gateway_fee_flat DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER gateway_fee_percent
-        `);
-    } catch (_) {}
+    // Fee / credit columns on razorpay_orders (ignore if already present)
     try {
         await pool.query(`
             ALTER TABLE razorpay_orders
@@ -88,30 +77,19 @@ export async function ensureWalletPaymentTables() {
     } catch (_) {}
 }
 
+/**
+ * Gateway fee for Razorpay wallet top-ups. Stored in platform_settings as
+ * RAZORPAY_GATEWAY_FEE_PERCENT / RAZORPAY_GATEWAY_FEE_FLAT (ADMIN → Settings → Razorpay).
+ */
 export async function getGatewayFeeSettings() {
     await ensureWalletPaymentTables();
-    try {
-        const [rows] = await pool.query(
-            `SELECT gateway_fee_percent, gateway_fee_flat
-             FROM razorpay_platform_config
-             ORDER BY id DESC
-             LIMIT 1`
-        );
-        const row = rows[0] || {};
-        return {
-            gateway_fee_percent: toNumber(row.gateway_fee_percent, 0),
-            gateway_fee_flat: toNumber(row.gateway_fee_flat, 0),
-        };
-    } catch (error) {
-        if (error?.code === "ER_BAD_FIELD_ERROR" || error?.code === "ER_NO_SUCH_TABLE") {
-            return { gateway_fee_percent: 0, gateway_fee_flat: 0 };
-        }
-        throw error;
-    }
+    return {
+        gateway_fee_percent: Math.max(0, platformSettings.getNumber("RAZORPAY_GATEWAY_FEE_PERCENT", 0)),
+        gateway_fee_flat: Math.max(0, platformSettings.getNumber("RAZORPAY_GATEWAY_FEE_FLAT", 0)),
+    };
 }
 
 export async function updateGatewayFeeSettings(body = {}, actor = null) {
-    await ensureWalletPaymentTables();
     const percent = Math.max(0, toNumber(body.gateway_fee_percent, 0));
     const flat = Math.max(0, toNumber(body.gateway_fee_flat, 0));
     if (percent > 100) {
@@ -120,20 +98,14 @@ export async function updateGatewayFeeSettings(body = {}, actor = null) {
         throw err;
     }
 
-    const [rows] = await pool.query(
-        `SELECT config_id FROM razorpay_platform_config ORDER BY id DESC LIMIT 1`
-    );
-    if (!rows[0]) {
-        const err = new Error("Save Razorpay API keys first, then set gateway fees.");
-        err.status = 400;
-        throw err;
-    }
-
-    await pool.query(
-        `UPDATE razorpay_platform_config
-         SET gateway_fee_percent = ?, gateway_fee_flat = ?, modify_by = ?, modify_date = NOW()
-         WHERE config_id = ?`,
-        [percent, flat, actor, rows[0].config_id]
+    await platformSettings.update(
+        {
+            values: {
+                RAZORPAY_GATEWAY_FEE_PERCENT: String(percent),
+                RAZORPAY_GATEWAY_FEE_FLAT: String(flat),
+            },
+        },
+        actor
     );
 
     return {

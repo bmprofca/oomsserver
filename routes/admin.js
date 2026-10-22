@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA } from "../helpers/function.js";
-import { BASE_INVITATION_LINK, APP_NAME } from "../helpers/Config.js";
+import { getInvitationBaseLink, APP_NAME } from "../helpers/Config.js";
 import { buildProfileImageUrl } from "../helpers/mediaUrl.js";
 import { SendMail } from "../helpers/Mail.js";
 import { resolveSoftwareUserByContact } from "../helpers/authProfile.js";
@@ -338,7 +338,7 @@ router.post("/create", auth, validateBranch, requireBranchAdmin, requireBranchOw
 
             if (userEmail) {
                 try {
-                    const invitationLink = `${BASE_INVITATION_LINK}/${invitation_token}`;
+                    const invitationLink = `${getInvitationBaseLink()}/${invitation_token}`;
                     await SendMail({
                         to: userEmail,
                         subject: `You're Invited to Join ${APP_NAME}${branchName ? ` - ${branchName}` : ""} as Admin`,
@@ -363,7 +363,7 @@ router.post("/create", auth, validateBranch, requireBranchAdmin, requireBranchOw
         };
 
         if (invitation_token) {
-            responseData.invitation_link = `${BASE_INVITATION_LINK}/${invitation_token}`;
+            responseData.invitation_link = `${getInvitationBaseLink()}/${invitation_token}`;
         }
 
         if (existingMap?.length) {
@@ -466,7 +466,7 @@ router.post("/resend-invitation", auth, validateBranch, requireBranchAdmin, requ
             [invitation_token, modifiedBy, String(map_id).trim(), branch_id, BRANCH_MAPPING_TYPE]
         );
 
-        const invitationLink = `${BASE_INVITATION_LINK}/${invitation_token}`;
+        const invitationLink = `${getInvitationBaseLink()}/${invitation_token}`;
 
         try {
             await SendMail({

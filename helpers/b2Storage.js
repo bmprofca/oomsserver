@@ -3,11 +3,20 @@ import axios from "axios";
 import crypto from "crypto";
 import { RANDOM_STRING } from "./function.js";
 import { buildExpenseAttachmentUrl, buildProfileDocumentUrl } from "./mediaUrl.js";
+import { getPlatformSetting, getPlatformSettingNumber } from "./platformSettings.js";
 
-const B2_BUCKET = process.env.B2_BUCKET || "OOMS-CRM";
-const B2_ACCESS_KEY = process.env.B2_ACCESS_KEY || "";
-const B2_SECRET_KEY = process.env.B2_SECRET_KEY || "";
-const B2_DOWNLOAD_AUTH_TTL_SECONDS = Number(process.env.B2_DOWNLOAD_AUTH_TTL_SECONDS || 86400);
+/**
+ * Bucket and credentials are platform settings (ADMIN → Settings → Platform Settings),
+ * read at call time so a key rotation from the admin panel applies without a restart.
+ */
+const b2Bucket = () => String(getPlatformSetting("B2_BUCKET") || "").trim() || "OOMS-CRM";
+const b2AccessKey = () => String(getPlatformSetting("B2_ACCESS_KEY") || "").trim();
+const b2SecretKey = () => String(getPlatformSetting("B2_SECRET_KEY") || "").trim();
+const b2DownloadAuthTtlSeconds = () => {
+    const ttl = getPlatformSettingNumber("B2_DOWNLOAD_AUTH_TTL_SECONDS", 86400);
+    return ttl > 0 ? ttl : 86400;
+};
+const b2CredentialFingerprint = () => `${b2AccessKey()}:${b2SecretKey()}:${b2Bucket()}`;
 
 const MAX_DOCUMENT_SIZE = 50 * 1024 * 1024;
 const MAX_PROFILE_IMAGE_SIZE = 5 * 1024 * 1024;
@@ -52,14 +61,29 @@ let authCache = null;
 let bucketIdCache = null;
 
 function assertB2Credentials() {
-    if (!B2_ACCESS_KEY || !B2_SECRET_KEY) {
-        throw new Error("B2 storage credentials are not configured");
+    if (!b2AccessKey() || !b2SecretKey()) {
+        throw new Error("B2 storage credentials are not configured (Admin → Platform Settings)");
     }
 }
 
 function clearB2Cache() {
     authCache = null;
     bucketIdCache = null;
+}
+
+/**
+ * Used by the admin "Test connection" button: authorise with the saved credentials
+ * and confirm the bucket exists. Always bypasses the cache.
+ */
+export async function testB2Connection() {
+    clearB2Cache();
+    const bucketId = await getBucketId();
+    return {
+        bucket_name: b2Bucket(),
+        bucket_id: bucketId,
+        api_url: authCache?.apiUrl || null,
+        download_url: authCache?.downloadUrl || null,
+    };
 }
 
 async function b2Post(path, payload, retryOnAuth = true) {
@@ -82,11 +106,17 @@ async function b2Post(path, payload, retryOnAuth = true) {
 async function authorizeB2() {
     assertB2Credentials();
 
+    const fingerprint = b2CredentialFingerprint();
+    if (authCache && authCache.fingerprint !== fingerprint) {
+        // Credentials or bucket changed from the admin panel: drop the old session.
+        clearB2Cache();
+    }
+
     if (authCache && authCache.expiresAt > Date.now()) {
         return authCache;
     }
 
-    const credentials = Buffer.from(`${B2_ACCESS_KEY}:${B2_SECRET_KEY}`).toString("base64");
+    const credentials = Buffer.from(`${b2AccessKey()}:${b2SecretKey()}`).toString("base64");
     const response = await axios.get(B2_AUTHORIZE_URL, {
         headers: { Authorization: `Basic ${credentials}` },
         timeout: 15000,
@@ -98,6 +128,7 @@ async function authorizeB2() {
         downloadUrl: response.data.downloadUrl,
         accountId: response.data.accountId,
         expiresAt: Date.now() + 22 * 60 * 60 * 1000,
+        fingerprint,
     };
     bucketIdCache = null;
 
@@ -114,7 +145,7 @@ async function getBucketId() {
         `${auth.apiUrl}/b2api/v2/b2_list_buckets`,
         {
             accountId: auth.accountId,
-            bucketName: B2_BUCKET,
+            bucketName: b2Bucket(),
         },
         {
             headers: { Authorization: auth.authorizationToken },
@@ -124,7 +155,7 @@ async function getBucketId() {
 
     const bucket = response.data.buckets?.[0];
     if (!bucket?.bucketId) {
-        throw new Error(`B2 bucket not found: ${B2_BUCKET}`);
+        throw new Error(`B2 bucket not found: ${b2Bucket()}`);
     }
 
     bucketIdCache = bucket.bucketId;
@@ -222,12 +253,12 @@ async function downloadB2Object(objectKey, retryOnAuth = true) {
     const downloadAuth = await b2Post("/b2api/v2/b2_get_download_authorization", {
         bucketId,
         fileNamePrefix: objectKey,
-        validDurationInSeconds: Math.min(B2_DOWNLOAD_AUTH_TTL_SECONDS, 86400),
+        validDurationInSeconds: Math.min(b2DownloadAuthTtlSeconds(), 86400),
     });
 
     const authorizationToken = encodeURIComponent(downloadAuth.authorizationToken);
     const downloadUrl =
-        `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}` +
+        `${auth.downloadUrl}/file/${encodeURIComponent(b2Bucket())}/${encodedKey}` +
         `?Authorization=${authorizationToken}`;
 
     try {
@@ -360,13 +391,13 @@ async function getProfileImageAccessUrl(filename) {
     const downloadAuth = await b2Post("/b2api/v2/b2_get_download_authorization", {
         bucketId,
         fileNamePrefix: key,
-        validDurationInSeconds: B2_DOWNLOAD_AUTH_TTL_SECONDS,
+        validDurationInSeconds: b2DownloadAuthTtlSeconds(),
     });
 
     const encodedKey = encodeB2ObjectPath(key);
     const authorizationToken = encodeURIComponent(downloadAuth.authorizationToken);
 
-    return `${auth.downloadUrl}/file/${encodeURIComponent(B2_BUCKET)}/${encodedKey}?Authorization=${authorizationToken}`;
+    return `${auth.downloadUrl}/file/${encodeURIComponent(b2Bucket())}/${encodedKey}?Authorization=${authorizationToken}`;
 }
 
 async function downloadAndUploadProfileImage(imageUrl) {

@@ -1,25 +1,30 @@
 import axios from "axios";
 import pool from "../db.js";
+import { getPlatformSetting } from "./platformSettings.js";
 
-/** WhatsApp Web V2 API — see WhatsAppWebV2/docs.md */
-export const WHATSAPPWEB_BASE_URL = String(
-    process.env.WHATSAPPWEB_BASE_URL || ""
-).trim().replace(/\/$/, "");
+/**
+ * WhatsApp Web V2 API — see WhatsAppWebV2/docs.md
+ * Base URL and API key are platform settings (ADMIN → Settings → Platform Settings).
+ */
+export function getWhatsappWebBaseUrl() {
+    return String(getPlatformSetting("WHATSAPPWEB_BASE_URL") || "").trim().replace(/\/$/, "");
+}
 
 /** Required on every upstream JSON call (`x-api-key`). */
-export const WHATSAPPWEB_API_KEY = String(
-    process.env.WHATSAPPWEB_API_KEY || ""
-).trim();
+export function getWhatsappWebApiKey() {
+    return String(getPlatformSetting("WHATSAPPWEB_API_KEY") || "").trim();
+}
 
 function whatsappWebHeaders() {
-    if (!WHATSAPPWEB_API_KEY) {
+    const apiKey = getWhatsappWebApiKey();
+    if (!apiKey) {
         throw new Error(
-            "WHATSAPPWEB_API_KEY is not configured (required as x-api-key for WhatsApp Web V2)"
+            "WhatsApp Web gateway API key is not configured (Admin → Platform Settings)"
         );
     }
     return {
         "Content-Type": "application/json",
-        "x-api-key": WHATSAPPWEB_API_KEY,
+        "x-api-key": apiKey,
     };
 }
 
@@ -150,13 +155,14 @@ export async function resolveBranchSessionId(branch_id) {
 }
 
 export async function whatsappWebRequest(method, path, { data, params, validateStatus, timeout } = {}) {
-    if (!WHATSAPPWEB_BASE_URL) {
-        throw new Error("WHATSAPPWEB_BASE_URL is not configured");
+    const baseUrl = getWhatsappWebBaseUrl();
+    if (!baseUrl) {
+        throw new Error("WhatsApp Web gateway URL is not configured (Admin → Platform Settings)");
     }
 
     const config = {
         method,
-        url: `${WHATSAPPWEB_BASE_URL}${path}`,
+        url: `${baseUrl}${path}`,
         headers: whatsappWebHeaders(),
         params,
         timeout: timeout != null ? timeout : 30000,

@@ -1,12 +1,6 @@
 -- Gateway fee on Razorpay wallet top-ups + manual payment request banks/requests.
-
-ALTER TABLE `razorpay_platform_config`
-  ADD COLUMN `gateway_fee_percent` DECIMAL(8,4) NOT NULL DEFAULT 0
-    COMMENT 'Percent fee on net wallet credit (Razorpay only)'
-    AFTER `status`,
-  ADD COLUMN `gateway_fee_flat` DECIMAL(12,2) NOT NULL DEFAULT 0
-    COMMENT 'Flat fee in INR on Razorpay top-ups'
-    AFTER `gateway_fee_percent`;
+-- The fee percent / flat amount live in platform_settings (RAZORPAY_GATEWAY_FEE_PERCENT /
+-- RAZORPAY_GATEWAY_FEE_FLAT); see 20261022_platform_settings.sql.
 
 ALTER TABLE `razorpay_orders`
   ADD COLUMN `credit_amount` BIGINT NULL

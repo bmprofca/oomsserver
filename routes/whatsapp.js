@@ -4,7 +4,7 @@ import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
 import { TEMPLATELIST } from "../utils/WhatsAppTemplates.js";
 import {
-    WHATSAPPWEB_BASE_URL,
+    getWhatsappWebBaseUrl,
     clearBranchWhatsappWebSession,
     getBranchWhatsappWebSession,
     handleWhatsappWebAxiosError,
@@ -51,30 +51,32 @@ import {
     normalizeMobileDigits,
 } from "../helpers/clientPhone.js";
 
-const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
-    .trim()
-    .replace(/\/$/, "");
-const ONECHATTING_CHAT_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-list`;
-const ONECHATTING_CHAT_HISTORY_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-history`;
-const ONECHATTING_CHAT_ASSIGN_PERMISSION_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign-permission`;
-const ONECHATTING_CHAT_ASSIGN_URL = `${ONECHATTING_BASE_URL}/developer/message/chat-assign`;
-const ONECHATTING_MARK_AS_READ_URL = `${ONECHATTING_BASE_URL}/developer/message/mark-as-read`;
-const ONECHATTING_MEDIA_LIST_URL = `${ONECHATTING_BASE_URL}/developer/message/media-list`;
-const ONECHATTING_SEND_TEXT_URL = `${ONECHATTING_BASE_URL}/developer/message/send-text-message`;
-const ONECHATTING_SEND_IMAGE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-image-message`;
-const ONECHATTING_SEND_VIDEO_URL = `${ONECHATTING_BASE_URL}/developer/message/send-video-message`;
-const ONECHATTING_SEND_DOCUMENT_URL = `${ONECHATTING_BASE_URL}/developer/message/send-document-message`;
-const ONECHATTING_SEND_AUDIO_URL = `${ONECHATTING_BASE_URL}/developer/message/send-audio-message`;
-const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
-const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
-const ONECHATTING_TEMPLATE_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/template/template-details`;
-const ONECHATTING_CAMPAIGN_CREATE_URL = `${ONECHATTING_BASE_URL}/developer/campaign/create`;
-const ONECHATTING_CAMPAIGN_LIST_URL = `${ONECHATTING_BASE_URL}/developer/campaign/list`;
-const ONECHATTING_CAMPAIGN_DETAILS_URL = `${ONECHATTING_BASE_URL}/developer/campaign/details`;
-const ONECHATTING_CAMPAIGN_MESSAGES_URL = `${ONECHATTING_BASE_URL}/developer/campaign/messages`;
-const ONECHATTING_CAMPAIGN_DELETE_URL = `${ONECHATTING_BASE_URL}/developer/campaign/delete`;
-const ONECHATTING_CONTACT_BULK_UPSERT_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert`;
-const ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL = `${ONECHATTING_BASE_URL}/developer/contact/bulk-upsert-status`;
+import { getPlatformSetting } from "../helpers/platformSettings.js";
+
+/** OneChatting base URL is a platform setting (ADMIN → Platform Settings); build URLs at call time. */
+const onechattingUrl = (path) =>
+    `${String(getPlatformSetting("ONECHATTING_BASE_URL") || "").trim().replace(/\/$/, "")}${path}`;
+const ONECHATTING_CHAT_LIST_URL = () => onechattingUrl("/developer/message/chat-list");
+const ONECHATTING_CHAT_HISTORY_URL = () => onechattingUrl("/developer/message/chat-history");
+const ONECHATTING_CHAT_ASSIGN_PERMISSION_URL = () => onechattingUrl("/developer/message/chat-assign-permission");
+const ONECHATTING_CHAT_ASSIGN_URL = () => onechattingUrl("/developer/message/chat-assign");
+const ONECHATTING_MARK_AS_READ_URL = () => onechattingUrl("/developer/message/mark-as-read");
+const ONECHATTING_MEDIA_LIST_URL = () => onechattingUrl("/developer/message/media-list");
+const ONECHATTING_SEND_TEXT_URL = () => onechattingUrl("/developer/message/send-text-message");
+const ONECHATTING_SEND_IMAGE_URL = () => onechattingUrl("/developer/message/send-image-message");
+const ONECHATTING_SEND_VIDEO_URL = () => onechattingUrl("/developer/message/send-video-message");
+const ONECHATTING_SEND_DOCUMENT_URL = () => onechattingUrl("/developer/message/send-document-message");
+const ONECHATTING_SEND_AUDIO_URL = () => onechattingUrl("/developer/message/send-audio-message");
+const ONECHATTING_SEND_TEMPLATE_URL = () => onechattingUrl("/developer/message/send-template");
+const ONECHATTING_TEMPLATE_LIST_URL = () => onechattingUrl("/developer/template/template-list");
+const ONECHATTING_TEMPLATE_DETAILS_URL = () => onechattingUrl("/developer/template/template-details");
+const ONECHATTING_CAMPAIGN_CREATE_URL = () => onechattingUrl("/developer/campaign/create");
+const ONECHATTING_CAMPAIGN_LIST_URL = () => onechattingUrl("/developer/campaign/list");
+const ONECHATTING_CAMPAIGN_DETAILS_URL = () => onechattingUrl("/developer/campaign/details");
+const ONECHATTING_CAMPAIGN_MESSAGES_URL = () => onechattingUrl("/developer/campaign/messages");
+const ONECHATTING_CAMPAIGN_DELETE_URL = () => onechattingUrl("/developer/campaign/delete");
+const ONECHATTING_CONTACT_BULK_UPSERT_URL = () => onechattingUrl("/developer/contact/bulk-upsert");
+const ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL = () => onechattingUrl("/developer/contact/bulk-upsert-status");
 const ONECHATTING_CAMPAIGN_MAX_NUMBERS = 10000;
 /** Soft payload ceiling (~18MB) under OneChatting's 20MB limit. */
 const ONECHATTING_BULK_UPSERT_MAX_BYTES =
@@ -866,7 +868,7 @@ async function pollOneChattingBulkUpsertStatus(developerToken, jobId, {
     let lastPayload = null;
 
     while (Date.now() - started < timeoutMs) {
-        const response = await axios.get(ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL, {
+        const response = await axios.get(ONECHATTING_CONTACT_BULK_UPSERT_STATUS_URL(), {
             headers: { token: developerToken },
             params: { job_id: jobId },
             timeout: 30000,
@@ -1385,7 +1387,7 @@ router.post("/onechatting/sync-clients", auth, validateBranch, async (req, res) 
         for (let index = 0; index < chunks.length; index += 1) {
             const chunk = chunks[index];
             const upsertResponse = await axios.post(
-                ONECHATTING_CONTACT_BULK_UPSERT_URL,
+                ONECHATTING_CONTACT_BULK_UPSERT_URL(),
                 { contacts: chunk },
                 {
                     headers: {
@@ -1490,7 +1492,7 @@ router.get("/onechatting/chat-list", auth, validateBranch, async (req, res) => {
             params.search = search;
         }
 
-        const response = await axios.get(ONECHATTING_CHAT_LIST_URL, {
+        const response = await axios.get(ONECHATTING_CHAT_LIST_URL(), {
             headers: {
                 token: mapping.onechatting_token,
             },
@@ -1562,7 +1564,7 @@ router.get("/onechatting/chat-history", auth, validateBranch, async (req, res) =
             });
         }
 
-        const response = await axios.get(ONECHATTING_CHAT_HISTORY_URL, {
+        const response = await axios.get(ONECHATTING_CHAT_HISTORY_URL(), {
             headers: {
                 token: mapping.onechatting_token,
             },
@@ -1653,7 +1655,7 @@ router.get("/onechatting/chat-assign-permission", auth, validateBranch, async (r
             params.number = number;
         }
 
-        const response = await axios.get(ONECHATTING_CHAT_ASSIGN_PERMISSION_URL, {
+        const response = await axios.get(ONECHATTING_CHAT_ASSIGN_PERMISSION_URL(), {
             headers: {
                 token: resolved.token,
             },
@@ -1746,7 +1748,7 @@ router.post("/onechatting/chat-assign", auth, validateBranch, async (req, res) =
                 let users = [];
                 try {
                     const permRes = await axios.get(
-                        ONECHATTING_CHAT_ASSIGN_PERMISSION_URL,
+                        ONECHATTING_CHAT_ASSIGN_PERMISSION_URL(),
                         {
                             headers: { token: resolved.token },
                             params: { number },
@@ -1784,7 +1786,7 @@ router.post("/onechatting/chat-assign", auth, validateBranch, async (req, res) =
             body.target = resolvedTarget;
         }
 
-        const response = await axios.post(ONECHATTING_CHAT_ASSIGN_URL, body, {
+        const response = await axios.post(ONECHATTING_CHAT_ASSIGN_URL(), body, {
             headers: {
                 token: resolved.token,
                 "Content-Type": "application/json",
@@ -1819,7 +1821,7 @@ router.post("/onechatting/mark-as-read", auth, validateBranch, async (req, res) 
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_MARK_AS_READ_URL,
+            ONECHATTING_MARK_AS_READ_URL(),
             resolved.token,
             req.body,
             res
@@ -1851,7 +1853,7 @@ router.post("/onechatting/media-list", auth, validateBranch, async (req, res) =>
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_MEDIA_LIST_URL,
+            ONECHATTING_MEDIA_LIST_URL(),
             resolved.token,
             body,
             res
@@ -1986,7 +1988,7 @@ router.post("/onechatting/send-text-message", auth, validateBranch, async (req, 
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_TEXT_URL,
+            ONECHATTING_SEND_TEXT_URL(),
             resolved.token,
             req.body,
             res
@@ -2006,7 +2008,7 @@ router.post("/onechatting/send-image-message", auth, validateBranch, async (req,
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_IMAGE_URL,
+            ONECHATTING_SEND_IMAGE_URL(),
             resolved.token,
             req.body,
             res
@@ -2026,7 +2028,7 @@ router.post("/onechatting/send-video-message", auth, validateBranch, async (req,
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_VIDEO_URL,
+            ONECHATTING_SEND_VIDEO_URL(),
             resolved.token,
             req.body,
             res
@@ -2046,7 +2048,7 @@ router.post("/onechatting/send-document-message", auth, validateBranch, async (r
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_DOCUMENT_URL,
+            ONECHATTING_SEND_DOCUMENT_URL(),
             resolved.token,
             req.body,
             res
@@ -2066,7 +2068,7 @@ router.post("/onechatting/send-audio-message", auth, validateBranch, async (req,
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_AUDIO_URL,
+            ONECHATTING_SEND_AUDIO_URL(),
             resolved.token,
             req.body,
             res
@@ -2086,7 +2088,7 @@ router.post("/onechatting/send-template", auth, validateBranch, async (req, res)
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_SEND_TEMPLATE_URL,
+            ONECHATTING_SEND_TEMPLATE_URL(),
             resolved.token,
             req.body,
             res
@@ -2118,7 +2120,7 @@ router.get("/onechatting/template-list", auth, validateBranch, async (req, res) 
         }
 
         return await proxyOneChattingTemplateGet(
-            ONECHATTING_TEMPLATE_LIST_URL,
+            ONECHATTING_TEMPLATE_LIST_URL(),
             resolved.developer_token,
             params,
             res
@@ -2145,7 +2147,7 @@ router.get("/onechatting/template-details", auth, validateBranch, async (req, re
         }
 
         return await proxyOneChattingTemplateGet(
-            ONECHATTING_TEMPLATE_DETAILS_URL,
+            ONECHATTING_TEMPLATE_DETAILS_URL(),
             resolved.developer_token,
             { template_id },
             res
@@ -2323,7 +2325,7 @@ async function createOneChattingCampaignInternal({
         body.schedule_date = trimmedSchedule;
     }
 
-    const response = await axios.post(ONECHATTING_CAMPAIGN_CREATE_URL, body, {
+    const response = await axios.post(ONECHATTING_CAMPAIGN_CREATE_URL(), body, {
         headers: {
             token: resolved.developer_token,
             "Content-Type": "application/json",
@@ -2567,7 +2569,7 @@ router.get("/onechatting/campaign/list", auth, validateBranch, async (req, res) 
         }
 
         return await proxyOneChattingGet(
-            ONECHATTING_CAMPAIGN_LIST_URL,
+            ONECHATTING_CAMPAIGN_LIST_URL(),
             resolved.developer_token,
             { page_no, limit, status: status || "all" },
             res
@@ -2596,7 +2598,7 @@ router.get("/onechatting/campaign/details", auth, validateBranch, async (req, re
         }
 
         return await proxyOneChattingGet(
-            ONECHATTING_CAMPAIGN_DETAILS_URL,
+            ONECHATTING_CAMPAIGN_DETAILS_URL(),
             resolved.developer_token,
             { campaign_id },
             res
@@ -2628,7 +2630,7 @@ router.get("/onechatting/campaign/messages", auth, validateBranch, async (req, r
         }
 
         return await proxyOneChattingGet(
-            ONECHATTING_CAMPAIGN_MESSAGES_URL,
+            ONECHATTING_CAMPAIGN_MESSAGES_URL(),
             resolved.developer_token,
             { campaign_id, page_no, limit, status: status || "all" },
             res
@@ -2657,7 +2659,7 @@ router.post("/onechatting/campaign/delete", auth, validateBranch, async (req, re
         }
 
         return await proxyOneChattingPost(
-            ONECHATTING_CAMPAIGN_DELETE_URL,
+            ONECHATTING_CAMPAIGN_DELETE_URL(),
             resolved.developer_token,
             { campaign_id },
             res
@@ -3029,7 +3031,7 @@ router.put("/wp-system/template-map/unset", auth, validateBranch, async (req, re
     }
 });
 
-// ENDPOINTS FOR WHATSAPP WEB V2 (QR-only; proxies to WHATSAPPWEB_BASE_URL)
+// ENDPOINTS FOR WHATSAPP WEB V2 (QR-only; proxies to the WhatsApp Web gateway URL from platform settings)
 
 router.get("/whatsappweb/health", auth, validateBranch, async (req, res) => {
     try {
@@ -3569,7 +3571,7 @@ router.get("/whatsappweb/socket-config", auth, validateBranch, async (req, res) 
             success: true,
             message: "WhatsApp Web socket configuration retrieved successfully",
             data: {
-                url: WHATSAPPWEB_BASE_URL,
+                url: getWhatsappWebBaseUrl(),
                 sessionId: branchSession.sessionId,
                 events: {
                     listen: [

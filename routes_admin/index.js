@@ -15,6 +15,8 @@ import websiteLegalRoutes from "./websiteLegal.js";
 import accountDeletionRoutes from "./accountDeletion.js";
 import dashboardRoutes from "./dashboard.js";
 import invoiceFormatRoutes from "./invoiceFormats.js";
+import platformSettingsRoutes from "./platformSettings.js";
+import smsCompanyRoutes from "./smsCompany.js";
 
 const router = express.Router();
 
@@ -34,5 +36,7 @@ router.use("/website-contact", websiteContactRoutes);
 router.use("/website-legal", websiteLegalRoutes);
 router.use("/account-deletion", accountDeletionRoutes);
 router.use("/invoice-formats", invoiceFormatRoutes);
+router.use("/platform-settings", platformSettingsRoutes);
+router.use("/sms-company", smsCompanyRoutes);
 
 export default router;

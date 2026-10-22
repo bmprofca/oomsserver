@@ -7,7 +7,7 @@
 ## Mental model
 
 ```
-razorpay_platform_config     → keys + fee %
+platform_settings RAZORPAY_* → keys, status, fee % / flat (helpers/razorpayConfig.js, walletPaymentConfig.js)
 wallet_* / razorpay_orders   → gateway recharge
 wallet_payment_banks         → admin banks for manual transfer
 wallet_payment_requests      → user UTR requests (approve → credit, no fee)
@@ -21,7 +21,7 @@ Key areas: `routes` / `routes_admin` wallet + razorpay modules, `helpers` for fe
 
 - Gateway fee from platform config on Razorpay recharge path.
 - **Payment request approval credits wallet without gateway fee.**
-- Prefer DB-stored Razorpay credentials over hardcoded/env-only after admin save.
+- Razorpay keys and fees are platform settings (`platform_settings`), never hardcoded or env-only; see `context/platform-settings.md`.
 
 ---
 

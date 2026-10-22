@@ -6,11 +6,13 @@ import { getTemplateBySystemName } from "../services/whatsappWebTemplateMappingS
 import { sendOomsSystemTemplateMessage } from "../services/wpSystemWhatsappSendService.js";
 import { resolveComponentMedia, walkMediaLinks } from "./onechattingTemplateMedia.js";
 
-const ONECHATTING_BASE_URL = String(process.env.ONECHATTING_BASE_URL || "")
-    .trim()
-    .replace(/\/$/, "");
-const ONECHATTING_SEND_TEMPLATE_URL = `${ONECHATTING_BASE_URL}/developer/message/send-template`;
-const ONECHATTING_TEMPLATE_LIST_URL = `${ONECHATTING_BASE_URL}/developer/template/template-list`;
+import { getPlatformSetting } from "./platformSettings.js";
+
+/** OneChatting base URL is a platform setting; build URLs at call time. */
+const onechattingUrl = (path) =>
+    `${String(getPlatformSetting("ONECHATTING_BASE_URL") || "").trim().replace(/\/$/, "")}${path}`;
+const ONECHATTING_SEND_TEMPLATE_URL = () => onechattingUrl("/developer/message/send-template");
+const ONECHATTING_TEMPLATE_LIST_URL = () => onechattingUrl("/developer/template/template-list");
 
 const TASK_CREATE_TEMPLATE_NAME = "task create";
 const TASK_COMPLETE_TEMPLATE_NAME = "task complete";
@@ -196,7 +198,7 @@ async function resolveOnechattingTemplateId(developerToken, templateName) {
     const limit = 100;
 
     while (page_no <= 50) {
-        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL, {
+        const response = await axios.get(ONECHATTING_TEMPLATE_LIST_URL(), {
             headers: { token: developerToken },
             params: { status: "APPROVED", page_no, limit },
         });
@@ -530,7 +532,7 @@ function applyHeaderMediaOverride(component, media = {}) {
 async function sendOnechattingTemplateMessage({ token, number, template_id, component }) {
     try {
         await axios.post(
-            ONECHATTING_SEND_TEMPLATE_URL,
+            ONECHATTING_SEND_TEMPLATE_URL(),
             { number, template_id, component },
             {
                 headers: {

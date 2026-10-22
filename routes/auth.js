@@ -2,7 +2,7 @@ import express from "express";
 const router = express.Router();
 import pool from "../db.js";
 import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
-import { GOOGLE_CLIENT_ID } from "../helpers/Config.js";
+import { getGoogleClientId } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
 import { generateOtp } from "../helpers/otp.js";
 import { sendSmsOtp } from "../helpers/smsOtp.js";
@@ -975,10 +975,14 @@ router.post('/google-auth', async (req, res) => {
             return res.status(400).json({ success: false, message: "Token missing" });
         }
 
-        const client = new OAuth2Client(GOOGLE_CLIENT_ID);
+        const googleClientId = getGoogleClientId();
+        if (!googleClientId) {
+            return res.status(503).json({ success: false, message: "Google sign-in is not configured (Admin → Platform Settings)" });
+        }
+        const client = new OAuth2Client(googleClientId);
         const ticket = await client.verifyIdToken({
             idToken: google_token,
-            audience: GOOGLE_CLIENT_ID
+            audience: googleClientId
         });
 
         const payload = ticket.getPayload();

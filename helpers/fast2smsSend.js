@@ -1,12 +1,14 @@
 import axios from "axios";
 import { normalizeFast2SmsRoute } from "./fast2sms.js";
 import { sanitizeVariablesValuesForDlt } from "./smsCampaignVariables.js";
+import { getPlatformSetting } from "./platformSettings.js";
 
-export const FAST2SMS_API_URL =
-    process.env.FAST2SMS_API_URL || "https://www.fast2sms.com/dev/bulkV2";
+/** Fast2SMS endpoints are platform settings (ADMIN → Settings → Platform Settings), read at call time. */
+export const getFast2SmsApiUrl = () =>
+    String(getPlatformSetting("FAST2SMS_API_URL") || "").trim() || "https://www.fast2sms.com/dev/bulkV2";
 
-export const FAST2SMS_WALLET_URL =
-    process.env.FAST2SMS_WALLET_URL || "https://www.fast2sms.com/dev/wallet";
+export const getFast2SmsWalletUrl = () =>
+    String(getPlatformSetting("FAST2SMS_WALLET_URL") || "").trim() || "https://www.fast2sms.com/dev/wallet";
 
 /**
  * Send SMS via Fast2SMS bulkV2 (GET query params + Authorization header).
@@ -77,7 +79,7 @@ export async function sendFast2Sms({
         if (!params.message) throw new Error("Message text is required for Quick SMS");
     }
 
-    const response = await axios.get(FAST2SMS_API_URL, {
+    const response = await axios.get(getFast2SmsApiUrl(), {
         headers: { Authorization: token },
         params,
         timeout: 60000,
@@ -108,7 +110,7 @@ export async function fetchFast2SmsWallet(authToken) {
     const token = String(authToken || "").trim();
     if (!token) throw new Error("Fast2SMS authorization token is required");
 
-    const response = await axios.get(FAST2SMS_WALLET_URL, {
+    const response = await axios.get(getFast2SmsWalletUrl(), {
         headers: { Authorization: token },
         timeout: 30000,
         validateStatus: () => true,

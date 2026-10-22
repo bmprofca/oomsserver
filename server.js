@@ -18,6 +18,7 @@ import { startSmsCampaignCron } from "./cron/smsCampaignCron.js";
 import { startEmailBroadcastScheduleCron } from "./cron/emailBroadcastScheduleCron.js";
 import publicRoutes from "./routes_public/index.js";
 import mediaProxyHandler from "./routes/mediaProxy.js";
+import { loadPlatformSettings } from "./helpers/platformSettings.js";
 import {
     resolveVoiceCallCapability,
     reconcileVoiceCallsAfterSocketDisconnect,
@@ -102,7 +103,11 @@ const WsIo = setupSocketIO(
 );
 
 
-server.listen(PORT, '0.0.0.0', () => {
+// Integration URLs/keys (B2, OneChatting, WhatsApp Web, OneSaaS, Google, GST rate) live in the
+// platform_settings table. Warm the cache before accepting traffic; failures fall back to defaults.
+await loadPlatformSettings();
+
+server.listen(PORT, "0.0.0.0", () => {
     const accessUrl = process.env.BASE_DOMAIN || `http://localhost:${PORT}`;
     console.log("OOMS API started");
     console.log(`Access: ${accessUrl}`);

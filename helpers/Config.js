@@ -1,13 +1,22 @@
 import "dotenv/config";
 import { DSC_COMPANY_SEED as DSC_COMPANIES, DSC_TYPE_SEED as DSC_TYPES } from "./dscCatalog.js";
+import { getPlatformSetting } from "./platformSettings.js";
 
 const APP_NAME = process.env.APP_NAME || "OOMS";
 const BASE_DOMAIN = process.env.BASE_DOMAIN || "https://server.ooms.in";
-const GOOGLE_CLIENT_ID =
-    process.env.GOOGLE_CLIENT_ID ||
-    "706030491156-5rq848qm4eih47h29675u6pdv11m8kvq.apps.googleusercontent.com";
-const BASE_INVITATION_LINK =
-    process.env.BASE_INVITATION_LINK || "https://ooms-v4.vercel.com/invitation";
+
+/**
+ * Google OAuth client ID and the invitation base link are platform settings
+ * (ADMIN → Settings → Platform Settings), not .env values. Read them at call time
+ * so admin changes apply without a restart.
+ */
+function getGoogleClientId() {
+    return String(getPlatformSetting("GOOGLE_CLIENT_ID") || "").trim();
+}
+
+function getInvitationBaseLink() {
+    return String(getPlatformSetting("BASE_INVITATION_LINK") || "").trim().replace(/\/+$/, "");
+}
 
 const DOCUMENT_RESERVED_CATEGORIES = [
     {
@@ -30,9 +39,9 @@ const DOCUMENT_RESERVED_CATEGORIES = [
 
 export {
     BASE_DOMAIN,
-    GOOGLE_CLIENT_ID,
     APP_NAME,
-    BASE_INVITATION_LINK,
+    getGoogleClientId,
+    getInvitationBaseLink,
     DOCUMENT_RESERVED_CATEGORIES,
     DSC_COMPANIES,
     DSC_TYPES,

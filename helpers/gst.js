@@ -1,18 +1,24 @@
+import { getPlatformSetting } from "./platformSettings.js";
+
 /**
  * Branch-level GST resolution.
  *
  * GST applies only when branch_list.gst_applicable = '1'
  * AND the document date is on/after branch_list.gst_applicable_after.
- * Rate always comes from process.env.TAX_RATE (never from client or dropped DB columns).
+ * Rate always comes from the platform setting TAX_RATE (ADMIN → Platform Settings),
+ * never from the client or dropped DB columns.
  */
 
 const round2 = (n) => Number(Number(n || 0).toFixed(2));
 
-/** @returns {number} */
-export function getTaxRateFromEnv() {
-    const rate = Number(process.env.TAX_RATE);
+/** Platform GST rate in percent. @returns {number} */
+export function getTaxRate() {
+    const rate = Number(getPlatformSetting("TAX_RATE"));
     return Number.isFinite(rate) && rate >= 0 ? rate : 0;
 }
+
+/** @deprecated use getTaxRate(); kept for existing imports. */
+export const getTaxRateFromEnv = getTaxRate;
 
 /**
  * Normalize any date-like value to YYYY-MM-DD (UTC date parts from Date, or first 10 chars of string).
@@ -124,6 +130,7 @@ export function resolveGstOnTaxable({
 }
 
 export default {
+    getTaxRate,
     getTaxRateFromEnv,
     toDateOnly,
     fetchBranchGstSettings,

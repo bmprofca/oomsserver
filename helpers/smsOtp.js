@@ -1,15 +1,15 @@
-import "dotenv/config";
-import pool from "../db.js";
-import { decrypt } from "../utils/smtpEncryption.js";
 import { normalizeMobileDigits } from "./clientPhone.js";
 import { normalizeFast2SmsRoute } from "./fast2sms.js";
 import { sendFast2Sms } from "./fast2smsSend.js";
+import { getPlatformSetting } from "./platformSettings.js";
+import { isCompanySmsConfigured } from "./smsCompanyConfig.js";
 
 /**
  * SMS architecture (two tiers):
  *
  * 1) Company / platform SMS  → login, register, portal OTP, account contact OTP
- *    Source: `sms_company_fast2sms_config` (DB) OR SERVER .env fallback
+ *    Source: platform_settings (FAST2SMS_AUTH_TOKEN, FAST2SMS_SENDER_ID, FAST2SMS_ENTITY_ID,
+ *            SMS_OTP_ROUTE, SMS_OTP_DLT_TEMPLATE_ID, SMS_OTP_STATUS) — ADMIN → OTP SMS Config
  *
  * 2) Branch SMS              → client / user notifications for that branch
  *    Source: `branch_list.sms_channel` + `sms_fast2sms_configs`
@@ -17,96 +17,38 @@ import { sendFast2Sms } from "./fast2smsSend.js";
  * Login OTP must NEVER use a branch Fast2SMS key.
  */
 
-function envCompanyConfig() {
-    const authToken = String(process.env.FAST2SMS_AUTH_TOKEN || "").trim();
-    const senderId = String(
-        process.env.FAST2SMS_SENDER_ID || process.env.SMS_OTP_SENDER_ID || ""
-    )
-        .trim()
-        .toUpperCase();
-    const route = normalizeFast2SmsRoute(
-        process.env.SMS_OTP_ROUTE || process.env.FAST2SMS_DEFAULT_ROUTE || "dlt"
-    );
-    const otpMessageId = String(
-        process.env.SMS_OTP_DLT_TEMPLATE_ID || process.env.SMS_OTP_MESSAGE_ID || ""
-    ).trim();
-    const entityId = String(process.env.FAST2SMS_ENTITY_ID || "").trim();
+function trimStr(value) {
+    return value == null ? "" : String(value).trim();
+}
+
+/** Sync read of the company OTP SMS config from the platform-settings cache. */
+export function getSystemSmsOtpConfig() {
+    const authToken = trimStr(getPlatformSetting("FAST2SMS_AUTH_TOKEN"));
+    const senderId = trimStr(getPlatformSetting("FAST2SMS_SENDER_ID")).toUpperCase();
+    const entityId = trimStr(getPlatformSetting("FAST2SMS_ENTITY_ID"));
+    const route = normalizeFast2SmsRoute(getPlatformSetting("SMS_OTP_ROUTE") || "dlt");
+    const otpMessageId = trimStr(getPlatformSetting("SMS_OTP_DLT_TEMPLATE_ID"));
+    const status = trimStr(getPlatformSetting("SMS_OTP_STATUS")).toLowerCase() === "inactive" ? "inactive" : "active";
 
     return {
-        source: "env",
+        source: "platform_settings",
         authToken,
         senderId,
         entityId,
         route,
         otpMessageId,
-        configured: Boolean(
-            authToken && (route === "q" || (otpMessageId && senderId))
-        ),
+        status,
+        configured: isCompanySmsConfigured({ authToken, route, otpMessageId, senderId, status }),
     };
 }
 
-async function dbCompanyConfig() {
-    try {
-        const [rows] = await pool.query(
-            `SELECT config_id, auth_token_encrypted, sender_id, entity_id, route,
-                    otp_dlt_message_id, status
-             FROM sms_company_fast2sms_config
-             WHERE status = 'active'
-             ORDER BY id DESC
-             LIMIT 1`
-        );
-        const row = rows[0];
-        if (!row?.auth_token_encrypted) return null;
-
-        const authToken = decrypt(row.auth_token_encrypted);
-        if (!authToken) return null;
-
-        const route = normalizeFast2SmsRoute(row.route);
-        const senderId = String(row.sender_id || "").trim().toUpperCase();
-        const otpMessageId = String(row.otp_dlt_message_id || "").trim();
-        const entityId = String(row.entity_id || "").trim();
-
-        return {
-            source: "database",
-            config_id: row.config_id,
-            authToken,
-            senderId,
-            entityId,
-            route,
-            otpMessageId,
-            configured: Boolean(
-                authToken && (route === "q" || (otpMessageId && senderId))
-            ),
-        };
-    } catch (error) {
-        // Table may not exist yet during rollout — fall back to env.
-        if (error?.code === "ER_NO_SUCH_TABLE") return null;
-        console.error("COMPANY SMS CONFIG DB READ ERROR:", error?.message || error);
-        return null;
-    }
-}
-
-/**
- * Resolve company Fast2SMS for OTP: DB active row first, then .env.
- */
+/** Resolve company Fast2SMS for OTP. Kept async for callers that await it. */
 export async function resolveCompanySmsConfig() {
-    const fromDb = await dbCompanyConfig();
-    if (fromDb?.configured) return fromDb;
-
-    const fromEnv = envCompanyConfig();
-    if (fromEnv.configured) return fromEnv;
-
-    // Return best partial for clearer errors
-    return fromDb || fromEnv;
-}
-
-/** Sync env-only peek (tests / health). Prefer resolveCompanySmsConfig() for sends. */
-export function getSystemSmsOtpConfig() {
-    return envCompanyConfig();
+    return getSystemSmsOtpConfig();
 }
 
 /**
- * Send OTP via company SMS (DB or env). Not branch config.
+ * Send OTP via company SMS. Not branch config.
  */
 export async function sendSmsOtp({ mobile, otp, country_code } = {}) {
     const normalizedMobile = normalizeMobileDigits(mobile);
@@ -121,20 +63,19 @@ export async function sendSmsOtp({ mobile, otp, country_code } = {}) {
 
     const config = await resolveCompanySmsConfig();
 
+    if (config.status === "inactive") {
+        throw new Error("OTP SMS is inactive. Enable it in Admin → Settings → OTP SMS Config.");
+    }
     if (!config.authToken) {
         throw new Error(
-            "Company SMS is not configured. Set sms_company_fast2sms_config or FAST2SMS_AUTH_TOKEN in .env."
+            "Company SMS is not configured. Set the Fast2SMS authorization token in Admin → Settings → OTP SMS Config."
         );
     }
     if (!config.otpMessageId && config.route !== "q") {
-        throw new Error(
-            "Company OTP template is not configured (otp_dlt_message_id / SMS_OTP_DLT_TEMPLATE_ID)."
-        );
+        throw new Error("Company OTP template is not configured (OTP DLT message ID).");
     }
     if (!config.senderId && config.route !== "q") {
-        throw new Error(
-            "Company SMS sender ID is not configured (sender_id / FAST2SMS_SENDER_ID)."
-        );
+        throw new Error("Company SMS sender ID is not configured.");
     }
 
     const message =

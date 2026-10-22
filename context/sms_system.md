@@ -1,6 +1,6 @@
 # OOMS System SMS — Server context
 
-> **Purpose:** Platform-owned Fast2SMS channel for branches that do not have their own DLT / Fast2SMS account. Separate from OTP company SMS (`sms_company_fast2sms_config`).
+> **Purpose:** Platform-owned Fast2SMS channel for branches that do not have their own DLT / Fast2SMS account. Separate from OTP company SMS (platform_settings `FAST2SMS_*` / `SMS_OTP_*`, see `context/platform-settings.md`).
 
 ---
 
