@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import PDFDocument from "pdfkit";
+import { performance } from "node:perf_hooks";
 import pool from "../db.js";
 import { UNIQUE_RANDOM_STRING } from "../helpers/function.js";
 import { getConfigWithDecryptedPassword } from "./emailConfigService.js";
@@ -246,12 +247,24 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
     const cutoff = meta.inactivity_cutoff_date;
     const sections = {};
     const totals = {};
+    const sectionTasks = [];
+    const sectionTimings = {};
+    const reportStartedAt = performance.now();
+    const scheduleSection = (key, task) => sectionTasks.push(async () => {
+        const startedAt = performance.now();
+        try {
+            await task();
+        } finally {
+            sectionTimings[key] = Math.round(performance.now() - startedAt);
+        }
+    });
+    const branchNamePromise = getBranchName(branchId);
     const requestedSections = Array.isArray(filters.sections) && filters.sections.length
         ? new Set(filters.sections)
         : null;
     const enabled = (key) => config.sections[key]?.enabled !== false && (!requestedSections || requestedSections.has(key));
 
-    if (enabled("tasks_completed")) {
+    if (enabled("tasks_completed")) scheduleSection("tasks_completed", async () => {
         const [rows] = await pool.query(
             `SELECT t.complete_by AS username,
                     COALESCE(MAX(NULLIF(TRIM(p.name), '')), t.complete_by, 'Unassigned') AS staff_name,
@@ -278,9 +291,9 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             completed_count: integer(row.completed_count),
         })) };
         totals.tasks_completed = sections.tasks_completed.rows.reduce((sum, row) => sum + row.completed_count, 0);
-    }
+    });
 
-    if (enabled("new_tasks")) {
+    if (enabled("new_tasks")) scheduleSection("new_tasks", async () => {
         const [rows] = await pool.query(
             `SELECT t.create_by AS username,
                     COALESCE(MAX(p.name), t.create_by, 'Unknown') AS staff_name,
@@ -298,9 +311,9 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             new_task_count: integer(row.new_task_count),
         })) };
         totals.new_tasks = sections.new_tasks.rows.reduce((sum, row) => sum + row.new_task_count, 0);
-    }
+    });
 
-    if (enabled("sales")) {
+    if (enabled("sales")) scheduleSection("sales", async () => {
         const [rows] = await pool.query(
             `SELECT se.create_by AS username,
                     COALESCE(MAX(p.name), se.create_by, 'Unknown') AS staff_name,
@@ -320,9 +333,9 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             sale_amount: number(row.sale_amount),
         })) };
         totals.sales = sections.sales.rows.reduce((sum, row) => sum + row.sale_amount, 0);
-    }
+    });
 
-    if (enabled("collections")) {
+    if (enabled("collections")) scheduleSection("collections", async () => {
         const [rows] = await pool.query(
             `SELECT t.create_by AS username,
                     COALESCE(MAX(p.name), t.create_by, 'Unknown') AS staff_name,
@@ -344,9 +357,9 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             collection_amount: number(row.collection_amount),
         })) };
         totals.collections = sections.collections.rows.reduce((sum, row) => sum + row.collection_amount, 0);
-    }
+    });
 
-    if (enabled("expenses")) {
+    if (enabled("expenses")) scheduleSection("expenses", async () => {
         const [rows] = await pool.query(
             `SELECT ee.create_by AS username,
                     COALESCE(MAX(p.name), ee.create_by, 'Unknown') AS staff_name,
@@ -366,18 +379,13 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             expense_amount: number(row.expense_amount),
         })) };
         totals.expenses = sections.expenses.rows.reduce((sum, row) => sum + row.expense_amount, 0);
-    }
+    });
 
-    if (enabled("unpaid_debtors")) {
+    if (enabled("unpaid_debtors")) scheduleSection("unpaid_debtors", async () => {
         const sort = config.sections.unpaid_debtors.sort;
         const clientNameExpression = "COALESCE(MAX(p.name), c.username)";
-        const outstandingExpression = `COALESCE(SUM(CASE
-                        WHEN t.party2_type = 'client' THEN ABS(t.amount)
-                        WHEN t.party1_type = 'client' THEN -ABS(t.amount)
-                        ELSE 0 END), 0)`;
-        const lastPaymentExpression = `MAX(CASE WHEN t.party1_type = 'client'
-                              AND LOWER(COALESCE(t.transaction_type, '')) IN ('receive','received')
-                             THEN t.transaction_date END)`;
+        const outstandingExpression = "COALESCE(SUM(t.outstanding_amount), 0)";
+        const lastPaymentExpression = "MAX(t.last_payment_date)";
         const orderBy = sort === "last_payment_asc"
             ? `(${lastPaymentExpression} IS NULL) DESC, ${lastPaymentExpression} ASC, ${outstandingExpression} DESC`
             : sort === "name_asc"
@@ -390,8 +398,42 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
                     ${lastPaymentExpression} AS last_payment_date
              FROM clients c
              INNER JOIN profile p ON p.username = c.username AND LOWER(TRIM(p.user_type)) = 'client'
-             LEFT JOIN transactions t ON t.branch_id = c.branch_id
-                                      AND (t.party1_id = c.username OR t.party2_id = c.username)
+             LEFT JOIN (
+                 SELECT movement.username,
+                        SUM(movement.balance_amount) AS outstanding_amount,
+                        MAX(movement.last_payment_date) AS last_payment_date
+                 FROM (
+                     SELECT t.party1_id AS username,
+                            SUM(CASE
+                                WHEN t.party2_type = 'client' THEN ABS(t.amount)
+                                WHEN t.party1_type = 'client' THEN -ABS(t.amount)
+                                ELSE 0
+                            END) AS balance_amount,
+                            MAX(CASE
+                                WHEN t.party1_type = 'client'
+                                 AND LOWER(COALESCE(t.transaction_type, '')) IN ('receive','received')
+                                THEN t.transaction_date
+                            END) AS last_payment_date
+                     FROM transactions t
+                     WHERE t.branch_id = ? AND t.party1_id IS NOT NULL
+                     GROUP BY t.party1_id
+
+                     UNION ALL
+
+                     SELECT t.party2_id AS username,
+                            SUM(CASE
+                                WHEN t.party2_type = 'client' THEN ABS(t.amount)
+                                WHEN t.party1_type = 'client' THEN -ABS(t.amount)
+                                ELSE 0
+                            END) AS balance_amount,
+                            NULL AS last_payment_date
+                     FROM transactions t
+                     WHERE t.branch_id = ? AND t.party2_id IS NOT NULL
+                       AND (t.party1_id IS NULL OR t.party1_id <> t.party2_id)
+                     GROUP BY t.party2_id
+                 ) movement
+                 GROUP BY movement.username
+             ) t ON t.username = c.username
              WHERE c.branch_id = ? AND c.user_type = 'client'
                AND (c.is_deleted = '0' OR c.is_deleted = 0)
              GROUP BY c.username
@@ -399,7 +441,7 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
                 AND (${lastPaymentExpression} IS NULL OR DATE(${lastPaymentExpression}) < ?)
              ORDER BY ${orderBy}
              LIMIT ${MAX_DETAIL_ROWS}`,
-            [branchId, cutoff]
+            [branchId, branchId, branchId, cutoff]
         );
         sections.unpaid_debtors = { rows: filterRows(rows, filters).map((row) => ({
             username: row.username,
@@ -411,9 +453,9 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
                 : null,
         })) };
         totals.unpaid_debtors = sections.unpaid_debtors.rows.length;
-    }
+    });
 
-    if (enabled("due_tasks")) {
+    if (enabled("due_tasks")) scheduleSection("due_tasks", async () => {
         const mode = config.sections.due_tasks.mode;
         const dateClause = mode === "due_in_period"
             ? "t.due_date >= ? AND t.due_date < ?"
@@ -443,26 +485,30 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             days_overdue: integer(row.days_overdue),
         })) };
         totals.due_tasks = sections.due_tasks.rows.length;
-    }
+    });
 
-    if (enabled("clients_without_service")) {
-        const lastServiceExpression = "MAX(se.sale_date)";
+    if (enabled("clients_without_service")) scheduleSection("clients_without_service", async () => {
+        const lastServiceExpression = "se.last_service_date";
+        const latestServiceExpression = `MAX(${lastServiceExpression})`;
         const [rows] = await pool.query(
             `SELECT c.username,
                     COALESCE(MAX(p.name), c.username) AS client_name,
-                    ${lastServiceExpression} AS last_service_date
+                    ${latestServiceExpression} AS last_service_date
              FROM clients c
              INNER JOIN profile p ON p.username = c.username AND LOWER(TRIM(p.user_type)) = 'client'
-             LEFT JOIN sale_entries se ON se.branch_id = c.branch_id
-                                      AND se.party_id = c.username
-                                      AND se.party_type = 'client'
+             LEFT JOIN (
+                 SELECT party_id, MAX(sale_date) AS last_service_date
+                 FROM sale_entries
+                 WHERE branch_id = ? AND party_type = 'client'
+                 GROUP BY party_id
+             ) se ON se.party_id = c.username
              WHERE c.branch_id = ? AND c.user_type = 'client'
                AND (c.is_deleted = '0' OR c.is_deleted = 0)
              GROUP BY c.username
-             HAVING ${lastServiceExpression} IS NULL OR DATE(${lastServiceExpression}) < ?
-             ORDER BY (${lastServiceExpression} IS NULL) DESC, ${lastServiceExpression} ASC, client_name ASC
+             HAVING ${latestServiceExpression} IS NULL OR ${latestServiceExpression} < ?
+             ORDER BY (${latestServiceExpression} IS NULL) DESC, ${latestServiceExpression} ASC, client_name ASC
              LIMIT ${MAX_DETAIL_ROWS}`,
-            [branchId, cutoff]
+            [branchId, branchId, cutoff]
         );
         sections.clients_without_service = { rows: filterRows(rows, filters).map((row) => ({
             username: row.username,
@@ -470,8 +516,22 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             last_service_date: row.last_service_date || null,
         })) };
         totals.clients_without_service = sections.clients_without_service.rows.length;
-    }
+    });
 
+    const sectionWorkers = Array.from({ length: Math.min(4, sectionTasks.length) }, async () => {
+        while (sectionTasks.length) {
+            const task = sectionTasks.shift();
+            await task();
+        }
+    });
+    const [branchName] = await Promise.all([branchNamePromise, ...sectionWorkers]);
+    if (process.env.EXECUTIVE_SUMMARY_PERF_LOGS === "1") {
+        console.info("[executive-summary] report timings", JSON.stringify({
+            section_ms: sectionTimings,
+            total_ms: Math.round(performance.now() - reportStartedAt),
+            rows: Object.fromEntries(Object.entries(sections).map(([key, section]) => [key, section.rows.length])),
+        }));
+    }
     for (const key of Object.keys(sections)) {
         sections[key].total_count = sections[key].rows.length;
     }
@@ -479,7 +539,7 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
     return {
         meta: {
             branch_id: branchId,
-            branch_name: await getBranchName(branchId),
+            branch_name: branchName,
             period: meta,
             timezone: config.timezone,
             inactivity_days: Number(filters.inactivityDays ?? config.inactivity_days),
@@ -503,11 +563,249 @@ function money(value) {
     return `Rs. ${number(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function buildPdfTable(doc, title, columns, rows, state) {
+function compactPdfAmount(value) {
+    const amount = number(value);
+    if (Math.abs(amount) >= 10000000) return `Rs.${(amount / 10000000).toFixed(1)}Cr`;
+    if (Math.abs(amount) >= 100000) return `Rs.${(amount / 100000).toFixed(1)}L`;
+    if (Math.abs(amount) >= 1000) return `Rs.${(amount / 1000).toFixed(1)}k`;
+    return `Rs.${Math.round(amount)}`;
+}
+
+const PDF_CHART_COLORS = ["#4f46e5", "#0f766e", "#ea580c"];
+const PDF_KPI_COLORS = [
+    { background: "#eef2ff", accent: "#4f46e5", label: "#4338ca" },
+    { background: "#ecfdf5", accent: "#0f766e", label: "#047857" },
+    { background: "#fff7ed", accent: "#ea580c", label: "#c2410c" },
+    { background: "#fdf2f8", accent: "#c026d3", label: "#a21caf" },
+    { background: "#ecfeff", accent: "#0891b2", label: "#0e7490" },
+    { background: "#fffbeb", accent: "#ca8a04", label: "#a16207" },
+    { background: "#fff1f2", accent: "#be123c", label: "#be123c" },
+    { background: "#f5f3ff", accent: "#7c3aed", label: "#6d28d9" },
+];
+const PDF_SECTION_STYLES = {
+    "#4f46e5": { background: "#eef2ff", text: "#4338ca" },
+    "#0f766e": { background: "#ecfdf5", text: "#047857" },
+    "#ea580c": { background: "#fff7ed", text: "#c2410c" },
+    "#c026d3": { background: "#fdf2f8", text: "#a21caf" },
+    "#0891b2": { background: "#ecfeff", text: "#0e7490" },
+    "#ca8a04": { background: "#fffbeb", text: "#a16207" },
+    "#be123c": { background: "#fff1f2", text: "#be123c" },
+    "#7c3aed": { background: "#f5f3ff", text: "#6d28d9" },
+};
+
+function staffChartRows(report, metrics) {
+    const staff = new Map();
+    for (const [sectionKey, sourceKey, targetKey] of metrics) {
+        for (const source of report.sections[sectionKey]?.rows || []) {
+            const key = source.username || source.staff_username || source.staff_name || "unassigned";
+            const row = staff.get(key) || { staff_name: source.staff_name || "Unassigned" };
+            row[targetKey] = (row[targetKey] || 0) + (sourceKey ? number(source[sourceKey]) : 1);
+            staff.set(key, row);
+        }
+    }
+    const keys = metrics.map(([, , targetKey]) => targetKey);
+    const rows = [...staff.values()].sort((first, second) =>
+        keys.reduce((total, key) => total + (second[key] || 0) - (first[key] || 0), 0)
+    );
+    if (rows.length <= 6) return rows;
+    const remaining = rows.slice(5);
+    return [
+        ...rows.slice(0, 5),
+        {
+            staff_name: `Others (${remaining.length})`,
+            ...Object.fromEntries(keys.map((key) => [key, remaining.reduce((sum, row) => sum + (row[key] || 0), 0)])),
+        },
+    ];
+}
+
+function drawPdfBarChart(doc, { x, y, width, title, rows, metrics }) {
+    const height = 184;
+    doc.save();
+    doc.roundedRect(x, y, width, height, 8).fillAndStroke("#f8fafc", "#e2e8f0");
+    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(10)
+        .text(title, x + 10, y + 10, { width: width - 20, lineBreak: false, ellipsis: true });
+
+    let legendX = x + 10;
+    const legendY = y + 29;
+    for (const [index, metric] of metrics.entries()) {
+        doc.roundedRect(legendX, legendY + 1, 5, 5, 2).fill(PDF_CHART_COLORS[index]);
+        doc.fillColor("#475569").font("Helvetica").fontSize(6.5)
+            .text(metric.label, legendX + 8, legendY, { lineBreak: false });
+        legendX += 12 + metric.label.length * 3.5;
+    }
+
+    const chartTop = y + 55;
+    const chartBottom = y + height - 10;
+    const labelWidth = Math.min(72, width * 0.31);
+    const chartX = x + labelWidth + 8;
+    const chartWidth = width - labelWidth - 20;
+    const maximum = Math.max(1, ...rows.flatMap((row) => metrics.map((metric) => number(row[metric.key]))));
+    const rowHeight = rows.length ? (chartBottom - chartTop) / rows.length : 0;
+
+    for (let tick = 0; tick <= 4; tick += 1) {
+        const tickX = chartX + chartWidth * tick / 4;
+        doc.moveTo(tickX, chartTop).lineTo(tickX, chartBottom).strokeColor("#e2e8f0").lineWidth(0.5).stroke();
+        const tickValue = maximum * tick / 4;
+        doc.fillColor("#64748b").font("Helvetica").fontSize(5.5)
+            .text(metrics[0]?.format === "money" ? compactPdfAmount(tickValue) : Math.round(tickValue).toLocaleString("en-IN"), tickX - 16, chartTop - 10, {
+                width: 32,
+                align: "center",
+                lineBreak: false,
+            });
+    }
+
+    if (!rows.length) {
+        doc.fillColor("#94a3b8").font("Helvetica").fontSize(7)
+            .text("No data for this period", chartX, chartTop + 20, { width: chartWidth, align: "center" });
+    }
+
+    rows.forEach((row, rowIndex) => {
+        const rowY = chartTop + rowHeight * rowIndex;
+        doc.fillColor("#475569").font("Helvetica").fontSize(6.5)
+            .text(safeText(row.staff_name), x + 8, rowY + rowHeight / 2 - 4, {
+                width: labelWidth - 10,
+                lineBreak: false,
+                ellipsis: true,
+            });
+        metrics.forEach((metric, metricIndex) => {
+            const barY = rowY + rowHeight * 0.17 + metricIndex * Math.min(4, rowHeight * 0.2);
+            const barWidth = Math.max(0, chartWidth * number(row[metric.key]) / maximum);
+            if (barWidth > 0) {
+                doc.roundedRect(chartX, barY, Math.max(1.5, barWidth), 2.8, 1.2)
+                    .fill(PDF_CHART_COLORS[metricIndex]);
+            }
+        });
+    });
+    doc.restore();
+}
+
+function buildPdfDashboard(doc, report, state) {
+    const activity = staffChartRows(report, [
+        ["tasks_completed", "completed_count", "completed"],
+        ["new_tasks", "new_task_count", "new_tasks"],
+        ["due_tasks", null, "due_tasks"],
+    ]);
+    const financial = staffChartRows(report, [
+        ["sales", "sale_amount", "sales"],
+        ["collections", "collection_amount", "collections"],
+        ["expenses", "expense_amount", "expenses"],
+    ]);
+    const left = 42;
+    const pageWidth = doc.page.width - 84;
+    const gap = 10;
+    const panelWidth = (pageWidth - gap) / 2;
+    const chartHeight = 184;
+    const followUpHeight = 91;
+    const headerY = 42;
+    const headerHeight = 62;
+    const cardGap = 7;
+    const cardWidth = (pageWidth - cardGap * 3) / 4;
+    const cardHeight = 48;
+
+    doc.save();
+    doc.roundedRect(left, headerY, pageWidth, headerHeight, 10).fill("#1e3a8a");
+    doc.roundedRect(left, headerY, 6, headerHeight, 3).fill("#818cf8");
+    doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(19)
+        .text("Executive Summary", left + 17, headerY + 10, { width: pageWidth - 34, lineBreak: false });
+    doc.fillColor("#dbeafe").font("Helvetica").fontSize(8)
+        .text(`${safeText(report.meta.branch_name)}  ·  ${report.meta.period.from_date} to ${report.meta.period.to_date}  ·  ${safeText(report.meta.timezone)}`, left + 18, headerY + 39, {
+            width: pageWidth - 36,
+            lineBreak: false,
+            ellipsis: true,
+        });
+    doc.restore();
+
+    const cards = [
+        ["Tasks completed", number(report.totals.tasks_completed)],
+        ["New tasks", number(report.totals.new_tasks)],
+        ["Sales", money(report.totals.sales)],
+        ["Collections", money(report.totals.collections)],
+        ["Expenses", money(report.totals.expenses)],
+        ["Unpaid debtors", number(report.totals.unpaid_debtors)],
+        ["Due tasks", number(report.totals.due_tasks)],
+        ["No recent service", number(report.totals.clients_without_service)],
+    ];
+    const cardsY = headerY + headerHeight + 12;
+    cards.forEach(([label, value], index) => {
+        const column = index % 4;
+        const row = Math.floor(index / 4);
+        const x = left + column * (cardWidth + cardGap);
+        const y = cardsY + row * (cardHeight + cardGap);
+        const color = PDF_KPI_COLORS[index];
+        doc.save();
+        doc.roundedRect(x, y, cardWidth, cardHeight, 7).fillAndStroke(color.background, "#e2e8f0");
+        doc.roundedRect(x, y, 4, cardHeight, 2).fill(color.accent);
+        doc.fillColor(color.label).font("Helvetica-Bold").fontSize(7)
+            .text(label.toUpperCase(), x + 9, y + 8, { width: cardWidth - 16, lineBreak: false, ellipsis: true });
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(9)
+            .text(safeText(value), x + 9, y + 24, { width: cardWidth - 16, lineBreak: false, ellipsis: true });
+        doc.restore();
+    });
+
+    state.y = cardsY + 2 * cardHeight + cardGap + 14;
+    doc.fillColor("#1e293b").font("Helvetica-Bold").fontSize(13).text("Statistical overview", left, state.y);
+    state.y += 21;
+    drawPdfBarChart(doc, {
+        x: left,
+        y: state.y,
+        width: panelWidth,
+        title: "Staff activity",
+        rows: activity,
+        metrics: [
+            { key: "completed", label: "Completed" },
+            { key: "new_tasks", label: "New" },
+            { key: "due_tasks", label: "Due" },
+        ],
+    });
+    drawPdfBarChart(doc, {
+        x: left + panelWidth + gap,
+        y: state.y,
+        width: panelWidth,
+        title: "Financial performance",
+        rows: financial,
+        metrics: [
+            { key: "sales", label: "Sales", format: "money" },
+            { key: "collections", label: "Collections", format: "money" },
+            { key: "expenses", label: "Expenses", format: "money" },
+        ],
+    });
+    state.y += chartHeight + 10;
+
+    const followUps = [
+        ["Unpaid debtors", number(report.totals.unpaid_debtors), "#4f46e5"],
+        ["Due tasks", number(report.totals.due_tasks), "#0f766e"],
+        ["No recent service", number(report.totals.clients_without_service), "#ea580c"],
+    ];
+    const maxFollowUps = Math.max(1, ...followUps.map(([, value]) => value));
+    const labelWidth = 116;
+    const valueWidth = 44;
+    const barX = left + labelWidth;
+    const barWidth = pageWidth - labelWidth - valueWidth - 16;
+    doc.save();
+    doc.roundedRect(left, state.y, pageWidth, followUpHeight, 8).fillAndStroke("#fffbeb", "#f1e7c9");
+    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(9)
+        .text("Client & task follow-up", left + 10, state.y + 9);
+    followUps.forEach(([label, value, color], index) => {
+        const rowY = state.y + 29 + index * 18;
+        doc.fillColor("#475569").font("Helvetica").fontSize(7)
+            .text(label, left + 10, rowY + 2, { width: labelWidth - 16, lineBreak: false });
+        doc.roundedRect(barX, rowY, barWidth, 9, 4).fill("#f1f5f9");
+        if (value > 0) {
+            doc.roundedRect(barX, rowY, Math.max(3, barWidth * value / maxFollowUps), 9, 4).fill(color);
+        }
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(7)
+            .text(value.toLocaleString("en-IN"), barX + barWidth + 8, rowY + 1, { width: valueWidth, lineBreak: false });
+    });
+    doc.restore();
+    state.y += followUpHeight + 14;
+}
+
+function buildPdfTable(doc, title, columns, rows, state, accent = "#4338ca") {
     const left = 42;
     const width = doc.page.width - 84;
     const rowHeight = 19;
     const headerHeight = 24;
+    const sectionStyle = PDF_SECTION_STYLES[accent] || { background: "#eef2ff", text: accent };
     const ensure = (height) => {
         if (state.y + height <= doc.page.height - 48) return;
         doc.addPage();
@@ -515,7 +813,12 @@ function buildPdfTable(doc, title, columns, rows, state) {
     };
 
     ensure(42);
-    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(12).text(title, left, state.y);
+    doc.save();
+    const titleWidth = Math.min(width - 10, title.length * 5.8 + 18);
+    doc.roundedRect(left, state.y - 2, titleWidth, 19, 6).fill(sectionStyle.background);
+    doc.roundedRect(left, state.y - 2, 4, 19, 2).fill(accent);
+    doc.fillColor(sectionStyle.text).font("Helvetica-Bold").fontSize(10).text(title, left + 10, state.y + 2, { lineBreak: false });
+    doc.restore();
     state.y += 18;
     if (!rows.length) {
         doc.fillColor("#64748b").font("Helvetica").fontSize(9).text("No records to show.", left, state.y);
@@ -526,9 +829,9 @@ function buildPdfTable(doc, title, columns, rows, state) {
     const colWidth = width / columns.length;
     const drawHeader = () => {
         ensure(headerHeight + rowHeight);
-        doc.rect(left, state.y, width, headerHeight).fill("#e2e8f0");
+        doc.roundedRect(left, state.y, width, headerHeight, 4).fill(accent);
         columns.forEach((column, index) => {
-            doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(7.5)
+            doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(7.5)
                 .text(column.label, left + index * colWidth + 4, state.y + 7, { width: colWidth - 8, lineBreak: false });
         });
         state.y += headerHeight;
@@ -540,8 +843,19 @@ function buildPdfTable(doc, title, columns, rows, state) {
         if (rowIndex % 2 === 1) doc.rect(left, state.y, width, rowHeight).fill("#f8fafc");
         columns.forEach((column, index) => {
             const raw = typeof column.value === "function" ? column.value(row) : row[column.value];
-            doc.fillColor("#334155").font("Helvetica").fontSize(7.5)
-                .text(safeText(raw), left + index * colWidth + 4, state.y + 6, { width: colWidth - 8, lineBreak: false, ellipsis: true });
+            const emphasize = index === 0 || column.highlight === true;
+            const cellX = left + index * colWidth + 3;
+            const cellWidth = colWidth - 6;
+            if (emphasize) {
+                doc.save();
+                doc.roundedRect(cellX, state.y + 3, cellWidth, rowHeight - 6, 4).fill(sectionStyle.background);
+                doc.fillColor(sectionStyle.text).font("Helvetica-Bold").fontSize(7.5)
+                    .text(safeText(raw), cellX + 4, state.y + 6, { width: cellWidth - 8, lineBreak: false, ellipsis: true });
+                doc.restore();
+            } else {
+                doc.fillColor("#334155").font("Helvetica").fontSize(7.5)
+                    .text(safeText(raw), left + index * colWidth + 4, state.y + 6, { width: colWidth - 8, lineBreak: false, ellipsis: true });
+            }
         });
         state.y += rowHeight;
     });
@@ -558,36 +872,33 @@ export async function buildExecutiveSummaryPdf(report) {
 
         const state = { y: 42 };
         const meta = report.meta;
-        doc.fillColor("#1d4ed8").font("Helvetica-Bold").fontSize(20).text("Executive Summary", 42, state.y);
-        state.y += 30;
-        doc.fillColor("#475569").font("Helvetica").fontSize(9)
-            .text(`${meta.branch_name} · ${meta.period.from_date} to ${meta.period.to_date} · ${meta.timezone}`, 42, state.y);
-        state.y += 24;
+        buildPdfDashboard(doc, report, state);
 
-        const totalRows = [
-            ["Tasks completed", report.totals.tasks_completed || 0],
-            ["New tasks", report.totals.new_tasks || 0],
-            ["Sales", money(report.totals.sales)],
-            ["Collections", money(report.totals.collections)],
-            ["Expenses", money(report.totals.expenses)],
-            ["Unpaid debtors", report.totals.unpaid_debtors || 0],
-            ["Due tasks", report.totals.due_tasks || 0],
-            ["Clients without recent service", report.totals.clients_without_service || 0],
-        ];
-        buildPdfTable(doc, "Summary totals", [{ label: "Metric", value: 0 }, { label: "Value", value: 1 }], totalRows.map(([metric, value]) => ({ 0: metric, 1: value })), state);
+        doc.addPage();
+        doc.save();
+        doc.roundedRect(42, 42, doc.page.width - 84, 54, 8).fill("#1e3a8a");
+        doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(15).text("Detailed report", 54, 51);
+        doc.fillColor("#dbeafe").font("Helvetica").fontSize(8)
+            .text(`${meta.branch_name}  ·  ${meta.period.from_date} to ${meta.period.to_date}`, 54, 76, {
+                width: doc.page.width - 108,
+                lineBreak: false,
+                ellipsis: true,
+            });
+        doc.restore();
+        state.y = 112;
 
         const definitions = [
-            ["tasks_completed", "Tasks completed by staff", [{ label: "Staff", value: "staff_name" }, { label: "Completed", value: "completed_count" }]],
-            ["new_tasks", "New tasks", [{ label: "Staff", value: "staff_name" }, { label: "New tasks", value: "new_task_count" }]],
-            ["sales", "Sales", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "sale_count" }, { label: "Amount", value: (row) => money(row.sale_amount) }]],
-            ["collections", "Collections from debtors", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "collection_count" }, { label: "Amount", value: (row) => money(row.collection_amount) }]],
-            ["expenses", "Expenses", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "expense_count" }, { label: "Amount", value: (row) => money(row.expense_amount) }]],
-            ["unpaid_debtors", "Unpaid debtors", [{ label: "Client", value: "client_name" }, { label: "Outstanding", value: (row) => money(row.outstanding_amount) }, { label: "Last payment", value: "last_payment_date" }]],
-            ["due_tasks", "Due tasks", [{ label: "Task", value: "task_id" }, { label: "Staff", value: "staff_name" }, { label: "Due date", value: "due_date" }, { label: "Status", value: "status" }]],
-            ["clients_without_service", "Clients without recent service", [{ label: "Client", value: "client_name" }, { label: "Last service", value: "last_service_date" }]],
+            ["tasks_completed", "Tasks completed by staff", [{ label: "Staff", value: "staff_name" }, { label: "Completed", value: "completed_count", highlight: true }], "#4f46e5"],
+            ["new_tasks", "New tasks", [{ label: "Staff", value: "staff_name" }, { label: "New tasks", value: "new_task_count", highlight: true }], "#0f766e"],
+            ["sales", "Sales", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "sale_count", highlight: true }, { label: "Amount", value: (row) => money(row.sale_amount), highlight: true }], "#4f46e5"],
+            ["collections", "Collections from debtors", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "collection_count", highlight: true }, { label: "Amount", value: (row) => money(row.collection_amount), highlight: true }], "#0f766e"],
+            ["expenses", "Expenses", [{ label: "Staff", value: "staff_name" }, { label: "Count", value: "expense_count", highlight: true }, { label: "Amount", value: (row) => money(row.expense_amount), highlight: true }], "#ea580c"],
+            ["unpaid_debtors", "Unpaid debtors", [{ label: "Client", value: "client_name" }, { label: "Outstanding", value: (row) => money(row.outstanding_amount), highlight: true }, { label: "Last payment", value: "last_payment_date" }], "#c026d3"],
+            ["due_tasks", "Due tasks", [{ label: "Task", value: "task_id" }, { label: "Staff", value: "staff_name" }, { label: "Due date", value: "due_date" }, { label: "Status", value: "status" }], "#ca8a04"],
+            ["clients_without_service", "Clients without recent service", [{ label: "Client", value: "client_name" }, { label: "Last service", value: "last_service_date" }], "#0891b2"],
         ];
-        for (const [key, title, columns] of definitions) {
-            if (report.sections[key]) buildPdfTable(doc, title, columns, report.sections[key].rows || [], state);
+        for (const [key, title, columns, accent] of definitions) {
+            if (report.sections[key]) buildPdfTable(doc, title, columns, report.sections[key].rows || [], state, accent);
         }
         doc.end();
     });

@@ -17,6 +17,8 @@ const INDEXES = [
     { table: "tasks", name: "idx_tasks_task_id", columns: "(task_id)" },
     { table: "tasks", name: "idx_tasks_branch_task", columns: "(branch_id, task_id)" },
     { table: "tasks", name: "idx_tasks_branch_created", columns: "(branch_id, create_date, id)" },
+    { table: "tasks", name: "idx_tasks_branch_complete_date", columns: "(branch_id, complete_date)" },
+    { table: "tasks", name: "idx_tasks_branch_due_date", columns: "(branch_id, due_date)" },
     { table: "tasks", name: "idx_tasks_branch_status_due", columns: "(branch_id, status, due_date)" },
     { table: "tasks", name: "idx_tasks_branch_service", columns: "(branch_id, service_id)" },
     { table: "tasks", name: "idx_tasks_branch_firm", columns: "(branch_id, firm_id)" },
@@ -45,6 +47,8 @@ const INDEXES = [
 
     // ── sale entries / items ────────────────────────────────────────
     { table: "sale_entries", name: "idx_sale_entries_branch_invoice", columns: "(branch_id, invoice_id)" },
+    { table: "sale_entries", name: "idx_sale_entries_branch_date", columns: "(branch_id, sale_date)" },
+    { table: "sale_entries", name: "idx_sale_entries_branch_party_date", columns: "(branch_id, party_type, party_id, sale_date)" },
     { table: "sale_entries", name: "idx_sale_entries_invoice", columns: "(invoice_id)" },
     { table: "sale_entries", name: "idx_sale_entries_sale", columns: "(sale_id)" },
     { table: "sale_entries", name: "idx_sale_entries_branch_firm", columns: "(branch_id, firm_id)" },
@@ -81,6 +85,7 @@ const INDEXES = [
     { table: "clients", name: "idx_clients_branch_type_deleted", columns: "(branch_id, user_type, is_deleted)" },
     { table: "firms", name: "idx_firms_branch_deleted", columns: "(branch_id, is_deleted)" },
     { table: "branch_mapping", name: "idx_bm_branch_type_deleted", columns: "(branch_id, type, is_deleted)" },
+    { table: "expense_entries", name: "idx_expense_entries_branch_date", columns: "(branch_id, expense_date)" },
 ];
 
 async function tableExists(conn, tableName) {
