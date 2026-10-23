@@ -50,7 +50,8 @@ async function resolveScope(conn, req) {
     if (scope.value.scopeType === "client") {
         const [clients] = await conn.query(
             `SELECT username FROM clients
-             WHERE username = ? AND branch_id = ? AND user_type = 'client' AND is_deleted = '0'
+             WHERE username = ? AND branch_id = ? AND user_type = 'client'
+               AND is_deleted = '0' AND status = '1'
              LIMIT 1`,
             [scope.value.scopeId, req.branch_id]
         );
@@ -102,6 +103,71 @@ router.get("/", ...readGuards, async (req, res) => {
         });
     } catch (error) {
         return respondError(res, error, "Failed to fetch automation policies");
+    }
+});
+
+router.get("/clients", ...readGuards, async (req, res) => {
+    try {
+        const policyKey = String(req.query.policy_key || "").trim();
+        if (!AUTOMATION_POLICY_KEYS.includes(policyKey)) {
+            return res.status(400).json({
+                success: false,
+                code: "INVALID_AUTOMATION_POLICY",
+                message: "A valid policy_key is required",
+            });
+        }
+
+        const requestedPage = Number(req.query.page);
+        const requestedLimit = Number(req.query.limit);
+        const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+        const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+            ? Math.min(100, requestedLimit)
+            : 50;
+        const offset = (page - 1) * limit;
+        const [countRows] = await pool.query(
+            `SELECT COUNT(*) AS total
+             FROM clients c
+             WHERE c.branch_id = ? AND c.user_type = 'client'
+               AND c.is_deleted = '0' AND c.status = '1'
+               AND COALESCE((
+                   SELECT ap.enabled FROM automation_policies ap
+                   WHERE ap.branch_id = c.branch_id AND ap.scope_type = 'client'
+                     AND ap.scope_id = c.username AND ap.policy_key = ?
+                   LIMIT 1
+               ), ?) = '1'`,
+            [req.branch_id, policyKey, DEFAULT_AUTOMATION_POLICIES[policyKey] ? "1" : "0"]
+        );
+        const total = Number(countRows[0]?.total) || 0;
+        const [clients] = await pool.query(
+            `SELECT c.username, p.name, p.mobile, p.email
+             FROM clients c
+             LEFT JOIN profile p
+               ON p.username = c.username
+              AND p.id = (
+                  SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = c.username
+              )
+             WHERE c.branch_id = ? AND c.user_type = 'client'
+               AND c.is_deleted = '0' AND c.status = '1'
+               AND COALESCE((
+                   SELECT ap.enabled FROM automation_policies ap
+                   WHERE ap.branch_id = c.branch_id AND ap.scope_type = 'client'
+                     AND ap.scope_id = c.username AND ap.policy_key = ?
+                   LIMIT 1
+               ), ?) = '1'
+             ORDER BY p.name ASC, c.username ASC
+             LIMIT ? OFFSET ?`,
+            [req.branch_id, policyKey, DEFAULT_AUTOMATION_POLICIES[policyKey] ? "1" : "0", limit, offset]
+        );
+
+        return res.json({
+            success: true,
+            data: {
+                clients,
+                pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
+            },
+        });
+    } catch (error) {
+        return respondError(res, error, "Failed to fetch enabled automation clients");
     }
 });
 
