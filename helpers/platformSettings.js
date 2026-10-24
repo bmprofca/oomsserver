@@ -8,7 +8,8 @@ import { encryptSecret, decryptSecret, maskSecret } from "./secretBox.js";
  * from the ADMIN panel (Settings → Platform Settings, plus the Razorpay and OTP SMS pages
  * which are views over the same rows).
  *
- * Resolution order for every key: database row → process.env (legacy fallback) → default.
+ * Resolution order: database row → process.env (legacy fallback) → default, except
+ * database-only definitions which never fall back to the environment.
  * Secrets are AES-256-GCM encrypted at rest (helpers/secretBox.js) and are never returned
  * in clear text by the admin API; only a masked hint is sent.
  *
@@ -27,6 +28,11 @@ export const PLATFORM_SETTING_GROUPS = [
         key: "application",
         label: "Application",
         description: "App-wide values used by login, invitations and tax calculation.",
+    },
+    {
+        key: "google_calendar",
+        label: "Google Calendar appointments",
+        description: "Server-side OAuth credentials for the calendar that organizes appointment invitations.",
     },
     {
         key: "storage",
@@ -76,6 +82,7 @@ export const FAST2SMS_ROUTE_OPTIONS = [
  * type: text | url | secret | number | select
  * env: legacy SERVER/.env name (fallback only; defaults to the key)
  * envAliases: further legacy env names checked after `env`
+ * databaseOnly: never resolve a value from the environment
  * options: for type select — [{ value, label }]
  * uppercase: normalise text to upper case
  * validate(value): throw { status: 400 } for a custom rule
@@ -88,6 +95,42 @@ export const PLATFORM_SETTING_DEFS = [
         type: "text",
         default: "",
         description: "Audience used to verify Google sign-in ID tokens on /auth/google.",
+    },
+    {
+        key: "GOOGLE_CALENDAR_CLIENT_ID",
+        group: "google_calendar",
+        label: "OAuth client ID",
+        type: "secret",
+        default: "",
+        databaseOnly: true,
+        description: "OAuth client authorized for the Google Calendar Events API. Stored encrypted and never returned to the browser.",
+    },
+    {
+        key: "GOOGLE_CALENDAR_CLIENT_SECRET",
+        group: "google_calendar",
+        label: "OAuth client secret",
+        type: "secret",
+        default: "",
+        databaseOnly: true,
+        description: "OAuth client secret. Stored encrypted and never returned to the browser.",
+    },
+    {
+        key: "GOOGLE_CALENDAR_REFRESH_TOKEN",
+        group: "google_calendar",
+        label: "Organizer refresh token",
+        type: "secret",
+        default: "",
+        databaseOnly: true,
+        description: "Offline refresh token for the shared organizer account, with the calendar.events scope. Stored encrypted.",
+    },
+    {
+        key: "GOOGLE_CALENDAR_ID",
+        group: "google_calendar",
+        label: "Organizer calendar ID",
+        type: "text",
+        default: "primary",
+        databaseOnly: true,
+        description: "Google Calendar ID to create appointment events on. Use primary for the connected organizer account's primary calendar.",
     },
     {
         key: "BASE_INVITATION_LINK",
@@ -347,6 +390,7 @@ export function getPlatformSettingDef(key) {
 
 /** Legacy env names that may hold a value for this definition, in priority order. */
 export function envNamesFor(def) {
+    if (def.databaseOnly) return [];
     return [def.env || def.key, ...(def.envAliases || [])];
 }
 

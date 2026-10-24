@@ -55,6 +55,7 @@ import notificationRoutes from "./notifications.js";
 import workflowTemplateRoutes from "./workflowTemplates.js";
 import broadcastReportRoutes from "./broadcastReport.js";
 import executiveSummaryRoutes from "./executiveSummary.js";
+import appointmentRoutes from "./appointments.js";
 
 
 router.use("/auth", authRoutes);
@@ -115,5 +116,6 @@ router.use("/notifications", notificationRoutes);
 router.use("/workflow-templates", workflowTemplateRoutes);
 router.use("/broadcast-report", broadcastReportRoutes);
 router.use("/executive-summary", executiveSummaryRoutes);
+router.use("/appointments", appointmentRoutes);
 
 export default router;

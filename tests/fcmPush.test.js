@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildPushNotificationPayload, resolveNotificationTargets } from '../helpers/fcmPush.js';
+import {
+  buildAppointmentNotificationPayload,
+  buildPushNotificationPayload,
+  resolveAppointmentNotificationTargets,
+  resolveNotificationTargets,
+} from '../helpers/fcmPush.js';
 
 test('buildPushNotificationPayload adds safe default metadata for task updates', () => {
   const payload = buildPushNotificationPayload({
@@ -46,4 +51,42 @@ test('resolveNotificationTargets returns all relevant panels for a task notifica
     { username: 'clientalpha', panel: 'client' },
     { username: 'staffbeta', panel: 'enduser' },
   ]);
+});
+
+test('appointment notifications target each attendee on the enduser panel', () => {
+  assert.deepEqual(resolveAppointmentNotificationTargets(['staff-1', 'admin-1', 'staff-1', '']), [
+    { username: 'staff-1', panel: 'enduser' },
+    { username: 'admin-1', panel: 'enduser' },
+  ]);
+});
+
+test('appointment notification payload routes attendees to appointments with schedule details', () => {
+  const payload = buildAppointmentNotificationPayload({
+    action: 'APPOINTMENT_CREATED',
+    appointmentId: 'apt-1',
+    branchId: 9,
+    clientName: 'Example Client',
+    startAt: '2026-11-01 04:30:00',
+    timezone: 'Asia/Kolkata',
+  });
+
+  assert.equal(payload.title, 'New Appointment');
+  assert.match(payload.body, /Example Client/);
+  assert.match(payload.body, /1 Nov 2026/);
+  assert.equal(payload.data.type, 'APPOINTMENT_CREATED');
+  assert.equal(payload.data.panel, 'enduser');
+  assert.equal(payload.data.appointmentId, 'apt-1');
+  assert.equal(payload.data.branchId, '9');
+  assert.deepEqual(JSON.parse(payload.data.navigation), {
+    screen: 'AppointmentManagement',
+    params: { appointmentId: 'apt-1' },
+  });
+});
+
+test('appointment notification payload rejects unknown actions', () => {
+  assert.throws(() => buildAppointmentNotificationPayload({
+    action: 'UNKNOWN',
+    appointmentId: 'apt-1',
+    branchId: 9,
+  }), /Unsupported appointment notification action/);
 });

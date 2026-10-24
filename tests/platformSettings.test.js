@@ -36,7 +36,11 @@ test("resolution order is database → env → default", async () => {
         { setting_key: "B2_BUCKET", setting_value: "from-db", is_secret: 0 },
         { setting_key: "B2_ACCESS_KEY", setting_value: encrypt("db-key"), is_secret: 1 },
     ]);
-    const env = { B2_BUCKET: "from-env", ONECHATTING_BASE_URL: "https://env.example.com/" };
+    const env = {
+        B2_BUCKET: "from-env",
+        ONECHATTING_BASE_URL: "https://env.example.com/",
+        GOOGLE_CALENDAR_CLIENT_ID: "legacy-env-value",
+    };
     const store = createPlatformSettingsStore({ pool, env, encrypt, decrypt, log: { error() {} } });
     await store.load();
 
@@ -46,6 +50,11 @@ test("resolution order is database → env → default", async () => {
     assert.equal(store.get("TAX_RATE"), "18", "default used when neither db nor env");
     assert.equal(store.getNumber("TAX_RATE"), 18);
     assert.equal(store.get("WHATSAPPWEB_BASE_URL"), "", "unset with no default is empty");
+    assert.equal(store.get("GOOGLE_CALENDAR_CLIENT_ID"), "", "calendar credentials ignore environment variables");
+    assert.equal(store.get("GOOGLE_CALENDAR_ID"), "primary", "calendar ID uses its database setting default");
+    await store.update({ values: { GOOGLE_CALENDAR_CLIENT_ID: "calendar-client-id" } });
+    assert.equal(store.get("GOOGLE_CALENDAR_CLIENT_ID"), "calendar-client-id");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_CLIENT_ID").setting_value, "enc(calendar-client-id)");
 });
 
 test("describe() masks secrets and reports the source of each value", async () => {

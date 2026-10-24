@@ -379,6 +379,76 @@ export async function sendPushToUsers(targets, payload) {
     );
 }
 
+export function resolveAppointmentNotificationTargets(attendeeUsernames) {
+    const usernames = Array.isArray(attendeeUsernames) ? attendeeUsernames : [];
+    const uniqueUsernames = [...new Set(usernames.map((username) => String(username || "").trim()).filter(Boolean))];
+    return uniqueUsernames.map((username) => ({ username, panel: "enduser" }));
+}
+
+export function buildAppointmentNotificationPayload({
+    action,
+    appointmentId,
+    branchId,
+    clientName,
+    startAt,
+    timezone,
+}) {
+    const actionType = String(action || "").trim().toUpperCase();
+    const titles = {
+        APPOINTMENT_CREATED: "New Appointment",
+        APPOINTMENT_UPDATED: "Appointment Updated",
+        APPOINTMENT_CANCELLED: "Appointment Cancelled",
+    };
+    const title = titles[actionType];
+    if (!title) throw new Error("Unsupported appointment notification action");
+
+    const clientLabel = String(clientName || "a client").trim();
+    const date = new Date(`${String(startAt || "").replace(" ", "T")}Z`);
+    const formattedDate = Number.isFinite(date.getTime()) && timezone
+        ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: timezone }).format(date)
+        : "";
+    const dateLabel = formattedDate ? ` for ${formattedDate}` : "";
+    const actionText = actionType === "APPOINTMENT_CREATED"
+        ? "A new appointment has been scheduled"
+        : actionType === "APPOINTMENT_CANCELLED"
+            ? "An appointment has been cancelled"
+            : "An appointment has been updated";
+
+    return buildPushNotificationPayload({
+        action: actionType,
+        title,
+        body: `${actionText} with ${clientLabel}${dateLabel}.`,
+        panel: "enduser",
+        data: {
+            appointmentId: String(appointmentId),
+            branchId: String(branchId),
+        },
+        navigation: { screen: "AppointmentManagement", params: { appointmentId: String(appointmentId) } },
+    });
+}
+
+export async function notifyAppointmentAttendeesPush({
+    action,
+    appointmentId,
+    branchId,
+    clientName,
+    startAt,
+    timezone,
+    attendeeUsernames,
+}) {
+    const targets = resolveAppointmentNotificationTargets(attendeeUsernames);
+    if (!targets.length) return;
+
+    await sendPushToUsers(targets, buildAppointmentNotificationPayload({
+        action,
+        appointmentId,
+        branchId,
+        clientName,
+        startAt,
+        timezone,
+    }));
+}
+
 export async function getBranchNotificationTargets(branch_id) {
     if (!branch_id) return [];
 

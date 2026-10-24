@@ -5,6 +5,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import apiRoutes from "./routes/index.js";
+import { startAppointmentSyncWorker } from "./services/appointmentSyncWorker.js";
 import adminRoutes from "./routes_admin/index.js";
 import clientPortalRoutes from "./routes_client/index.js";
 import caPortalRoutes from "./routes_ca/index.js";
@@ -121,6 +122,7 @@ server.listen(PORT, "0.0.0.0", () => {
         console.log("Background jobs disabled (DISABLE_BACKGROUND_JOBS=1)");
         return;
     }
+    startAppointmentSyncWorker();
     startEmailBroadcastCron();
     startAttendanceWeeklyOffCron();
     startOneChattingCampaignCron();

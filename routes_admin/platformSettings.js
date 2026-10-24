@@ -5,6 +5,7 @@ import {
     updatePlatformSettings,
 } from "../helpers/platformSettings.js";
 import { testB2Connection } from "../helpers/b2Storage.js";
+import { testGoogleCalendarConnection } from "../services/googleCalendarService.js";
 
 const router = express.Router();
 
@@ -71,6 +72,23 @@ router.post("/test/b2", authAdmin, async (_req, res) => {
         return res.status(400).json({
             success: false,
             message: upstream ? `B2 test failed: ${upstream}` : error?.message || "B2 test failed",
+        });
+    }
+});
+
+router.post("/test/google-calendar", authAdmin, async (_req, res) => {
+    try {
+        await testGoogleCalendarConnection();
+        return res.status(200).json({
+            success: true,
+            message: "Google Calendar connection is ready",
+            data: { connected: true },
+        });
+    } catch (error) {
+        console.error("ADMIN GOOGLE CALENDAR TEST ERROR:", error?.message || error);
+        return res.status(400).json({
+            success: false,
+            message: error?.message || "Google Calendar connection test failed",
         });
     }
 });
