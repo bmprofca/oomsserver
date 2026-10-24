@@ -50,7 +50,6 @@ function periodFromRequest(req, config) {
         fromDate,
         toDate,
         scheduleType: config.schedule_type,
-        timezone: config.timezone,
         weekStartsOn: config.week_starts_on,
     });
 }

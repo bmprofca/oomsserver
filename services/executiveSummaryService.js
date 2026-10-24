@@ -6,8 +6,10 @@ import { UNIQUE_RANDOM_STRING } from "../helpers/function.js";
 import { getConfigWithDecryptedPassword } from "./emailConfigService.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const DEFAULT_TIMEZONE = "Asia/Kolkata";
+// OOMS serves Indian practices only: every period, schedule and label uses IST.
+const REPORT_TIMEZONE = "Asia/Kolkata";
 const MAX_DETAIL_ROWS = 5000;
+const MAX_RECIPIENT_EMAILS = 5;
 
 const SECTION_KEYS = [
     "tasks_completed",
@@ -66,10 +68,10 @@ function addDays(value, days) {
     return formatDate(date);
 }
 
-function localToday(timezone = DEFAULT_TIMEZONE) {
+function localToday() {
     try {
         const parts = new Intl.DateTimeFormat("en-CA", {
-            timeZone: timezone,
+            timeZone: REPORT_TIMEZONE,
             year: "numeric",
             month: "2-digit",
             day: "2-digit",
@@ -82,30 +84,10 @@ function localToday(timezone = DEFAULT_TIMEZONE) {
     }
 }
 
-function normalizeTimezone(value) {
-    const timezone = String(value || DEFAULT_TIMEZONE).trim();
-    try {
-        new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
-        return timezone;
-    } catch (_) {
-        return DEFAULT_TIMEZONE;
-    }
-}
-
-function assertTimezone(value) {
-    const timezone = String(value || DEFAULT_TIMEZONE).trim();
-    try {
-        new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
-    } catch (_) {
-        throw httpError(400, "timezone must be a valid IANA timezone");
-    }
-    return timezone;
-}
-
 function isScheduleDue(config) {
     try {
         const parts = new Intl.DateTimeFormat("en-GB", {
-            timeZone: config.timezone,
+            timeZone: REPORT_TIMEZONE,
             hour: "2-digit",
             minute: "2-digit",
             hour12: false,
@@ -127,7 +109,7 @@ function validateEmails(value, { required = false } = {}) {
     const emails = normalizeEmails(value);
     if (required && emails.length === 0) throw httpError(400, "At least one recipient email is required when automated delivery is enabled");
     if (emails.some((email) => !EMAIL_RE.test(email))) throw httpError(400, "Every recipient email must be valid");
-    if (emails.length > 20) throw httpError(400, "A maximum of 20 recipient emails is supported");
+    if (emails.length > MAX_RECIPIENT_EMAILS) throw httpError(400, `A maximum of ${MAX_RECIPIENT_EMAILS} recipient emails is allowed`);
     return emails;
 }
 
@@ -165,7 +147,6 @@ function normalizeConfig(row, fallback = {}) {
             : "weekly",
         send_hour: Math.min(23, Math.max(0, Number(config.send_hour ?? fallback.send_hour ?? 9))),
         send_minute: Math.min(59, Math.max(0, Number(config.send_minute ?? fallback.send_minute ?? 0))),
-        timezone: normalizeTimezone(config.timezone || fallback.timezone),
         week_starts_on: Math.min(6, Math.max(0, Number(config.week_starts_on ?? fallback.week_starts_on ?? 1))),
         inactivity_days: Math.min(3650, Math.max(0, Number(config.inactivity_days ?? fallback.inactivity_days ?? 30))),
         recipient_emails: normalizeEmails(parseJson(config.recipient_emails_json, config.recipient_emails || fallback.recipient_emails || [])),
@@ -183,7 +164,7 @@ function httpError(statusCode, message) {
     return error;
 }
 
-function normalizePeriod({ fromDate, toDate, scheduleType = "monthly", timezone = DEFAULT_TIMEZONE, weekStartsOn = 1 } = {}) {
+function normalizePeriod({ fromDate, toDate, scheduleType = "monthly", weekStartsOn = 1 } = {}) {
     if (fromDate || toDate) {
         if (!isValidDate(fromDate) || !isValidDate(toDate) || fromDate > toDate) {
             throw httpError(400, "from_date and to_date must be valid dates with from_date <= to_date");
@@ -191,7 +172,7 @@ function normalizePeriod({ fromDate, toDate, scheduleType = "monthly", timezone 
         return { start: fromDate, end: toDate };
     }
 
-    const today = localToday(timezone);
+    const today = localToday();
     if (scheduleType === "monthly") {
         const current = dateFromUtc(today);
         const previousMonthEnd = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 0));
@@ -541,7 +522,6 @@ async function fetchReport({ branchId, period, config, filters = {} }) {
             branch_id: branchId,
             branch_name: branchName,
             period: meta,
-            timezone: config.timezone,
             inactivity_days: Number(filters.inactivityDays ?? config.inactivity_days),
             due_tasks_mode: config.sections.due_tasks?.mode,
             generated_at: new Date().toISOString(),
@@ -708,7 +688,7 @@ function buildPdfDashboard(doc, report, state) {
     doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(19)
         .text("Executive Summary", left + 17, headerY + 10, { width: pageWidth - 34, lineBreak: false });
     doc.fillColor("#dbeafe").font("Helvetica").fontSize(8)
-        .text(`${safeText(report.meta.branch_name)}  ·  ${report.meta.period.from_date} to ${report.meta.period.to_date}  ·  ${safeText(report.meta.timezone)}`, left + 18, headerY + 39, {
+        .text(`${safeText(report.meta.branch_name)}  ·  ${report.meta.period.from_date} to ${report.meta.period.to_date}`, left + 18, headerY + 39, {
             width: pageWidth - 36,
             lineBreak: false,
             ellipsis: true,
@@ -912,11 +892,11 @@ async function ensureConfig(branchId, username = null) {
     try {
         await pool.query(
             `INSERT INTO executive_summary_configs
-             (config_id, branch_id, enabled, schedule_type, send_hour, send_minute, timezone,
+             (config_id, branch_id, enabled, schedule_type, send_hour, send_minute,
               week_starts_on, inactivity_days, recipient_emails_json, sections_json, create_by, modify_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [config.config_id, branchId, config.enabled ? 1 : 0, config.schedule_type, config.send_hour,
-                config.send_minute, config.timezone, config.week_starts_on, config.inactivity_days,
+                config.send_minute, config.week_starts_on, config.inactivity_days,
                 JSON.stringify(config.recipient_emails), JSON.stringify(config.sections), username, username]
         );
     } catch (error) {
@@ -943,7 +923,6 @@ export async function updateExecutiveSummaryConfig(branchId, username, payload =
     if (payload.schedule_type !== undefined && !["weekly", "monthly"].includes(payload.schedule_type)) {
         throw httpError(400, "schedule_type must be weekly or monthly");
     }
-    if (payload.timezone !== undefined) assertTimezone(payload.timezone);
     for (const [key, min, max] of [["send_hour", 0, 23], ["send_minute", 0, 59], ["week_starts_on", 0, 6], ["inactivity_days", 0, 3650]]) {
         if (payload[key] !== undefined && (!Number.isInteger(Number(payload[key])) || Number(payload[key]) < min || Number(payload[key]) > max)) {
             throw httpError(400, `${key} must be an integer from ${min} to ${max}`);
@@ -953,15 +932,14 @@ export async function updateExecutiveSummaryConfig(branchId, username, payload =
     next.recipient_emails = validateEmails(payload.recipient_emails ?? next.recipient_emails, { required: next.enabled });
     if (next.enabled && next.recipient_emails.length === 0) throw httpError(400, "Add at least one recipient before enabling automated delivery");
     next.schedule_type = payload.schedule_type || next.schedule_type;
-    next.timezone = payload.timezone ? assertTimezone(payload.timezone) : next.timezone;
     next.sections = normalizeSections(payload.sections ?? next.sections);
     await pool.query(
         `UPDATE executive_summary_configs
-         SET enabled = ?, schedule_type = ?, send_hour = ?, send_minute = ?, timezone = ?,
+         SET enabled = ?, schedule_type = ?, send_hour = ?, send_minute = ?,
              week_starts_on = ?, inactivity_days = ?, recipient_emails_json = ?, sections_json = ?,
              modify_by = ?, modify_date = NOW(), last_error = NULL
          WHERE branch_id = ? AND config_id = ?`,
-        [next.enabled ? 1 : 0, next.schedule_type, next.send_hour, next.send_minute, next.timezone,
+        [next.enabled ? 1 : 0, next.schedule_type, next.send_hour, next.send_minute,
             next.week_starts_on, next.inactivity_days, JSON.stringify(next.recipient_emails), JSON.stringify(next.sections),
             username, branchId, current.config_id]
     );
@@ -970,7 +948,7 @@ export async function updateExecutiveSummaryConfig(branchId, username, payload =
 
 export async function getExecutiveSummary({ branchId, username, fromDate, toDate, filters = {} } = {}) {
     const config = await ensureConfig(branchId, username);
-    const period = normalizePeriod({ fromDate, toDate, scheduleType: config.schedule_type, timezone: config.timezone, weekStartsOn: config.week_starts_on });
+    const period = normalizePeriod({ fromDate, toDate, scheduleType: config.schedule_type, weekStartsOn: config.week_starts_on });
     const report = await fetchReport({ branchId, period, config, filters });
     return { ...report, config: { inactivity_days: config.inactivity_days, sections: config.sections } };
 }
@@ -1028,7 +1006,7 @@ async function createRun({ branchId, config, period, triggerType, username }) {
 
 export async function runExecutiveSummary({ branchId, username, period, triggerType = "manual", sendEmail = true, config: passedConfig = null } = {}) {
     const config = passedConfig || await ensureConfig(branchId, username);
-    const actualPeriod = period || normalizePeriod({ scheduleType: config.schedule_type, timezone: config.timezone, weekStartsOn: config.week_starts_on });
+    const actualPeriod = period || normalizePeriod({ scheduleType: config.schedule_type, weekStartsOn: config.week_starts_on });
     const run = await createRun({ branchId, config, period: actualPeriod, triggerType, username });
     if (run.skipped) return { skipped: true, period: actualPeriod };
 
@@ -1123,7 +1101,7 @@ export async function processDueExecutiveSummarySchedules() {
     for (const row of configs) {
         const config = normalizeConfig(row);
         if (!isScheduleDue(config)) continue;
-        const period = normalizePeriod({ scheduleType: config.schedule_type, timezone: config.timezone, weekStartsOn: config.week_starts_on });
+        const period = normalizePeriod({ scheduleType: config.schedule_type, weekStartsOn: config.week_starts_on });
         try {
             results.push(await runExecutiveSummary({ branchId: config.branch_id, username: config.modify_by || config.create_by, period, triggerType: "scheduled", sendEmail: true, config }));
         } catch (error) {
@@ -1133,4 +1111,4 @@ export async function processDueExecutiveSummarySchedules() {
     return results;
 }
 
-export { normalizePeriod, normalizeConfig, normalizeSections, periodMeta };
+export { normalizePeriod, normalizeConfig, normalizeSections, periodMeta, validateEmails, MAX_RECIPIENT_EMAILS };

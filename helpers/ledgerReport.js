@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import pool from "../db.js";
 import { formatPurchaseParticularsText } from "./purchaseParticulars.js";
 import { formatCompliancePeriodLabel } from "./compliancePeriodLabel.js";
+import { oppositeSnippetDetails } from "./transactionParty.js";
 
 function formatCurrency(amount, { signed = false } = {}) {
     const n = Number(amount) || 0;
@@ -465,7 +466,7 @@ export async function collectLedgerStatement({
         const hasOppositeParty = oppType && oppId;
         const oppKey = hasOppositeParty ? `${oppType}|${oppId}` : null;
         const oppositeSnippet = oppKey ? oppositeCache.get(oppKey) || {} : {};
-        const details = oppositeSnippet.bank || oppositeSnippet.client || {};
+        const details = oppositeSnippetDetails(oppositeSnippet);
 
         let particular = "";
         let particularSub = "";
@@ -509,10 +510,10 @@ export async function collectLedgerStatement({
             particularSub = "";
             if (row.remark) particularRemark = String(row.remark).trim();
         } else if (hasOppositeParty) {
-            if (oppType === "client" || oppType === "ca" || oppType === "agent") {
-                particular = details.name || details.username || "";
-            } else if (oppType === "bank") {
+            if (oppType === "bank") {
                 particular = details.holder || details.bank || "";
+            } else {
+                particular = details.name || details.username || "";
             }
         }
         if (!isSale && !isPurchase && row.remark) {

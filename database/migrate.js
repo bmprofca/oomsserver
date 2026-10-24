@@ -73,7 +73,9 @@ async function runMigration(filePath) {
           error.code === 'ER_DUP_ENTRY' ||
           error.code === 'ER_DUP_KEYNAME' ||
           error.code === 'ER_DUP_FIELDNAME' ||
-          error.errno === 1060) {
+          error.errno === 1060 ||
+          // DROP COLUMN on a re-run, after the column is already gone
+          error.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
           console.log(`   ⚠️  Statement ${i + 1}: ${error.code || error.errno} (acceptable)`);
           successCount++;
         } else {

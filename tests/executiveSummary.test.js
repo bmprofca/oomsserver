@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { inflateSync } from "node:zlib";
-import { buildExecutiveSummaryPdf, normalizePeriod, normalizeSections } from "../services/executiveSummaryService.js";
+import { buildExecutiveSummaryPdf, normalizeConfig, normalizePeriod, normalizeSections, validateEmails, MAX_RECIPIENT_EMAILS } from "../services/executiveSummaryService.js";
 
 test("executive summary normalizes the previous completed month", () => {
     const period = normalizePeriod({
@@ -79,4 +79,31 @@ test("executive summary PDF includes a valid statistical overview", async () => 
     assert.ok(dashboard.includes("0.9176470588235294 0.34509803921568627 0.047058823529411764 scn"), "dashboard should include orange chart bars");
     assert.ok((dashboard.match(/ c\n/g) || []).length > 100, "dashboard should contain vector chart and card graphics");
     assert.ok(pageStreams.some((page) => page.includes("0.9921568627450981 0.9490196078431372 0.9725490196078431 scn")), "detail pages should include a section-specific tinted highlight");
+});
+
+test("executive summary allows at most 5 recipient emails", () => {
+    assert.equal(MAX_RECIPIENT_EMAILS, 5);
+    const five = ["a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com"];
+    assert.deepEqual(validateEmails(five), five);
+    assert.throws(
+        () => validateEmails([...five, "f@x.com"]),
+        (error) => error.statusCode === 400 && /maximum of 5 recipient emails/.test(error.message)
+    );
+});
+
+test("executive summary counts recipients after trimming, lowercasing and de-duplicating", () => {
+    const emails = validateEmails(" A@x.com, a@x.com; b@x.com c@x.com,d@x.com e@x.com ,E@X.COM");
+    assert.deepEqual(emails, ["a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com"]);
+});
+
+test("executive summary still rejects invalid or missing recipients", () => {
+    assert.throws(() => validateEmails(["not-an-email"]), (error) => error.statusCode === 400);
+    assert.throws(() => validateEmails([], { required: true }), (error) => error.statusCode === 400);
+});
+
+test("executive summary config has no timezone setting (India-only, always IST)", () => {
+    const config = normalizeConfig({ config_id: "es_1", branch_id: "b1", timezone: "America/New_York", send_hour: 9, send_minute: 30 });
+    assert.equal("timezone" in config, false);
+    assert.equal(config.send_hour, 9);
+    assert.equal(config.send_minute, 30);
 });
