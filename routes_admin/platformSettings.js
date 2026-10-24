@@ -5,7 +5,6 @@ import {
     updatePlatformSettings,
 } from "../helpers/platformSettings.js";
 import { testB2Connection } from "../helpers/b2Storage.js";
-import { testGoogleCalendarConnection } from "../services/googleCalendarService.js";
 
 const router = express.Router();
 
@@ -20,7 +19,13 @@ router.get("/", authAdmin, async (_req, res) => {
         return res.status(200).json({
             success: true,
             message: "Platform settings retrieved",
-            data,
+            data: {
+                ...data,
+                server_secret_status: {
+                    app_encryption_key_configured: Boolean(process.env.APP_ENCRYPTION_KEY),
+                    smtp_encryption_key_configured: Boolean(process.env.SMTP_ENCRYPTION_KEY),
+                },
+            },
         });
     } catch (error) {
         console.error("ADMIN PLATFORM SETTINGS GET ERROR:", error);
@@ -72,23 +77,6 @@ router.post("/test/b2", authAdmin, async (_req, res) => {
         return res.status(400).json({
             success: false,
             message: upstream ? `B2 test failed: ${upstream}` : error?.message || "B2 test failed",
-        });
-    }
-});
-
-router.post("/test/google-calendar", authAdmin, async (_req, res) => {
-    try {
-        await testGoogleCalendarConnection();
-        return res.status(200).json({
-            success: true,
-            message: "Google Calendar connection is ready",
-            data: { connected: true },
-        });
-    } catch (error) {
-        console.error("ADMIN GOOGLE CALENDAR TEST ERROR:", error?.message || error);
-        return res.status(400).json({
-            success: false,
-            message: error?.message || "Google Calendar connection test failed",
         });
     }
 });

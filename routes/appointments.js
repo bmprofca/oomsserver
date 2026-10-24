@@ -3,7 +3,15 @@ import express from "express";
 import pool from "../db.js";
 import { auth, checkSubscription, requireFeature, validateBranch } from "../middleware/auth.js";
 import { syncAppointment } from "../services/appointmentSyncWorker.js";
-import { isGoogleCalendarConfigured } from "../services/googleCalendarService.js";
+import {
+    beginBranchGoogleCalendarConnect,
+    completeBranchGoogleCalendarConnect,
+    getBranchCalendarStatus,
+    getCalendarConfigForNewAppointment,
+    getOfficeCalendarReturnUrl,
+    isCalendarConfiguredForAppointment,
+    testBranchGoogleCalendar,
+} from "../services/googleCalendarService.js";
 import { notifyAppointmentAttendeesPush } from "../helpers/fcmPush.js";
 
 const router = express.Router();
@@ -148,7 +156,7 @@ async function syncAndReturn(res, appointmentId, statusCode = 200) {
         success: true,
         data,
         calendar: {
-            configured: await isGoogleCalendarConfigured(),
+            configured: await isCalendarConfiguredForAppointment(data),
             status: data.calendar_sync_status,
             error: data.calendar_sync_error,
         },
@@ -157,6 +165,30 @@ async function syncAndReturn(res, appointmentId, statusCode = 200) {
 
 function actorRole(req) {
     return String(req.appointmentRole || "").toLowerCase();
+}
+
+router.get("/google-calendar/callback", async (req, res) => {
+    try {
+        if (req.query.error) {
+            return res.redirect(getOfficeCalendarReturnUrl(false, String(req.query.error_description || req.query.error)));
+        }
+        await completeBranchGoogleCalendarConnect({ state: req.query.state, code: req.query.code });
+        return res.redirect(getOfficeCalendarReturnUrl(true));
+    } catch (error) {
+        console.error("[Google Calendar] OAuth callback failed:", error?.message || error);
+        try {
+            return res.redirect(getOfficeCalendarReturnUrl(false, error?.message || "Google Calendar connection failed"));
+        } catch (redirectError) {
+            return sendError(res, redirectError, "Google Calendar callback could not return to Office Web");
+        }
+    }
+});
+
+function requireAppointmentAdmin(req, res, next) {
+    if (actorRole(req) !== "admin") {
+        return res.status(403).json({ success: false, message: "Only a branch admin can configure Google Calendar" });
+    }
+    return next();
 }
 
 async function ensureAppointmentManageAccess(req, appointment) {
@@ -177,6 +209,36 @@ router.use(async (req, res, next) => {
         next();
     } catch (error) {
         sendError(res, error, "Failed to verify appointment access");
+    }
+});
+
+router.get("/google-calendar", requireAppointmentAdmin, async (req, res) => {
+    try {
+        return res.json({ success: true, data: await getBranchCalendarStatus(req.branch_id) });
+    } catch (error) {
+        return sendError(res, error, "Failed to load this company's Google Calendar settings");
+    }
+});
+
+router.post("/google-calendar/connect", requireAppointmentAdmin, async (req, res) => {
+    try {
+        const data = await beginBranchGoogleCalendarConnect({
+            branchId: req.branch_id,
+            username: sessionUsername(req),
+            calendarId: req.body?.calendar_id,
+        });
+        return res.json({ success: true, data });
+    } catch (error) {
+        return sendError(res, error, "Failed to start Google Calendar authorization");
+    }
+});
+
+router.post("/google-calendar/test", requireAppointmentAdmin, async (req, res) => {
+    try {
+        const data = await testBranchGoogleCalendar(req.branch_id);
+        return res.json({ success: true, message: "Google Calendar connection is ready", data });
+    } catch (error) {
+        return sendError(res, error, "Google Calendar connection test failed");
     }
 });
 
@@ -318,15 +380,16 @@ router.post("/", async (req, res) => {
         ]);
         const appointmentId = `apt_${crypto.randomUUID()}`;
         const eventId = crypto.randomBytes(20).toString("hex");
+        const calendarConnectionId = await getCalendarConfigForNewAppointment(req.branch_id);
         connection = await pool.getConnection();
         await connection.beginTransaction();
         await connection.query(
             `INSERT INTO appointments
              (appointment_id, branch_id, client_username, client_name, created_by, notes,
-              start_at, end_at, timezone, google_event_id, calendar_retry_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
+              start_at, end_at, timezone, google_event_id, google_calendar_connection_id, calendar_retry_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
             [appointmentId, req.branch_id, client.username, client.name, sessionUsername(req),
-                input.notes, input.start_at, input.end_at, input.timezone, eventId]
+                input.notes, input.start_at, input.end_at, input.timezone, eventId, calendarConnectionId]
         );
         await persistAttendees(connection, appointmentId, attendees);
         await connection.commit();
@@ -435,7 +498,7 @@ router.post("/:appointmentId/sync", async (req, res) => {
         await ensureAppointmentManageAccess(req, existing);
         await syncAppointment(existing.appointment_id);
         const data = await fetchAppointment(existing.appointment_id, req.branch_id);
-        return res.json({ success: true, data, calendar: { configured: await isGoogleCalendarConfigured(), status: data.calendar_sync_status, error: data.calendar_sync_error } });
+        return res.json({ success: true, data, calendar: { configured: await isCalendarConfiguredForAppointment(data), status: data.calendar_sync_status, error: data.calendar_sync_error } });
     } catch (error) {
         return sendError(res, error, "Failed to retry calendar synchronization");
     }

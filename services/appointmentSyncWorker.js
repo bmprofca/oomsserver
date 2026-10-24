@@ -16,7 +16,10 @@ export async function syncAppointment(appointmentId) {
         if (!lockAcquired) return;
 
         const [rows] = await pool.query(
-            `SELECT * FROM appointments WHERE appointment_id = ? LIMIT 1`,
+            `SELECT a.*, b.name AS branch_name
+             FROM appointments a
+             LEFT JOIN branch_list b ON b.branch_id = a.branch_id
+             WHERE a.appointment_id = ? LIMIT 1`,
             [appointmentId]
         );
         const appointment = rows[0];

@@ -37,6 +37,7 @@ test("Google Calendar event payload uses the stored UTC instant and selected pro
     const event = buildCalendarEvent({
         google_event_id: "a123456789abcdef",
         client_name: "Example Client",
+        branch_name: "Example Company",
         notes: "Review documents",
         start_at: "2026-11-01 04:30:00",
         end_at: "2026-11-01 05:00:00",
@@ -46,6 +47,8 @@ test("Google Calendar event payload uses the stored UTC instant and selected pro
         attendee_email: "staff@example.com",
     }]);
 
+    assert.equal(event.summary, "Example Company - Appointment with Example Client");
+    assert.equal(event.description, "Company: Example Company\n\nReview documents");
     assert.equal(event.start.dateTime, "2026-11-01T04:30:00.000Z");
     assert.equal(event.start.timeZone, "Asia/Kolkata");
     assert.deepEqual(event.attendees, [{ email: "staff@example.com", displayName: "Staff One" }]);

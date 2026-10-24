@@ -39,7 +39,6 @@ test("resolution order is database → env → default", async () => {
     const env = {
         B2_BUCKET: "from-env",
         ONECHATTING_BASE_URL: "https://env.example.com/",
-        GOOGLE_CALENDAR_CLIENT_ID: "legacy-env-value",
     };
     const store = createPlatformSettingsStore({ pool, env, encrypt, decrypt, log: { error() {} } });
     await store.load();
@@ -50,11 +49,17 @@ test("resolution order is database → env → default", async () => {
     assert.equal(store.get("TAX_RATE"), "18", "default used when neither db nor env");
     assert.equal(store.getNumber("TAX_RATE"), 18);
     assert.equal(store.get("WHATSAPPWEB_BASE_URL"), "", "unset with no default is empty");
-    assert.equal(store.get("GOOGLE_CALENDAR_CLIENT_ID"), "", "calendar credentials ignore environment variables");
-    assert.equal(store.get("GOOGLE_CALENDAR_ID"), "primary", "calendar ID uses its database setting default");
-    await store.update({ values: { GOOGLE_CALENDAR_CLIENT_ID: "calendar-client-id" } });
-    assert.equal(store.get("GOOGLE_CALENDAR_CLIENT_ID"), "calendar-client-id");
-    assert.equal(pool.rows.get("GOOGLE_CALENDAR_CLIENT_ID").setting_value, "enc(calendar-client-id)");
+    assert.equal(getPlatformSettingDef("GOOGLE_CALENDAR_CLIENT_ID"), null, "shared calendar credentials are no longer platform settings");
+    assert.equal(getPlatformSettingDef("GOOGLE_CALENDAR_OAUTH_CLIENT_ID")?.group, "google_calendar_oauth");
+    await store.update({
+        values: {
+            GOOGLE_CALENDAR_OAUTH_CLIENT_ID: "oauth-client-id",
+            GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+        },
+    });
+    assert.equal(store.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID"), "oauth-client-id");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID").setting_value, "enc(oauth-client-id)");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET").setting_value, "enc(oauth-client-secret)");
 });
 
 test("describe() masks secrets and reports the source of each value", async () => {
