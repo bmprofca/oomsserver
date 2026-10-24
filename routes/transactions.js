@@ -24,7 +24,7 @@ import {
     generateLedgerPdfBuffer,
 } from "../helpers/ledgerReport.js";
 import { buildLedgerDownloadFilename } from "../helpers/ledgerFilename.js";
-import { getOppositePartySnippet } from "../helpers/transactionParty.js";
+import { getOppositePartySnippet, oppositeSnippetDetails } from "../helpers/transactionParty.js";
 import { formatPurchaseParticularsText } from "../helpers/purchaseParticulars.js";
 import { formatCompliancePeriodLabel } from "../helpers/compliancePeriodLabel.js";
 import { uploadBufferToOneSaas } from "../services/onesaasUploadService.js";
@@ -219,12 +219,13 @@ function capitalRowToItem(element, balance) {
     };
 }
 
-async function resolvePartySnippet(party_type, party_id) {
+async function resolvePartySnippet(party_type, party_id, branch_id) {
     if (!party_type || !party_id) return {};
     const type = String(party_type).trim();
     const id = String(party_id).trim();
     if (type === "bank") return (await BANK_SNIPPED_DATA(id)) || {};
     if (type === "capital") return (await CAPITAL_SNIPPED_DATA(id)) || {};
+    if (type === "expense") return oppositeSnippetDetails(await getOppositePartySnippet(branch_id, type, id));
     return (await USER_SNIPPED_DATA(id)) || {};
 }
 
@@ -784,8 +785,8 @@ router.get("/details", auth, validateBranch, async (req, res) => {
         const party2Type = row.party2_type || null;
         const party2Id = row.party2_id || null;
         const [party1Details, party2Details] = await Promise.all([
-            resolvePartySnippet(party1Type, party1Id),
-            resolvePartySnippet(party2Type, party2Id),
+            resolvePartySnippet(party1Type, party1Id, branch_id),
+            resolvePartySnippet(party2Type, party2Id, branch_id),
         ]);
 
         const data = {
@@ -1054,7 +1055,7 @@ router.get("/details", auth, validateBranch, async (req, res) => {
                     item: entryItems[0]?.item || null,
                     expense_party: {
                         type: expensePartyType,
-                        details: await resolvePartySnippet(expensePartyType, expensePartyId),
+                        details: await resolvePartySnippet(expensePartyType, expensePartyId, branch_id),
                     },
                 });
             }
@@ -1233,7 +1234,7 @@ router.get("/list", auth, validateBranch, async (req, res) => {
             const hasOppositeParty = oppType && oppId;
             const oppKey = hasOppositeParty ? `${oppType}|${oppId}` : null;
             const oppositeSnippet = oppKey ? (oppositeCache.get(oppKey) || {}) : {};
-            const details = oppositeSnippet.bank || oppositeSnippet.client || {};
+            const details = oppositeSnippetDetails(oppositeSnippet);
             const particular = hasOppositeParty
                 ? { type: oppType, details, remark: row.remark ?? null }
                 : { remark: row.remark ?? null };

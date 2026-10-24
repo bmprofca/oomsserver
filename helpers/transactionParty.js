@@ -76,14 +76,15 @@ export async function validateTransactionParty(db, branch_id, party_type, party_
 }
 
 /**
- * Opposite-party display snippet for ledger rows (client / bank).
- * Moved unchanged from routes/transactions.js so ledger statements can be built outside that route.
+ * Opposite-party display snippet for ledger rows, keyed by party type
+ * (client / ca / agent / bank / staff / admin / capital / expense). Every snippet carries a `name`
+ * except bank, which keeps its bank/holder fields.
  */
 export async function getOppositePartySnippet(branch_id, party_type, party_id) {
     if (!party_type || !party_id) return {};
     const type = String(party_type).trim();
     const id = String(party_id).trim();
-    if (type === "client") {
+    if (type === "client" || type === "ca" || type === "agent") {
         const [rows] = await pool.query(
             `SELECT p.name, p.email, p.mobile, p.country_code, c.username
              FROM clients c
@@ -94,7 +95,7 @@ export async function getOppositePartySnippet(branch_id, party_type, party_id) {
         const r = rows?.[0];
         if (!r) return {};
         return {
-            client: {
+            [type]: {
                 username: r?.username,
                 name: r?.name ?? null,
                 email: r?.email ?? null,
@@ -122,5 +123,48 @@ export async function getOppositePartySnippet(branch_id, party_type, party_id) {
             }
         };
     }
+    if (type === "staff" || type === "admin") {
+        const [rows] = await pool.query(
+            `SELECT bm.username, p.name, p.email, p.mobile, p.country_code
+             FROM branch_mapping bm
+             LEFT JOIN profile p ON p.username = bm.username AND p.id = (SELECT MAX(p2.id) FROM profile p2 WHERE p2.username = bm.username)
+             WHERE bm.branch_id = ? AND bm.username = ? AND bm.type = ? LIMIT 1`,
+            [branch_id, id, type]
+        );
+        const r = rows?.[0];
+        if (!r) return {};
+        return {
+            [type]: {
+                username: r.username,
+                name: r.name ?? null,
+                email: r.email ?? null,
+                mobile: r.mobile ?? null,
+                country_code: r.country_code ?? null
+            }
+        };
+    }
+    if (type === "capital") {
+        const [rows] = await pool.query(
+            "SELECT capital_id, name FROM capitals WHERE branch_id = ? AND capital_id = ? LIMIT 1",
+            [branch_id, id]
+        );
+        const r = rows?.[0];
+        if (!r) return {};
+        return { capital: { capital_id: r.capital_id, name: r.name ?? null } };
+    }
+    if (type === "expense") {
+        const [rows] = await pool.query(
+            "SELECT item_id, name, type FROM expense_items WHERE branch_id = ? AND item_id = ? LIMIT 1",
+            [branch_id, id]
+        );
+        const r = rows?.[0];
+        if (!r) return {};
+        return { expense: { item_id: r.item_id, name: r.name ?? null, type: r.type ?? null } };
+    }
     return {};
+}
+
+/** The single details object inside a getOppositePartySnippet result ({} when unresolved). */
+export function oppositeSnippetDetails(snippet) {
+    return Object.values(snippet || {})[0] || {};
 }
