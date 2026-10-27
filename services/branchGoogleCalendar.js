@@ -13,10 +13,28 @@ async function getOAuthCredentials() {
         getPlatformSettingFresh("GOOGLE_CALENDAR_OAUTH_CLIENT_ID"),
         getPlatformSettingFresh("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET"),
     ]);
-    return {
+    const credentials = {
         client_id: String(clientId || "").trim(),
         client_secret: String(clientSecret || "").trim(),
     };
+    if (credentials.client_id && credentials.client_secret) return credentials;
+
+    const keys = ["GOOGLE_CALENDAR_OAUTH_CLIENT_ID", "GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET"];
+    const [rows] = await pool.query(
+        `SELECT setting_key, setting_value
+         FROM platform_settings
+         WHERE setting_key IN (?, ?)`,
+        keys
+    );
+    const storedKeys = new Set(rows
+        .filter((row) => String(row.setting_value || "").trim())
+        .map((row) => row.setting_key));
+    if (keys.some((key) => storedKeys.has(key) && !credentials[key.endsWith("_ID") ? "client_id" : "client_secret"])) {
+        throw new Error(
+            "The saved Google Calendar OAuth settings use an unavailable encryption key. Re-enter both OAuth values in Admin Panel → Platform Settings; calendar OAuth settings are now saved as readable database values and no longer depend on the encryption key."
+        );
+    }
+    return credentials;
 }
 
 async function configuredOAuthClient() {
@@ -33,11 +51,14 @@ function calendarEventsUrl(calendarId, eventId = "") {
 }
 
 async function requestCalendar(config, url, method = "GET", body, allowMissing = false) {
-    const { client_id, client_secret } = await getOAuthCredentials();
-    if (!client_id || !client_secret) {
+    const hasConfiguredClient = String(config.client_id || "").trim() && String(config.client_secret || "").trim();
+    const oauthCredentials = hasConfiguredClient ? {} : await getOAuthCredentials();
+    const clientId = String(config.client_id || oauthCredentials.client_id).trim();
+    const clientSecret = String(config.client_secret || oauthCredentials.client_secret).trim();
+    if (!clientId || !clientSecret) {
         throw new Error("Configure the OOMS Google Calendar OAuth client in Admin Panel → Platform Settings");
     }
-    const client = new OAuth2Client(client_id, client_secret, CALLBACK_URL);
+    const client = new OAuth2Client(clientId, clientSecret, CALLBACK_URL);
     client.setCredentials({ refresh_token: config.refresh_token });
     const tokenResponse = await client.getAccessToken();
     const token = typeof tokenResponse === "string" ? tokenResponse : tokenResponse?.token;
@@ -241,7 +262,7 @@ async function getAppointmentCalendarConfig(appointment) {
 }
 
 export async function getCalendarConfigForNewAppointment(branchId) {
-    configuredOAuthClient();
+    await configuredOAuthClient();
     const connection = await getActiveBranchCalendarConnection(branchId);
     if (!connection) {
         throw Object.assign(new Error("Connect this company's Google Calendar in Settings before scheduling appointments"), { status: 409 });
@@ -311,9 +332,8 @@ export async function testBranchGoogleCalendar(branchId) {
 
 export function getOfficeCalendarReturnUrl(success, message = "") {
     const configuredOrigin = String(process.env.OFFICE_WEB_ORIGIN || "").trim();
-    const fallback = process.env.NODE_ENV === "production" ? "" : "http://localhost:3000";
+    const fallback = process.env.NODE_ENV === "development" ? "http://localhost:3000" : "https://app.ooms.in";
     const origin = configuredOrigin || fallback;
-    if (!origin) throw new Error("OFFICE_WEB_ORIGIN must be configured for the Google Calendar OAuth callback");
     const url = new URL("/settings/google-calendar", origin);
     if (success) url.searchParams.set("calendar_connected", "1");
     else url.searchParams.set("calendar_error", message || "Google Calendar connection failed");

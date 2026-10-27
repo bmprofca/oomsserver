@@ -85,11 +85,27 @@ router.post("/login/send-otp", async (req, res) => {
 
         await conn.commit();
 
-        await sendClientOtp({
-            country_code: normalizedCountryCode,
-            mobile: normalizedMobile,
-            otp,
-        });
+        try {
+            await sendClientOtp({
+                country_code: normalizedCountryCode,
+                mobile: normalizedMobile,
+                otp,
+            });
+        } catch (sendError) {
+            console.error("ADMIN LOGIN OTP SMS ERROR:", sendError?.message || sendError);
+            try {
+                await conn.execute(
+                    "UPDATE otps SET status = ? WHERE otp_id = ? AND status = ?",
+                    ["1", otp_id, "0"]
+                );
+            } catch (invalidateError) {
+                console.error("ADMIN LOGIN OTP INVALIDATION ERROR:", invalidateError?.message || invalidateError);
+            }
+            return res.status(503).json({
+                success: false,
+                message: "OTP delivery is temporarily unavailable. Please contact the system administrator.",
+            });
+        }
 
         return res.status(200).json({
             success: true,

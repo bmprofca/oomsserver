@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseAppointmentInput } from "../routes/appointments.js";
+import { getOfficeCalendarReturnUrl } from "../services/branchGoogleCalendar.js";
 import { buildCalendarEvent } from "../services/googleCalendarService.js";
 
 const validInput = {
@@ -52,4 +53,44 @@ test("Google Calendar event payload uses the stored UTC instant and selected pro
     assert.equal(event.start.dateTime, "2026-11-01T04:30:00.000Z");
     assert.equal(event.start.timeZone, "Asia/Kolkata");
     assert.deepEqual(event.attendees, [{ email: "staff@example.com", displayName: "Staff One" }]);
+});
+
+test("Google Calendar callback returns to the configured Office origin", () => {
+    const previousOrigin = process.env.OFFICE_WEB_ORIGIN;
+    process.env.OFFICE_WEB_ORIGIN = "https://custom-office.example/";
+
+    try {
+        assert.equal(
+            getOfficeCalendarReturnUrl(true),
+            "https://custom-office.example/settings/google-calendar?calendar_connected=1"
+        );
+    } finally {
+        if (previousOrigin === undefined) delete process.env.OFFICE_WEB_ORIGIN;
+        else process.env.OFFICE_WEB_ORIGIN = previousOrigin;
+    }
+});
+
+test("Google Calendar callback defaults to production Office outside development", () => {
+    const previousOrigin = process.env.OFFICE_WEB_ORIGIN;
+    const previousNodeEnv = process.env.NODE_ENV;
+    delete process.env.OFFICE_WEB_ORIGIN;
+    delete process.env.NODE_ENV;
+
+    try {
+        assert.equal(
+            getOfficeCalendarReturnUrl(true),
+            "https://app.ooms.in/settings/google-calendar?calendar_connected=1"
+        );
+
+        process.env.NODE_ENV = "development";
+        assert.equal(
+            getOfficeCalendarReturnUrl(true),
+            "http://localhost:3000/settings/google-calendar?calendar_connected=1"
+        );
+    } finally {
+        if (previousOrigin === undefined) delete process.env.OFFICE_WEB_ORIGIN;
+        else process.env.OFFICE_WEB_ORIGIN = previousOrigin;
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
+    }
 });

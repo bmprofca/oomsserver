@@ -10,8 +10,9 @@ import { encryptSecret, decryptSecret, maskSecret } from "./secretBox.js";
  *
  * Resolution order: database row → process.env (legacy fallback) → default, except
  * database-only definitions which never fall back to the environment.
- * Secrets are AES-256-GCM encrypted at rest (helpers/secretBox.js) and are never returned
- * in clear text by the admin API; only a masked hint is sent.
+ * Secrets are AES-256-GCM encrypted at rest by default (helpers/secretBox.js) and are
+ * never returned in clear text by the admin API; only a masked hint is sent. A definition
+ * may opt out of encryption when explicitly required for cross-instance compatibility.
  *
  * Values are cached in memory so hot paths (GST maths, B2 uploads, WhatsApp sends, OTP SMS)
  * can read them synchronously. The cache is loaded at server start, refreshed after every
@@ -101,18 +102,20 @@ export const PLATFORM_SETTING_DEFS = [
         group: "google_calendar_oauth",
         label: "OAuth client ID",
         type: "secret",
+        storeUnencrypted: true,
         default: "",
         databaseOnly: true,
-        description: "Central OOMS Google OAuth web client ID for per-company Calendar authorization. Stored encrypted and never returned to the browser.",
+        description: "Central OOMS Google OAuth web client ID for per-company Calendar authorization. Stored as readable text in the database; never returned to the browser.",
     },
     {
         key: "GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET",
         group: "google_calendar_oauth",
         label: "OAuth client secret",
         type: "secret",
+        storeUnencrypted: true,
         default: "",
         databaseOnly: true,
-        description: "Central OOMS Google OAuth client secret. Stored encrypted and never returned to the browser.",
+        description: "Central OOMS Google OAuth client secret. Stored as readable text in the database; never returned to the browser.",
     },
     {
         key: "BASE_INVITATION_LINK",
@@ -483,7 +486,8 @@ export function createPlatformSettingsStore({
                     const def = DEF_BY_KEY.get(row.setting_key);
                     if (!def) continue;
                     let value = trimStr(row.setting_value);
-                    if (value && (def.type === "secret" || Number(row.is_secret) === 1)) {
+                    if (value && (Number(row.is_secret) === 1
+                        || (def.type === "secret" && !def.storeUnencrypted))) {
                         value = trimStr(decrypt(value));
                     }
                     next.set(row.setting_key, {
@@ -594,7 +598,7 @@ export function createPlatformSettingsStore({
         for (const key of clearSet) {
             const def = DEF_BY_KEY.get(key);
             if (!def) throw Object.assign(new Error(`Unknown setting: ${key}`), { status: 400 });
-            writes.push({ key, value: "", is_secret: def.type === "secret" ? 1 : 0 });
+            writes.push({ key, value: "", is_secret: def.type === "secret" && !def.storeUnencrypted ? 1 : 0 });
         }
 
         for (const [rawKey, rawValue] of Object.entries(values || {})) {
@@ -604,7 +608,7 @@ export function createPlatformSettingsStore({
             if (!def) throw Object.assign(new Error(`Unknown setting: ${key}`), { status: 400 });
             const value = normalizeSettingValue(def, rawValue);
             if (def.type === "secret" && !value) continue; // blank secret = keep
-            writes.push({ key, value, is_secret: def.type === "secret" ? 1 : 0 });
+            writes.push({ key, value, is_secret: def.type === "secret" && !def.storeUnencrypted ? 1 : 0 });
         }
 
         if (!writes.length) {

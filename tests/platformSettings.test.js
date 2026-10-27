@@ -58,8 +58,16 @@ test("resolution order is database → env → default", async () => {
         },
     });
     assert.equal(store.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID"), "oauth-client-id");
-    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID").setting_value, "enc(oauth-client-id)");
-    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET").setting_value, "enc(oauth-client-secret)");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID").setting_value, "oauth-client-id");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_ID").is_secret, 0);
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET").setting_value, "oauth-client-secret");
+    assert.equal(pool.rows.get("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET").is_secret, 0);
+
+    const described = await store.describe();
+    const calendarFields = described.groups.find((group) => group.key === "google_calendar_oauth").fields;
+    const clientSecret = calendarFields.find((field) => field.key === "GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET");
+    assert.equal(clientSecret.value, "", "OAuth client secret is never returned to the admin UI");
+    assert.equal(clientSecret.has_value, true);
 });
 
 test("describe() masks secrets and reports the source of each value", async () => {
