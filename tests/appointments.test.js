@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseAppointmentInput } from "../routes/appointments.js";
-import { getOfficeCalendarReturnUrl } from "../services/branchGoogleCalendar.js";
+import { getGoogleCalendarCallbackUrl, getOfficeCalendarReturnUrl } from "../services/branchGoogleCalendar.js";
 import { buildCalendarEvent } from "../services/googleCalendarService.js";
 
 const validInput = {
@@ -68,6 +68,20 @@ test("Google Calendar callback returns to the configured Office origin", () => {
         if (previousOrigin === undefined) delete process.env.OFFICE_WEB_ORIGIN;
         else process.env.OFFICE_WEB_ORIGIN = previousOrigin;
     }
+});
+
+test("Google Calendar callback supports a distinct local OAuth redirect URI", () => {
+    assert.equal(
+        getGoogleCalendarCallbackUrl({
+            BASE_DOMAIN: "https://server.ooms.in",
+            GOOGLE_CALENDAR_CALLBACK_URL: "http://localhost:8877/api/v1/appointments/google-calendar/callback",
+        }),
+        "http://localhost:8877/api/v1/appointments/google-calendar/callback"
+    );
+    assert.equal(
+        getGoogleCalendarCallbackUrl({ BASE_DOMAIN: "https://server.ooms.in/" }),
+        "https://server.ooms.in/api/v1/appointments/google-calendar/callback"
+    );
 });
 
 test("Google Calendar callback defaults to production Office outside development", () => {

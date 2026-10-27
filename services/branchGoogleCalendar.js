@@ -5,8 +5,14 @@ import { decryptSecret, encryptSecret } from "../helpers/secretBox.js";
 import { getPlatformSettingFresh } from "../helpers/platformSettings.js";
 
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-const BASE_DOMAIN = String(process.env.BASE_DOMAIN || "https://server.ooms.in").trim().replace(/\/+$/, "");
-const CALLBACK_URL = `${BASE_DOMAIN}/api/v1/appointments/google-calendar/callback`;
+const CALLBACK_PATH = "/api/v1/appointments/google-calendar/callback";
+
+export function getGoogleCalendarCallbackUrl(env = process.env) {
+    const override = String(env.GOOGLE_CALENDAR_CALLBACK_URL || "").trim();
+    if (override) return override;
+    const baseDomain = String(env.BASE_DOMAIN || "https://server.ooms.in").trim().replace(/\/+$/, "");
+    return `${baseDomain}${CALLBACK_PATH}`;
+}
 
 async function getOAuthCredentials() {
     const [clientId, clientSecret] = await Promise.all([
@@ -42,7 +48,7 @@ async function configuredOAuthClient() {
     if (!clientId || !clientSecret) {
         throw new Error("Configure the OOMS Google Calendar OAuth client in Admin Panel → Platform Settings");
     }
-    return new OAuth2Client(clientId, clientSecret, CALLBACK_URL);
+    return new OAuth2Client(clientId, clientSecret, getGoogleCalendarCallbackUrl());
 }
 
 function calendarEventsUrl(calendarId, eventId = "") {
@@ -58,7 +64,7 @@ async function requestCalendar(config, url, method = "GET", body, allowMissing =
     if (!clientId || !clientSecret) {
         throw new Error("Configure the OOMS Google Calendar OAuth client in Admin Panel → Platform Settings");
     }
-    const client = new OAuth2Client(clientId, clientSecret, CALLBACK_URL);
+    const client = new OAuth2Client(clientId, clientSecret, getGoogleCalendarCallbackUrl());
     client.setCredentials({ refresh_token: config.refresh_token });
     const tokenResponse = await client.getAccessToken();
     const token = typeof tokenResponse === "string" ? tokenResponse : tokenResponse?.token;
