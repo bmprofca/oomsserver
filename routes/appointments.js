@@ -270,16 +270,22 @@ router.get("/clients", async (req, res) => {
         const search = String(req.query.search || "").trim();
         const searchValue = `%${search}%`;
         const [rows] = await pool.query(
-            `SELECT c.username, p.name, p.email
+            `SELECT c.username, p.name, p.mobile, p.country_code, p.email
              FROM clients c
              JOIN profile p ON p.username = c.username AND p.status = '1'
+             INNER JOIN (
+                 SELECT username, MAX(id) AS profile_id
+                 FROM profile
+                 WHERE status = '1'
+                 GROUP BY username
+             ) latest ON latest.profile_id = p.id
              WHERE c.branch_id = ? AND c.user_type = 'client'
                AND c.status = '1'
                AND (c.is_deleted = '0' OR c.is_deleted = 0)
-               AND (? = '' OR p.name LIKE ? OR p.email LIKE ? OR c.username LIKE ?)
-             GROUP BY c.username, p.name, p.email
+               AND (? = '' OR p.name LIKE ? OR p.email LIKE ? OR p.mobile LIKE ? OR c.username LIKE ?)
+             GROUP BY c.username, p.name, p.mobile, p.country_code, p.email
              ORDER BY p.name LIMIT 25`,
-            [req.branch_id, search, searchValue, searchValue, searchValue]
+            [req.branch_id, search, searchValue, searchValue, searchValue, searchValue]
         );
         return res.json({ success: true, data: rows });
     } catch (error) {
@@ -348,6 +354,21 @@ router.get("/", async (req, res) => {
             pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
         });
         const ids = rows.map((row) => row.appointment_id);
+        const clientUsernames = [...new Set(rows.map((row) => String(row.client_username || "")).filter(Boolean))];
+        const clientProfiles = clientUsernames.length
+            ? (await pool.query(
+                `SELECT p.username, p.mobile, p.country_code, p.email
+                 FROM profile p
+                 INNER JOIN (
+                     SELECT username, MAX(id) AS profile_id
+                     FROM profile
+                     WHERE status = '1' AND username IN (${clientUsernames.map(() => "?").join(",")})
+                     GROUP BY username
+                 ) latest ON latest.profile_id = p.id`,
+                clientUsernames
+            ))[0]
+            : [];
+        const profilesByUsername = new Map(clientProfiles.map((profile) => [profile.username, profile]));
         const [attendees] = await pool.query(
             `SELECT appointment_id, attendee_username, attendee_name, attendee_email
              FROM appointment_attendees WHERE appointment_id IN (${ids.map(() => "?").join(",")})
@@ -362,7 +383,16 @@ router.get("/", async (req, res) => {
         }
         return res.json({
             success: true,
-            data: rows.map((row) => ({ ...row, attendees: byAppointment.get(row.appointment_id) || [] })),
+            data: rows.map((row) => {
+                const profile = profilesByUsername.get(row.client_username);
+                return {
+                    ...row,
+                    client_mobile: profile?.mobile || "",
+                    client_country_code: profile?.country_code || "",
+                    client_email: profile?.email || "",
+                    attendees: byAppointment.get(row.appointment_id) || [],
+                };
+            }),
             pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
         });
     } catch (error) {
