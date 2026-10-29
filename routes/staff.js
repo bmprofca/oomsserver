@@ -4,16 +4,17 @@ const router = express.Router();
 import { checkSubscription, requirePlan } from "../middleware/auth.js";
 import pool from "../db.js";
 import { auth, validateBranch } from "../middleware/auth.js";
-import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, USER_DATA, FORMAT_DATE } from "../helpers/function.js";
+import { GET_BALANCE, RANDOM_STRING, UNIQUE_RANDOM_STRING, SHORT_ID_LENGTH, ID_LENGTH, USER_DATA, FORMAT_DATE } from "../helpers/function.js";
 import { getInvitationBaseLink, APP_NAME, BASE_DOMAIN } from '../helpers/Config.js';
 import { buildBranchLogoUrl, buildProfileImageUrl } from '../helpers/mediaUrl.js';
 import { SendMail } from '../helpers/Mail.js';
 import { resolveSoftwareUserByContact, STAFF_STATUS_OTP_TYPE } from "../helpers/authProfile.js";
-import { normalizeCountryCode, normalizeMobileDigits } from "../helpers/clientPhone.js";
+import { PROFILE_COUNTRY_CODE_SQL, PROFILE_MOBILE_SQL, normalizeCountryCode, normalizeMobileDigits } from "../helpers/clientPhone.js";
 import { sendSmsOtp } from "../helpers/smsOtp.js";
 import { generateOtp } from "../helpers/otp.js";
 
 const STAFF_STATUS_MOBILE_REGEX = /^\d{10}$/;
+const STAFF_ADD_OTP_TYPE = "staff_add";
 
 function staffStatusOtpRemark(username, status) {
     return `staff_status:${String(username || "").trim()}:${String(status || "").trim().toLowerCase()}`;
@@ -23,6 +24,34 @@ function maskMobileNumber(mobile) {
     const digits = normalizeMobileDigits(mobile);
     if (!digits || digits.length < 4) return "";
     return `******${digits.slice(-4)}`;
+}
+
+async function canManageStaffInBranch(conn, username, branchId) {
+    const [rows] = await conn.query(
+        `SELECT id
+         FROM branch_mapping
+         WHERE username = ? AND branch_id = ?
+           AND type IN ('admin', 'staff')
+           AND is_accepted = '1' AND status = '1' AND is_deleted = '0'
+         LIMIT 1`,
+        [username, branchId]
+    );
+    return rows.length > 0;
+}
+
+async function findActiveUserByMobile(conn, mobile) {
+    const [rows] = await conn.query(
+        `SELECT u.username
+         FROM users u
+         INNER JOIN profile p ON p.username = u.username AND p.status = '1'
+         WHERE u.status = '1'
+           AND ${PROFILE_MOBILE_SQL} = ?
+           AND ${PROFILE_COUNTRY_CODE_SQL} = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [mobile, normalizeCountryCode("+91")]
+    );
+    return rows[0] || null;
 }
 
 const ALL_PAID_PLANS = ['Business', 'BusinessPlus', 'BusinessPro'];
@@ -794,28 +823,339 @@ router.post('/check-user', auth, validateBranch, async (req, res) => {
             [staff_username, branch_id]
         );
 
+        const userDetails = {
+            username: staff_username,
+            email: staff_data?.email,
+            name: staff_data?.name,
+            mobile: staff_data?.mobile,
+            country_code: staff_data?.country_code,
+        };
+
         if (exist_data.length > 0) {
-            if (exist_data[0]?.is_accepted == '1') {
-                return res.status(200).json({ success: true, message: 'Staff already exists' });
-            } else {
-                return res.status(200).json({ success: true, message: 'Staff already exists but not accepted yet' });
-            }
+            const isAccepted = exist_data[0]?.is_accepted == '1';
+            return res.status(200).json({
+                success: true,
+                code: 'STAFF_ALREADY_IN_BRANCH',
+                message: isAccepted ? 'Staff already exists' : 'Staff already exists but not accepted yet',
+                data: {
+                    ...userDetails,
+                    already_assigned: true,
+                    is_accepted: isAccepted,
+                },
+            });
         }
 
         return res.status(200).json({
             success: true,
             message: 'User details fetched successfully',
-            data: {
-                username: staff_username,
-                email: staff_data?.email,
-                name: staff_data?.name,
-                mobile: staff_data?.mobile,
-                country_code: staff_data?.country_code,
-            }
+            data: userDetails,
         })
     } catch (error) {
         console.error('Error checking user:', error);
         return res.status(500).json({ success: false, message: 'Failed to check user', error: error.message });
+    }
+});
+
+router.post('/otp/send', auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const mobile = normalizeMobileDigits(req.body?.mobile);
+        const name = String(req.body?.name || "").trim();
+        const designation = String(req.body?.designation || "").trim();
+        const username = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const branchId = req.branch_id;
+
+        if (!STAFF_STATUS_MOBILE_REGEX.test(mobile)) {
+            return res.status(400).json({ success: false, message: "Enter a valid 10-digit mobile number." });
+        }
+        if (!username) {
+            return res.status(401).json({ success: false, message: "Authentication required." });
+        }
+
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        if (!(await canManageStaffInBranch(conn, username, branchId))) {
+            await conn.rollback();
+            return res.status(403).json({ success: false, message: "Only an active branch admin or staff member can add staff." });
+        }
+
+        if (await findActiveUserByMobile(conn, mobile)) {
+            await conn.rollback();
+            return res.status(409).json({
+                success: false,
+                code: "STAFF_ACCOUNT_EXISTS",
+                message: "This mobile number already has an Ooms account. Find the user and send a staff invitation instead.",
+            });
+        }
+
+        const [hourlyOtpCount] = await conn.query(
+            `SELECT COUNT(*) AS sent_last_hour
+             FROM otps
+             WHERE type = ? AND country_code = ? AND mobile = ?
+               AND create_date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 HOUR)`,
+            [STAFF_ADD_OTP_TYPE, normalizeCountryCode("+91"), mobile]
+        );
+        if (Number(hourlyOtpCount[0]?.sent_last_hour || 0) >= 5) {
+            await conn.rollback();
+            return res.status(429).json({ success: false, message: "Too many verification codes requested. Please try again later." });
+        }
+
+        const [recentOtps] = await conn.query(
+            `SELECT id
+             FROM otps
+             WHERE type = ? AND country_code = ? AND mobile = ?
+               AND create_date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 60 SECOND)
+             ORDER BY id DESC
+             LIMIT 1`,
+            [STAFF_ADD_OTP_TYPE, normalizeCountryCode("+91"), mobile]
+        );
+        if (recentOtps.length) {
+            await conn.rollback();
+            return res.status(429).json({ success: false, message: "Please wait a minute before requesting another OTP." });
+        }
+
+        const otpId = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
+        const otp = generateOtp(6);
+        const remark = JSON.stringify({
+            branch_id: branchId,
+            requested_by: username,
+            name,
+            designation,
+            attempts: 0,
+        });
+
+        await conn.query(
+            "UPDATE otps SET status = '1' WHERE type = ? AND mobile = ? AND status = '0'",
+            [STAFF_ADD_OTP_TYPE, mobile]
+        );
+        await conn.query(
+            `INSERT INTO otps
+             (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
+             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE), '0', ?)`,
+            [otpId, STAFF_ADD_OTP_TYPE, otp, mobile, normalizeCountryCode("+91"), mobile, remark]
+        );
+        await conn.commit();
+
+        try {
+            await sendSmsOtp({ country_code: normalizeCountryCode("+91"), mobile, otp });
+        } catch (sendError) {
+            await pool.query("UPDATE otps SET status = '1' WHERE otp_id = ?", [otpId]);
+            console.error("STAFF ADD OTP SMS ERROR:", sendError?.message || sendError);
+            return res.status(502).json({
+                success: false,
+                message: sendError?.message || "Failed to send verification code. Please try again.",
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: `Verification code sent to ${maskMobileNumber(mobile)}.`,
+            mobile_masked: maskMobileNumber(mobile),
+            expire_seconds: 300,
+        });
+    } catch (error) {
+        if (conn) {
+            try { await conn.rollback(); } catch (_) {}
+        }
+        console.error("STAFF ADD OTP SEND ERROR:", error);
+        return res.status(500).json({ success: false, message: "Failed to send staff verification code." });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+router.post('/otp/verify-create', auth, validateBranch, async (req, res) => {
+    let conn;
+    try {
+        const mobile = normalizeMobileDigits(req.body?.mobile);
+        const otp = String(req.body?.otp || "").trim();
+        const username = String(req.headers["username"] || req.headers["Username"] || "").trim();
+        const branchId = req.branch_id;
+
+        if (!STAFF_STATUS_MOBILE_REGEX.test(mobile)) {
+            return res.status(400).json({ success: false, message: "Enter a valid 10-digit mobile number." });
+        }
+        if (!/^\d{6}$/.test(otp)) {
+            return res.status(400).json({ success: false, message: "Enter the 6-digit verification code." });
+        }
+        if (!username) {
+            return res.status(401).json({ success: false, message: "Authentication required." });
+        }
+
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
+        if (!(await canManageStaffInBranch(conn, username, branchId))) {
+            await conn.rollback();
+            return res.status(403).json({ success: false, message: "Only an active branch admin or staff member can add staff." });
+        }
+
+        if (await findActiveUserByMobile(conn, mobile)) {
+            await conn.rollback();
+            return res.status(409).json({
+                success: false,
+                code: "STAFF_ACCOUNT_EXISTS",
+                message: "This mobile number already has an Ooms account. Find the user and send a staff invitation instead.",
+            });
+        }
+
+        const [otpRows] = await conn.query(
+            `SELECT id, otp, remark
+             FROM otps
+             WHERE type = ? AND username = ? AND country_code = ? AND mobile = ?
+               AND status = '0' AND expire_date >= CURRENT_TIMESTAMP
+             ORDER BY id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [STAFF_ADD_OTP_TYPE, mobile, normalizeCountryCode("+91"), mobile]
+        );
+        if (!otpRows.length) {
+            await conn.rollback();
+            return res.status(400).json({ success: false, message: "No active verification code found. Request a new code." });
+        }
+
+        const otpRow = otpRows[0];
+        let context;
+        try {
+            context = JSON.parse(otpRow.remark || "{}");
+        } catch {
+            await conn.query("UPDATE otps SET status = '1' WHERE id = ?", [otpRow.id]);
+            await conn.commit();
+            return res.status(400).json({ success: false, message: "Verification request expired. Request a new code." });
+        }
+
+        if (context.branch_id !== branchId || context.requested_by !== username) {
+            await conn.rollback();
+            return res.status(400).json({ success: false, message: "This verification code is not valid for this branch request." });
+        }
+
+        if (String(otpRow.otp) !== otp) {
+            const attempts = Number(context.attempts || 0) + 1;
+            context.attempts = attempts;
+            await conn.query(
+                "UPDATE otps SET remark = ?, status = ? WHERE id = ?",
+                [JSON.stringify(context), attempts >= 5 ? "1" : "0", otpRow.id]
+            );
+            await conn.commit();
+            return res.status(400).json({
+                success: false,
+                message: attempts >= 5
+                    ? "Too many incorrect attempts. Request a new verification code."
+                    : `Incorrect verification code. ${5 - attempts} attempt(s) remaining.`,
+            });
+        }
+
+        const [existingUser] = await conn.query(
+            `SELECT u.username
+             FROM users u
+             INNER JOIN profile p ON p.username = u.username AND p.status = '1'
+             WHERE u.status = '1'
+               AND ${PROFILE_MOBILE_SQL} = ?
+               AND ${PROFILE_COUNTRY_CODE_SQL} = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [mobile, normalizeCountryCode("+91")]
+        );
+
+        let staffUsername = existingUser[0]?.username || null;
+        let accountCreated = false;
+
+        if (!staffUsername) {
+            if (!String(context.name || "").trim()) {
+                await conn.rollback();
+                return res.status(400).json({ success: false, message: "Staff member name is required for a new account." });
+            }
+            staffUsername = await UNIQUE_RANDOM_STRING("users", "username", {
+                conn,
+                prefix: "usr_",
+                length: ID_LENGTH,
+            });
+            const profileId = await UNIQUE_RANDOM_STRING("profile", "profile_id", { conn });
+            await conn.query(
+                `INSERT INTO users (username, create_by, status, remark, create_date)
+                 VALUES (?, ?, '1', ?, NOW())`,
+                [staffUsername, staffUsername, "Created through verified staff onboarding"]
+            );
+            await conn.query(
+                `INSERT INTO profile
+                 (profile_id, username, create_by, user_type, name, mobile, country_code, status, create_date)
+                 VALUES (?, ?, ?, 'user', ?, ?, ?, '1', NOW())`,
+                [profileId, staffUsername, staffUsername, context.name, mobile, normalizeCountryCode("+91")]
+            );
+            accountCreated = true;
+        }
+
+        const [mappingRows] = await conn.query(
+            `SELECT id, map_id, type, is_deleted
+             FROM branch_mapping
+             WHERE username = ? AND branch_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [staffUsername, branchId]
+        );
+        const priorMapping = mappingRows[0];
+        if (priorMapping && priorMapping.is_deleted !== "1" && priorMapping.is_deleted !== 1) {
+            const isPendingStaff = priorMapping.type === "staff"
+                && String(priorMapping.is_accepted) !== "1";
+            if (!isPendingStaff) {
+                await conn.rollback();
+                return res.status(409).json({
+                    success: false,
+                    message: priorMapping.type === "staff"
+                        ? "This person is already added to this branch."
+                        : "This mobile number belongs to a user with a different role in this branch.",
+                });
+            }
+        }
+
+        let mapId = priorMapping?.map_id;
+        if (priorMapping) {
+            await conn.query(
+                `UPDATE branch_mapping
+                 SET designation = ?, modify_by = ?, type = 'staff', is_accepted = '1',
+                     invitation_token = NULL, status = '1', is_deleted = '0', modify_date = NOW()
+                 WHERE id = ?`,
+                [context.designation || null, username, priorMapping.id]
+            );
+        } else {
+            mapId = await UNIQUE_RANDOM_STRING("branch_mapping", "map_id", {
+                length: SHORT_ID_LENGTH,
+                prefix: `MAP_${Date.now()}_`,
+                conn,
+            });
+            await conn.query(
+                `INSERT INTO branch_mapping
+                 (map_id, branch_id, username, designation, create_by, modify_by, type,
+                  is_accepted, invitation_token, status, is_deleted, create_date, modify_date)
+                 VALUES (?, ?, ?, ?, ?, ?, 'staff', '1', NULL, '1', '0', NOW(), NOW())`,
+                [mapId, branchId, staffUsername, context.designation || null, username, username]
+            );
+        }
+
+        await conn.query("UPDATE otps SET status = '1' WHERE id = ?", [otpRow.id]);
+        await conn.commit();
+
+        return res.status(201).json({
+            success: true,
+            message: "Staff member added successfully.",
+            data: {
+                username: staffUsername,
+                branch_id: branchId,
+                map_id: mapId,
+                account_created: accountCreated,
+                is_accepted: true,
+            },
+        });
+    } catch (error) {
+        if (conn) {
+            try { await conn.rollback(); } catch (_) {}
+        }
+        console.error("STAFF ADD OTP VERIFY/CREATE ERROR:", error);
+        return res.status(500).json({ success: false, message: "Failed to verify code and add staff member." });
+    } finally {
+        if (conn) conn.release();
     }
 });
 
