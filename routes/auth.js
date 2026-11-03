@@ -4,7 +4,7 @@ import pool from "../db.js";
 import { FORMAT_DATE, RANDOM_STRING, UNIQUE_RANDOM_STRING, ID_LENGTH } from "../helpers/function.js";
 import { getGoogleClientId } from "../helpers/Config.js";
 import { OAuth2Client } from "google-auth-library";
-import { generateOtp } from "../helpers/otp.js";
+import { generateOtp, resolveLoginOtp, isDemoOfficeMobile } from "../helpers/otp.js";
 import { sendSmsOtp } from "../helpers/smsOtp.js";
 import {
     findSoftwareUserByEmail,
@@ -469,7 +469,8 @@ router.post("/login/send-otp", async (req, res) => {
         }
 
         const otp_id = await UNIQUE_RANDOM_STRING("otps", "otp_id", { conn });
-        const otp = generateOtp(6);
+        const demoLogin = isDemoOfficeMobile(otpMobile);
+        const otp = resolveLoginOtp(otpMobile, 6);
 
         await conn.execute(
             `UPDATE otps
@@ -486,7 +487,16 @@ router.post("/login/send-otp", async (req, res) => {
             `INSERT INTO otps
          (otp_id, type, otp, username, country_code, mobile, create_date, expire_date, status, remark)
         VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE),?,?)`,
-            [otp_id, USER_OTP_TYPE, otp, db_username, otpCountryCode, otpMobile, "0", "User login OTP"]
+            [
+                otp_id,
+                USER_OTP_TYPE,
+                otp,
+                db_username,
+                otpCountryCode,
+                otpMobile,
+                "0",
+                demoLogin ? "Demo office login OTP (fixed)" : "User login OTP",
+            ]
         );
 
         const [otpMeta] = await conn.query(
@@ -496,26 +506,31 @@ router.post("/login/send-otp", async (req, res) => {
 
         await conn.commit();
 
-        try {
-            await sendSmsOtp({
-                country_code: otpCountryCode,
-                mobile: otpMobile,
-                otp,
-            });
-        } catch (sendError) {
-            console.error("LOGIN OTP SMS ERROR:", sendError?.message || sendError);
-            return res.status(502).json({
-                success: false,
-                message:
-                    sendError?.message ||
-                    "Failed to send OTP SMS. Please try again in a moment.",
-            });
+        // Demo account uses a fixed OTP; skip SMS so shareable demos work without Fast2SMS.
+        if (!demoLogin) {
+            try {
+                await sendSmsOtp({
+                    country_code: otpCountryCode,
+                    mobile: otpMobile,
+                    otp,
+                });
+            } catch (sendError) {
+                console.error("LOGIN OTP SMS ERROR:", sendError?.message || sendError);
+                return res.status(502).json({
+                    success: false,
+                    message:
+                        sendError?.message ||
+                        "Failed to send OTP SMS. Please try again in a moment.",
+                });
+            }
         }
 
         return res.status(200).json({
             success: true,
-            message: "OTP sent to your registered mobile number.",
-            channel: "mobile",
+            message: demoLogin
+                ? "Demo OTP ready. Use the shared demo code to sign in."
+                : "OTP sent to your registered mobile number.",
+            channel: demoLogin ? "demo" : "mobile",
             mobile_masked: `******${otpMobile.slice(-4)}`,
             expire: FORMAT_DATE(otpMeta?.[0]?.expire_date) ?? null,
         });

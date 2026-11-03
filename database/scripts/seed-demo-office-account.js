@@ -9,8 +9,8 @@
  *  - Sample clients + firms
  *  - Sample tasks
  *
- * Note: CLIENT_WEB login is OTP-only (password was removed). Password "123456"
- * cannot be used for login — use mobile OTP after registration/login.
+ * Note: CLIENT_WEB login is OTP-only. For this demo mobile, login OTP is always
+ * "123456" (see helpers/otp.js DEMO_OFFICE_OTP) — SMS is skipped for that number.
  *
  * Usage:
  *   node database/scripts/seed-demo-office-account.js
@@ -592,7 +592,7 @@ async function main() {
         console.log("\n=== DEMO ACCOUNT READY ===");
         console.log(`Portal:        CLIENT_WEB (Office)`);
         console.log(`Mobile:        ${DEMO_MOBILE}`);
-        console.log(`Login:         OTP only (no password — CLIENT_WEB removed password login)`);
+        console.log(`Login:         OTP only — fixed demo OTP 123456`);
         console.log(`Name:          ${DEMO_NAME}`);
         console.log(`Email:         ${DEMO_EMAIL}`);
         console.log(`Username:      ${user.username}`);
@@ -605,7 +605,7 @@ async function main() {
         console.log("\nHow to share:");
         console.log(`1. Open CLIENT_WEB login`);
         console.log(`2. Enter mobile ${DEMO_MOBILE}`);
-        console.log(`3. Request OTP (or read latest unused OTP from otps table if SMS is off)`);
+        console.log(`3. Request OTP, then enter 123456`);
         console.log(`4. Select branch "${BRANCH_NAME}"`);
     } catch (error) {
         try {
